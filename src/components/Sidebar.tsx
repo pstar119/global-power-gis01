@@ -15,7 +15,7 @@ export interface MenuItem {
 export const MENU_ITEMS: readonly MenuItem[] = [
   { key: "map", label: "地图", hint: "地图视窗（待开发，下一阶段接入 PMTiles 引擎）" },
   { key: "stats", label: "统计", hint: "全球电力设施统计（待接入数据）" },
-  { key: "settings", label: "设置", hint: "设置页面（待开发，目前处于第二阶段）" },
+  { key: "settings", label: "设置", hint: "系统设置（规划中）" },
 ];
 
 interface SidebarProps {

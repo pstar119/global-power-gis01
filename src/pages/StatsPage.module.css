@@ -8,6 +8,16 @@
   padding: 1.5rem;
 }
 
+/* 页面标题：h2 要显式重置浏览器默认的 margin/font-size，
+   否则 1.5em 字号 + 0.83em 上下外边距会把卡片顶下去 */
+.pageTitle {
+  margin: 0 0 12px;
+  color: var(--gpg-text);
+  font-size: 1rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
 /* ---------- 顶部：统计卡片排（4 列等宽） ---------- */
 
 .statGrid {

@@ -1,0 +1,75 @@
+/* ==========================================================
+   设置页：系统选项 UI 骨架（全部 disabled，仅展示规划）
+   颜色全部取自 App.css 的 --gpg-* 深色令牌
+   注：GreetSelfCheck 的样式仍留在 AppLayout.module.css，本阶段未改动它
+   ========================================================== */
+
+.page {
+  box-sizing: border-box;
+  padding: 1.5rem;
+}
+
+/* 与统计页保持同一视觉层级（h2 必须显式重置浏览器默认的 1.5em 字号 / 0.83em 外边距） */
+.pageTitle {
+  margin: 0 0 12px;
+  color: var(--gpg-text);
+  font-size: 1rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+/* ---------- 设置卡片 ---------- */
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  box-sizing: border-box;
+  padding: 1rem 1.25rem;
+  border: 1px solid var(--gpg-border);
+  border-radius: 8px;
+  background-color: var(--gpg-panel-bg);
+}
+
+/* label 定宽列 + 控件自适应：让三行的 label / select 左边缘严格对齐。
+   用 Grid 而非 Flex —— Flex 下每行需各写 flex: 0 0 160px，列宽还易随内容漂移 */
+.settingRow {
+  display: grid;
+  grid-template-columns: 160px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+}
+
+.settingLabel {
+  color: var(--gpg-text);
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+
+/* ⚠️ App.css 的全局控件样式只覆盖 input / button，不含 select，
+   所以 select 必须自己把深色外观写全，否则会露出浏览器默认的浅色样式。
+   原生下拉列表的深色由 :root 的 color-scheme: dark 保证，无需 appearance: none。 */
+.settingSelect {
+  min-width: 0;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--gpg-border);
+  border-radius: 6px;
+  background-color: #3c3c3c;
+  color: var(--gpg-text);
+  font: inherit;
+  font-size: 0.85rem;
+}
+
+.settingSelect:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
+/* ---------- 窄窗口降级（Tauri 窗口可自由缩放） ---------- */
+
+@media (max-width: 620px) {
+  .settingRow {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 6px;
+  }
+}

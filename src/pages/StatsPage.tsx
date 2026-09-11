@@ -20,6 +20,11 @@ const CHARTS = [
   { key: "secondary", label: "图表渲染区域（待接入数据）" },
 ] as const;
 
+interface StatsPageProps {
+  /** 页面标题（来自侧边栏菜单定义，保持单一数据源） */
+  hint: string;
+}
+
 function StatCard({ label, value, unit }: StatItem) {
   return (
     <div className={styles.statCard}>
@@ -32,9 +37,11 @@ function StatCard({ label, value, unit }: StatItem) {
   );
 }
 
-function StatsPage() {
+function StatsPage({ hint }: StatsPageProps) {
   return (
     <div className={styles.page}>
+      <h2 className={styles.pageTitle}>{hint}</h2>
+
       <div className={styles.statGrid}>
         {STATS.map((item) => (
           <StatCard key={item.label} {...item} />

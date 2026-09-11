@@ -1,29 +1,24 @@
 import { useState } from "react";
 import Sidebar, { MENU_ITEMS, type MenuKey } from "./Sidebar";
 import TopBar from "./TopBar";
-import GreetSelfCheck from "./GreetSelfCheck";
 import MapPage from "../pages/MapPage";
 import StatsPage from "../pages/StatsPage";
+import SettingsPage from "../pages/SettingsPage";
 import styles from "./AppLayout.module.css";
 
 const APP_TITLE = "Global Power GIS";
 
-/** 按当前菜单项渲染内容区：地图页全出血，统计/设置页自带留白 */
+/** 按当前菜单项渲染内容区；三个页面各自管理留白与内容 */
 function renderContent(key: MenuKey, hint: string) {
   switch (key) {
     case "map":
       return <MapPage hint={hint} />;
 
     case "stats":
-      return <StatsPage />;
+      return <StatsPage hint={hint} />;
 
     case "settings":
-      return (
-        <div className={styles.padded}>
-          <p className={styles.placeholder}>{hint}</p>
-          <GreetSelfCheck />
-        </div>
-      );
+      return <SettingsPage hint={hint} />;
 
     default:
       return null;
