@@ -12,7 +12,7 @@ const APP_TITLE = "Global Power GIS";
 function renderContent(key: MenuKey, hint: string) {
   switch (key) {
     case "map":
-      return <MapPage hint={hint} />;
+      return <MapPage />;
 
     case "stats":
       return <StatsPage hint={hint} />;

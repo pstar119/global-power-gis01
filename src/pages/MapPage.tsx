@@ -1,22 +1,50 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+// 仅用命名导入：maplibre-gl 的类型声明不提供 default export
+import { Map as MapLibreMap } from "maplibre-gl";
+import "maplibre-gl/dist/maplibre-gl.css";
 import styles from "./MapPage.module.css";
 
 /** 图层清单：纯 UI 占位，不含任何真实数据 */
 const LAYERS = ["电厂", "变电站", "输电线路"] as const;
 
-interface MapPageProps {
-  /** 视窗占位提示（来自侧边栏菜单定义，保持单一数据源） */
-  hint: string;
-}
+/** MapLibre 官方演示瓦片（全球国界示例，不含任何电力数据） */
+const DEMO_STYLE_URL = "https://demotiles.maplibre.org/style.json";
+const INITIAL_CENTER: [number, number] = [17.6543, 32.9541];
+const INITIAL_ZOOM = 1.2;
 
-function MapPage({ hint }: MapPageProps) {
+function MapPage() {
+  const mapContainerRef = useRef<HTMLDivElement>(null);
+  const mapRef = useRef<MapLibreMap | null>(null);
+
   // 图层控制面板的展开 / 折叠
   const [panelOpen, setPanelOpen] = useState(true);
 
-  // 图层可见性：纯视觉开关，不加载任何数据、不影响任何渲染
+  // 图层可见性：纯视觉开关，不加载任何数据
   const [visibleLayers, setVisibleLayers] = useState<readonly string[]>(() => [
     ...LAYERS,
   ]);
+
+  // 地图实例的创建与销毁都在这个 effect 里。
+  // ⚠️ main.tsx 开了 React StrictMode，开发模式下 effect 会「执行 → 清理 → 再执行」，
+  //    所以 cleanup 必须真的 map.remove()，否则会出现“容器已初始化”报错或实例泄漏。
+  useEffect(() => {
+    if (!mapContainerRef.current) return;
+
+    const map = new MapLibreMap({
+      container: mapContainerRef.current,
+      style: DEMO_STYLE_URL,
+      center: INITIAL_CENTER,
+      zoom: INITIAL_ZOOM,
+      // 保留版权信息（合规），右下角紧凑显示，不与我们左下角的比例尺冲突
+      attributionControl: { compact: true },
+    });
+    mapRef.current = map;
+
+    return () => {
+      map.remove();
+      mapRef.current = null;
+    };
+  }, []);
 
   const toggleLayer = (name: string) => {
     setVisibleLayers((prev) =>
@@ -26,6 +54,9 @@ function MapPage({ hint }: MapPageProps) {
 
   return (
     <div className={styles.viewport}>
+      {/* 地图画布容器：铺满视窗，位于悬浮 UI 之下 */}
+      <div ref={mapContainerRef} className={styles.mapContainer} />
+
       {/* 左上角：图层控制 */}
       <section className={styles.layerPanel} aria-label="图层控制">
         <button
@@ -62,24 +93,31 @@ function MapPage({ hint }: MapPageProps) {
         </ul>
       </section>
 
-      {/* 右上角：缩放控件（只有 :active 按压反馈，不改变任何状态） */}
+      {/* 右上角：缩放控件（已接真实地图） */}
       <div className={styles.zoomControl} role="group" aria-label="缩放控件">
-        <button type="button" className={styles.zoomBtn} aria-label="放大">
+        <button
+          type="button"
+          className={styles.zoomBtn}
+          aria-label="放大"
+          onClick={() => mapRef.current?.zoomIn()}
+        >
           +
         </button>
-        <button type="button" className={styles.zoomBtn} aria-label="缩小">
+        <button
+          type="button"
+          className={styles.zoomBtn}
+          aria-label="缩小"
+          onClick={() => mapRef.current?.zoomOut()}
+        >
           −
         </button>
       </div>
 
-      {/* 左下角：比例尺 */}
+      {/* 左下角：比例尺（仍为静态占位，下一阶段接 map.getScale()） */}
       <div className={styles.scaleBar}>
         <span className={styles.scaleTrack} aria-hidden="true" />
         <span className={styles.scaleLabel}>500 km</span>
       </div>
-
-      {/* 视窗中央：占位提示 */}
-      <p className={styles.viewportHint}>{hint}</p>
     </div>
   );
 }
