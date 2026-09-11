@@ -2,6 +2,7 @@ import { useState } from "react";
 import Sidebar, { MENU_ITEMS, type MenuKey } from "./Sidebar";
 import TopBar from "./TopBar";
 import GreetSelfCheck from "./GreetSelfCheck";
+import MapPage from "../pages/MapPage";
 import styles from "./AppLayout.module.css";
 
 const APP_TITLE = "Global Power GIS";
@@ -24,9 +25,15 @@ function AppLayout() {
         <TopBar title={APP_TITLE} />
 
         <section className={styles.content} aria-label={activeItem.label}>
-          <p className={styles.placeholder}>{activeItem.hint}</p>
+          {activeKey === "map" ? (
+            <MapPage />
+          ) : (
+            <div className={styles.padded}>
+              <p className={styles.placeholder}>{activeItem.hint}</p>
 
-          {activeKey === "settings" && <GreetSelfCheck />}
+              {activeKey === "settings" && <GreetSelfCheck />}
+            </div>
+          )}
         </section>
       </div>
     </div>

@@ -96,6 +96,12 @@
   flex: 1;
   min-height: 0;
   overflow: auto;
+  /* 内边距交给各页自己管：地图页要全出血铺满，其余页面用 .padded 补回留白 */
+  padding: 0;
+}
+
+/* 非地图页的内容容器（统计 / 设置），负责补回内容区留白 */
+.padded {
   padding: 1.5rem;
 }
 
