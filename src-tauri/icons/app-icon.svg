@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-label="Global Power GIS">
+  <title>Global Power GIS</title>
+
+  <!-- 深色圆角底：与应用主题底色 #1e1e1e 一致 -->
+  <rect width="1024" height="1024" rx="208" fill="#1e1e1e"/>
+
+  <!-- 地球：圆 + 赤道 + 一条经线。
+       线宽按「16px 时 1px ≈ viewBox 里的 64 单位」反复实测标定：
+         圆环 56 ≈ 0.88px、赤道 48 ≈ 0.75px —— 16px 下能立住；
+         经线 18 ≈ 0.28px —— 16px 下会自然淡出（这是刻意的降级），
+           它只服务于 ≥32px 的“地球感”，小尺寸不参与识别。
+       上一版经线用 30，实测把球体内部整列染蓝（蓝色像素 76/245），
+       中心变糊，故收到 18。 -->
+  <g fill="none" stroke="#007acc" stroke-linecap="round">
+    <circle cx="512" cy="512" r="292" stroke-width="56"/>
+    <line x1="220" y1="512" x2="804" y2="512" stroke-width="48"/>
+    <ellipse cx="512" cy="512" rx="140" ry="292" stroke-width="18"/>
+  </g>
+
+  <!-- 电力符号：闪电。16px 下唯一承载识别度的元素，画到接近圆环内接尺寸。
+       深色描边 16：初版 44 会吃掉闪电近 1.4px 宽度（白色只剩 3 个像素），
+       现收到 16，保留与蓝线的分离感同时不吞掉白形。 -->
+  <path d="M600 250 L370 556 L494 556 L445 775 L665 448 L541 448 Z"
+        fill="#ffffff" stroke="#1e1e1e" stroke-width="16" stroke-linejoin="round"/>
+</svg>
