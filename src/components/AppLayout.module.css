@@ -1,0 +1,147 @@
+/* ---------- 整体骨架 ---------- */
+
+.shell {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+}
+
+.main {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ---------- 左侧侧边栏 ---------- */
+
+.sidebar {
+  flex: 0 0 180px;
+  width: 180px;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0.75rem 0.5rem;
+  border-right: 1px solid var(--gpg-border);
+  background-color: var(--gpg-sidebar-bg);
+}
+
+.menu {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.menuItem {
+  display: block;
+  width: 100%;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background-color: transparent;
+  box-shadow: none;
+  color: inherit;
+  font: inherit;
+  font-size: 0.9rem;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.menuItem:hover,
+.menuItem:active {
+  border-color: transparent;
+  background-color: var(--gpg-hover);
+  box-shadow: none;
+  color: inherit;
+}
+
+/* 覆盖 App.css 里 `input, button { outline: none }`，保住键盘焦点可见性 */
+.menuItem:focus-visible {
+  outline: 2px solid var(--gpg-accent);
+  outline-offset: 2px;
+}
+
+.menuItemActive,
+.menuItemActive:hover,
+.menuItemActive:active {
+  background-color: var(--gpg-active-bg);
+  color: var(--gpg-active-fg);
+  font-weight: 600;
+}
+
+/* ---------- 顶部导航栏 ---------- */
+
+.topbar {
+  flex: 0 0 48px;
+  display: flex;
+  align-items: center;
+  padding: 0 1.25rem;
+  border-bottom: 1px solid var(--gpg-border);
+  background-color: var(--gpg-panel-bg);
+}
+
+.topbarTitle {
+  font-size: 0.95rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+/* ---------- 主内容区（留白） ---------- */
+
+.content {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 1.5rem;
+}
+
+.placeholder {
+  margin: 0;
+  color: var(--gpg-muted);
+  font-size: 0.9rem;
+}
+
+/* ---------- 设置页内的后端自检块 ---------- */
+
+.selfCheck {
+  max-width: 420px;
+  margin-top: 2rem;
+  padding: 1rem 1.25rem;
+  border: 1px solid var(--gpg-border);
+  border-radius: 8px;
+  background-color: var(--gpg-panel-bg);
+}
+
+.selfCheckTitle {
+  margin: 0 0 0.5rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.selfCheckHint {
+  margin: 0 0 0.75rem;
+  color: var(--gpg-muted);
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
+.selfCheckForm {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.selfCheckForm input {
+  flex: 1;
+  min-width: 0;
+}
+
+.selfCheckResult {
+  min-height: 1.25rem;
+  margin: 0.75rem 0 0;
+  color: var(--gpg-muted);
+  font-size: 0.85rem;
+}

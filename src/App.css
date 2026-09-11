@@ -13,28 +13,29 @@
   -moz-osx-font-smoothing: grayscale;
   -webkit-text-size-adjust: 100%;
   text-size-adjust: 100%;
+
+  /* ---- 第二阶段：全局布局主题变量 ---- */
+  --gpg-panel-bg: #ffffff;
+  --gpg-sidebar-bg: #ececec;
+  --gpg-border: #dcdcdc;
+  --gpg-hover: #e2e2e2;
+  --gpg-active-bg: #dbe4ff;
+  --gpg-active-fg: #2b4acb;
+  --gpg-muted: #6b6b6b;
+  --gpg-accent: #396cd8;
 }
 
-.container {
+/* 布局基础：必须让 html / body / #root 撑满窗口，
+   否则侧边栏与顶栏无法铺满高度（脚手架原本靠 padding-top: 10vh 居中，没有撑高逻辑） */
+html,
+body,
+#root {
+  height: 100%;
   margin: 0;
-  padding-top: 10vh;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 0.25rem;
-  text-align: center;
 }
 
-.subtitle {
-  margin: 0 0 1.5rem;
-  font-size: 0.95rem;
-  color: #6b6b6b;
-}
-
-.row {
-  display: flex;
-  justify-content: center;
+body {
+  overflow: hidden;
 }
 
 a {
@@ -45,11 +46,6 @@ a {
 
 a:hover {
   color: #535bf2;
-}
-
-h1 {
-  margin: 0;
-  text-align: center;
 }
 
 input,
@@ -83,22 +79,23 @@ button {
   outline: none;
 }
 
-#greet-input {
-  margin-right: 5px;
-}
-
 @media (prefers-color-scheme: dark) {
   :root {
     color: #f6f6f6;
     background-color: #2f2f2f;
+
+    --gpg-panel-bg: #1e1e1e;
+    --gpg-sidebar-bg: #262626;
+    --gpg-border: #3d3d3d;
+    --gpg-hover: #333333;
+    --gpg-active-bg: #23324f;
+    --gpg-active-fg: #8ab4ff;
+    --gpg-muted: #b0b0b0;
+    --gpg-accent: #24c8db;
   }
 
   a:hover {
     color: #24c8db;
-  }
-
-  .subtitle {
-    color: #b0b0b0;
   }
 
   input,
