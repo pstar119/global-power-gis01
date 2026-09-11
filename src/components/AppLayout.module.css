@@ -81,7 +81,7 @@
   align-items: center;
   padding: 0 1.25rem;
   border-bottom: 1px solid var(--gpg-border);
-  background-color: var(--gpg-panel-bg);
+  background-color: var(--gpg-topbar-bg);
 }
 
 .topbarTitle {

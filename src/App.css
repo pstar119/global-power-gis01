@@ -4,8 +4,13 @@
   line-height: 24px;
   font-weight: 400;
 
-  color: #0f0f0f;
-  background-color: #f6f6f6;
+  /* 第三阶段：强制深色主题。
+     工业 GIS 界面固定深色，不跟随系统浅色；
+     color-scheme 让 WebView 的原生滚动条 / 输入框光标 / 自动填充也走深色渲染。 */
+  color-scheme: dark;
+
+  color: var(--gpg-text);
+  background-color: var(--gpg-bg);
 
   font-synthesis: none;
   text-rendering: optimizeLegibility;
@@ -14,15 +19,18 @@
   -webkit-text-size-adjust: 100%;
   text-size-adjust: 100%;
 
-  /* ---- 第二阶段：全局布局主题变量 ---- */
-  --gpg-panel-bg: #ffffff;
-  --gpg-sidebar-bg: #ececec;
-  --gpg-border: #dcdcdc;
-  --gpg-hover: #e2e2e2;
-  --gpg-active-bg: #dbe4ff;
-  --gpg-active-fg: #2b4acb;
-  --gpg-muted: #6b6b6b;
-  --gpg-accent: #396cd8;
+  /* ---- 全局配色令牌（深色） ---- */
+  --gpg-bg: #1e1e1e; /* 全局底色 / 主内容区 */
+  --gpg-sidebar-bg: #252526; /* 侧边栏 */
+  --gpg-topbar-bg: #252526; /* 顶栏（与侧边栏同色，形成“外壳”层） */
+  --gpg-panel-bg: #2d2d30; /* 卡片 */
+  --gpg-border: #3c3c3c; /* 分隔线 / 描边 */
+  --gpg-text: #cccccc; /* 主文字 */
+  --gpg-muted: #8c8c8c; /* 次要 / 提示文字 */
+  --gpg-hover: #2a2d2e; /* 悬停底色 */
+  --gpg-active-bg: #094771; /* 选中项底色 */
+  --gpg-active-fg: #ffffff; /* 选中项文字 */
+  --gpg-accent: #007acc; /* 科技蓝：焦点环 / 描边 */
 }
 
 /* 布局基础：必须让 html / body / #root 撑满窗口，
@@ -40,26 +48,25 @@ body {
 
 a {
   font-weight: 500;
-  color: #646cff;
+  color: var(--gpg-accent);
   text-decoration: inherit;
 }
 
 a:hover {
-  color: #535bf2;
+  color: #4daafc;
 }
 
 input,
 button {
   border-radius: 8px;
-  border: 1px solid transparent;
+  border: 1px solid var(--gpg-border);
   padding: 0.6em 1.2em;
   font-size: 1em;
   font-weight: 500;
   font-family: inherit;
-  color: #0f0f0f;
-  background-color: #ffffff;
-  transition: border-color 0.25s;
-  box-shadow: 0 2px 2px rgba(0, 0, 0, 0.2);
+  color: var(--gpg-text);
+  background-color: #3c3c3c;
+  transition: border-color 0.2s, background-color 0.2s;
 }
 
 button {
@@ -67,11 +74,12 @@ button {
 }
 
 button:hover {
-  border-color: #396cd8;
+  border-color: var(--gpg-accent);
 }
+
 button:active {
-  border-color: #396cd8;
-  background-color: #e8e8e8;
+  border-color: var(--gpg-accent);
+  background-color: #4a4a4d;
 }
 
 input,
@@ -79,31 +87,10 @@ button {
   outline: none;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    color: #f6f6f6;
-    background-color: #2f2f2f;
-
-    --gpg-panel-bg: #1e1e1e;
-    --gpg-sidebar-bg: #262626;
-    --gpg-border: #3d3d3d;
-    --gpg-hover: #333333;
-    --gpg-active-bg: #23324f;
-    --gpg-active-fg: #8ab4ff;
-    --gpg-muted: #b0b0b0;
-    --gpg-accent: #24c8db;
-  }
-
-  a:hover {
-    color: #24c8db;
-  }
-
-  input,
-  button {
-    color: #ffffff;
-    background-color: #0f0f0f98;
-  }
-  button:active {
-    background-color: #0f0f0f69;
-  }
+/* 深色下补回焦点环：上面那条 outline: none 会连键盘焦点提示一起抹掉 */
+input:focus-visible,
+button:focus-visible {
+  outline: 2px solid var(--gpg-accent);
+  outline-offset: 2px;
 }
+
