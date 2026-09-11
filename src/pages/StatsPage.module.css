@@ -1,0 +1,107 @@
+/* ==========================================================
+   统计页：全局统计骨架（纯 UI 占位，无真实数据、无图表库）
+   颜色全部取自 App.css 的 --gpg-* 深色令牌，不写死色值
+   ========================================================== */
+
+.page {
+  box-sizing: border-box;
+  padding: 1.5rem;
+}
+
+/* ---------- 顶部：统计卡片排（4 列等宽） ---------- */
+
+.statGrid {
+  display: grid;
+  /* minmax(0, 1fr) 的 0 很关键：默认 min-width 是 auto，
+     单元格内容偏长时会把网格撑破、列宽不再相等 */
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.statCard {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  box-sizing: border-box;
+  padding: 0.875rem 1rem;
+  border: 1px solid var(--gpg-border);
+  border-radius: 6px;
+  background-color: var(--gpg-panel-bg);
+}
+
+.statLabel {
+  color: var(--gpg-muted);
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
+}
+
+.statValue {
+  display: flex;
+  align-items: baseline;
+  gap: 0.25rem;
+  color: var(--gpg-text);
+  font-size: 1.5rem;
+  font-weight: 600;
+  line-height: 1.1;
+  /* 等宽数字：后续接入真实数值时位数变化不会左右抖动 */
+  font-variant-numeric: tabular-nums;
+}
+
+.statUnit {
+  color: var(--gpg-muted);
+  font-size: 0.75rem;
+  font-weight: 400;
+}
+
+/* ---------- 下方：图表占位（60% : 40%） ----------
+   用 Grid 的 3fr / 2fr 而不是 Flex 的 flex-grow 3/2：
+   实测 Flex（grow 3/2 + basis 0）在 box-sizing:border-box 下会被子项的
+   border+padding 最小尺寸干扰，实际分到 58.7% / 41.3%；Grid 的 fr 是精确的 60/40。
+   minmax(0, …) 同样是为了防内容撑破。 */
+
+.chartRow {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.chartBox {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  box-sizing: border-box;
+  min-height: 260px;
+  padding: 1rem;
+  /* 虚线不用 --gpg-border(#3c3c3c)：压在 #2d2d30 底上几乎看不见 */
+  border: 1px dashed rgba(140, 140, 140, 0.4);
+  border-radius: 6px;
+  background-color: var(--gpg-panel-bg);
+  color: var(--gpg-muted);
+  font-size: 0.8rem;
+  text-align: center;
+}
+
+/* ---------- 窄窗口降级（Tauri 窗口可自由缩放） ----------
+   断点按「内容区可用宽度」反推：窗口宽 - 侧边栏 180 - 页面内边距 48。
+   4 列时每张卡至少需要 ~120px，故 768px 窗口（内容区约 540px）以下折成 2 列。
+   ⚠️ 断点若定得过高（如 900px），Tauri 默认窗口 800×600 就会掉成 2 列，与「横排 4 个」不符。 */
+
+@media (max-width: 768px) {
+  .statGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .chartRow {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 480px) {
+  .statGrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

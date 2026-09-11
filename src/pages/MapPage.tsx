@@ -3,7 +3,12 @@ import styles from "./MapPage.module.css";
 /** 图层清单：纯 UI 占位，不含任何真实数据 */
 const LAYERS = ["电厂", "变电站", "输电线路"] as const;
 
-function MapPage() {
+interface MapPageProps {
+  /** 视窗占位提示（来自侧边栏菜单定义，保持单一数据源） */
+  hint: string;
+}
+
+function MapPage({ hint }: MapPageProps) {
   return (
     <div className={styles.viewport}>
       {/* 左上角：图层控制 */}
@@ -36,6 +41,9 @@ function MapPage() {
         <span className={styles.scaleTrack} aria-hidden="true" />
         <span className={styles.scaleLabel}>500 km</span>
       </div>
+
+      {/* 视窗中央：占位提示 */}
+      <p className={styles.viewportHint}>{hint}</p>
     </div>
   );
 }
