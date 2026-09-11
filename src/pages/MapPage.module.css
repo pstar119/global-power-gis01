@@ -45,15 +45,46 @@
   top: 12px;
   left: 12px;
   min-width: 148px;
-  padding: 0.625rem 0.5rem 0.5rem;
+  padding: 0.375rem;
 }
 
-.panelTitle {
-  margin: 0 0 0.375rem 0.5rem;
+/* 面板标题：“图层控制”从纯文本换成可点击的折叠开关 */
+.panelToggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  width: 100%;
+  padding: 0.375rem 0.5rem;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background-color: transparent;
+  box-shadow: none;
   color: var(--gpg-muted);
+  font: inherit;
   font-size: 0.7rem;
   font-weight: 600;
   letter-spacing: 0.08em;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+/* App.css 的 `button:hover`(0,1,1) 会压过 `.panelToggle`(0,1,0)，必须显式覆盖 */
+.panelToggle:hover,
+.panelToggle:active {
+  border-color: transparent;
+  background-color: var(--gpg-hover);
+  box-shadow: none;
+  color: var(--gpg-text);
+}
+
+/* 折叠箭头：直接用文字符号（与缩放控件的 + / − 一致），不用图标库、不用 <img> */
+.chevron {
+  flex: 0 0 auto;
+  font-size: 0.6rem;
+  line-height: 1;
+  letter-spacing: 0;
 }
 
 .layerList {
@@ -63,6 +94,13 @@
   margin: 0;
   padding: 0;
   list-style: none;
+}
+
+/* ⚠️ 必需：作者样式 `.layerList{display:flex}` 会盖掉浏览器默认的
+   `[hidden]{display:none}`（作者样式优先级高于 UA 样式），
+   不加这条，折叠后列表根本隐藏不掉。 */
+.layerList[hidden] {
+  display: none;
 }
 
 .layerBtn {
@@ -75,20 +113,23 @@
   border-radius: 4px;
   background-color: transparent;
   box-shadow: none;
-  color: var(--gpg-text);
+  color: var(--gpg-muted);
   font: inherit;
   font-size: 0.8rem;
   text-align: left;
-  cursor: default;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
 }
 
-/* disabled 的按钮依然会命中 :hover，且 App.css 里 `button:hover`(0,1,1) 会压过
-   `.layerBtn`(0,1,0)。这里显式覆盖，否则鼠标划过「不可点击」的按钮时会亮起科技蓝描边。 */
+/* 现已可交互，hover/active 给真正的反馈（同时仍需覆盖 `button:hover` 的科技蓝描边） */
 .layerBtn:hover,
 .layerBtn:active {
   border-color: transparent;
-  background-color: transparent;
+  background-color: var(--gpg-hover);
   box-shadow: none;
+}
+
+.layerBtn[aria-pressed="true"] {
   color: var(--gpg-text);
 }
 
@@ -99,6 +140,13 @@
   border: 1px solid var(--gpg-border);
   border-radius: 2px;
   background-color: #3c3c3c;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+/* 图层开启时色块填充科技蓝 */
+.layerBtn[aria-pressed="true"] .layerSwatch {
+  border-color: var(--gpg-accent);
+  background-color: var(--gpg-accent);
 }
 
 /* ---------- 右上：缩放控件 ---------- */
@@ -123,15 +171,28 @@
   font: inherit;
   font-size: 1rem;
   line-height: 1;
-  cursor: default;
+  /* 已解禁（否则 :active 不触发），但功能尚未接入：
+     用 not-allowed 明确告诉用户“现在还不能真的缩放”，
+     下一阶段接入真实地图引擎时再改回 disabled。 */
+  cursor: not-allowed;
+  transition: background-color 0.1s ease, transform 0.06s ease;
 }
 
+/* 已解禁（否则 :active 不会触发）。这里只做视觉按压反馈，不改变任何状态。 */
 .zoomBtn:hover,
 .zoomBtn:active {
   border-color: transparent;
-  background-color: transparent;
   box-shadow: none;
   color: var(--gpg-text);
+}
+
+.zoomBtn:hover {
+  background-color: rgba(255, 255, 255, 0.06);
+}
+
+.zoomBtn:active {
+  background-color: rgba(255, 255, 255, 0.16);
+  transform: scale(0.92);
 }
 
 /* 两个按钮之间的 1px 分隔线 */

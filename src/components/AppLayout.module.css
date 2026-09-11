@@ -24,6 +24,56 @@
   padding: 0.75rem 0.5rem;
   border-right: 1px solid var(--gpg-border);
   background-color: var(--gpg-sidebar-bg);
+  transition: flex-basis 0.15s ease, width 0.15s ease;
+}
+
+/* 折叠态：只留 64px。
+   ⚠️ 菜单项内边距必须同步收紧并居中 —— “变电站”这类 2 字标签在 0.9rem 下约 29px，
+   加上原内边距 24px 共 53px，会超出 64px 减内边距后的可用宽度而溢出。 */
+.sidebarCollapsed {
+  flex-basis: 64px;
+  width: 64px;
+  padding-left: 0.25rem;
+  padding-right: 0.25rem;
+}
+
+/* 侧边栏顶部的折叠 / 展开开关 */
+.sidebarToggle {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  width: 100%;
+  margin-bottom: 0.5rem;
+  padding: 0.25rem 0.5rem;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background-color: transparent;
+  box-shadow: none;
+  color: var(--gpg-muted);
+  font: inherit;
+  font-size: 0.9rem;
+  line-height: 1;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+/* 同样需覆盖 App.css 的 `button:hover`(0,1,1) */
+.sidebarToggle:hover,
+.sidebarToggle:active {
+  border-color: transparent;
+  background-color: var(--gpg-hover);
+  box-shadow: none;
+  color: var(--gpg-text);
+}
+
+.sidebarCollapsed .sidebarToggle {
+  justify-content: center;
+}
+
+.sidebarCollapsed .menuItem {
+  padding-left: 0.25rem;
+  padding-right: 0.25rem;
+  text-align: center;
 }
 
 .menu {
