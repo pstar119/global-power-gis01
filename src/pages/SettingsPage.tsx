@@ -1,3 +1,4 @@
+import AiQueryPanel from "../components/AiQueryPanel";
 import DbSelfCheck from "../components/DbSelfCheck";
 import GreetSelfCheck from "../components/GreetSelfCheck";
 import styles from "./SettingsPage.module.css";
@@ -65,6 +66,9 @@ function SettingsPage({ hint }: SettingsPageProps) {
       <GreetSelfCheck />
 
       <DbSelfCheck />
+
+      {/* 阶段17：本地规则引擎的自然语言查询（尚未接入真实大模型 API） */}
+      <AiQueryPanel />
     </div>
   );
 }

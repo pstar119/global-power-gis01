@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import Database from "@tauri-apps/plugin-sql";
+import { countryLabel } from "../lib/country";
 import { fuelColor, fuelLabel } from "../lib/fuel";
 import styles from "./StatsPage.module.css";
 
@@ -34,46 +35,6 @@ FROM power_plants
 WHERE primary_fuel IS NOT NULL AND capacity_mw IS NOT NULL
 GROUP BY primary_fuel
 ORDER BY capacity_mw DESC`;
-
-/**
- * 常见国家/地区的 ISO3 -> 中文名。
- * ⚠️ 刻意只内置一张小字典，不为显示国家名去装 i18n-iso-countries 之类的包；
- *    未命中的直接显示原始 ISO3 码。
- */
-const COUNTRY_LABELS: Record<string, string> = {
-  CHN: "中国",
-  USA: "美国",
-  IND: "印度",
-  RUS: "俄罗斯",
-  JPN: "日本",
-  DEU: "德国",
-  GBR: "英国",
-  FRA: "法国",
-  BRA: "巴西",
-  CAN: "加拿大",
-  KOR: "韩国",
-  ITA: "意大利",
-  ESP: "西班牙",
-  AUS: "澳大利亚",
-  TUR: "土耳其",
-  MEX: "墨西哥",
-  IDN: "印尼",
-  SAU: "沙特",
-  ZAF: "南非",
-  VNM: "越南",
-  POL: "波兰",
-  THA: "泰国",
-  EGY: "埃及",
-  IRN: "伊朗",
-  ARE: "阿联酋",
-  NLD: "荷兰",
-  PAK: "巴基斯坦",
-  ARG: "阿根廷",
-  SWE: "瑞典",
-  NOR: "挪威",
-};
-
-const countryLabel = (code: string) => COUNTRY_LABELS[code] ?? code;
 
 type CoreStats = {
   total_plants: number;

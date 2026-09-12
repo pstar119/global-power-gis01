@@ -1,0 +1,338 @@
+/* ==========================================================
+   AI 查询测试面板（本地规则引擎，不接任何真实 API）
+   表格是原生 <table> + 纯 CSS，未引入 Ant Design / ag-grid 等任何表格库；
+   颜色全部取自 App.css 的 --gpg-* 深色令牌
+   ========================================================== */
+
+.panel {
+  box-sizing: border-box;
+  margin-top: 1.5rem;
+  padding: 1rem;
+  border: 1px solid var(--gpg-border);
+  border-radius: 6px;
+  background-color: var(--gpg-panel-bg);
+}
+
+.title {
+  margin: 0 0 4px;
+  color: var(--gpg-text);
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.hint {
+  margin: 0 0 12px;
+  color: var(--gpg-muted);
+  font-size: 0.75rem;
+  line-height: 1.7;
+}
+
+.hint code {
+  padding: 1px 4px;
+  border-radius: 3px;
+  background-color: rgba(255, 255, 255, 0.08);
+  color: var(--gpg-text);
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 0.95em;
+}
+
+/* ---------- 查询方式配置区（模型 / API Key / 测试连接） ---------- */
+
+.config {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--gpg-border);
+  border-radius: 5px;
+  background-color: rgba(0, 0, 0, 0.18);
+}
+
+.switchRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--gpg-text);
+  font-size: 0.78rem;
+  cursor: pointer;
+  /* 复选框本身跟随 App.css 里 :root 的 color-scheme: dark */
+}
+
+.configBody {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--gpg-border);
+}
+
+.configRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.configLabel {
+  flex: 0 0 62px;
+  color: var(--gpg-muted);
+  font-size: 0.75rem;
+}
+
+/* ⚠️ <select> 不受 App.css 的全局控件样式覆盖（那里只写了 input/button），
+   必须在这里自己写全 background/color/border，否则会露出浏览器默认浅色 */
+.configSelect,
+.configInput {
+  flex: 1 1 auto;
+  min-width: 0;
+  box-sizing: border-box;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--gpg-border);
+  border-radius: 4px;
+  background-color: rgba(0, 0, 0, 0.25);
+  color: var(--gpg-text);
+  font: inherit;
+  font-size: 0.75rem;
+}
+
+.configSelect:focus-visible,
+.configInput:focus-visible {
+  border-color: var(--gpg-accent);
+  outline: 1px solid var(--gpg-accent);
+  outline-offset: -1px;
+}
+
+.configBtn {
+  flex: 0 0 auto;
+  padding: 0.35rem 0.7rem;
+  border: 1px solid var(--gpg-border);
+  border-radius: 4px;
+  background-color: transparent;
+  color: var(--gpg-text);
+  font: inherit;
+  font-size: 0.72rem;
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease;
+}
+
+/* App.css 的 button:hover(0,1,1) 会压过单类名规则(0,1,0)，必须显式覆盖 */
+.configBtn:hover,
+.configBtn:active {
+  border-color: var(--gpg-accent);
+  background-color: transparent;
+  box-shadow: none;
+}
+
+.configBtn:disabled {
+  color: var(--gpg-muted);
+  cursor: not-allowed;
+}
+
+.testResult {
+  margin: 0;
+  font-size: 0.75rem;
+  line-height: 1.6;
+}
+
+.testResult[data-state="ok"] {
+  color: #5ee39b;
+}
+
+.testResult[data-state="error"] {
+  color: #ff8a8a;
+}
+
+/* 明文存储的安全提醒：按要求用红字，不能用灰色弱化 */
+.warn {
+  margin: 0;
+  color: #ff8a8a;
+  font-size: 0.72rem;
+  line-height: 1.6;
+}
+
+/* ---------- 输入行 ---------- */
+
+.form {
+  display: flex;
+  gap: 8px;
+}
+
+.input {
+  flex: 1 1 auto;
+  min-width: 0;
+  box-sizing: border-box;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--gpg-border);
+  border-radius: 4px;
+  background-color: rgba(0, 0, 0, 0.25);
+  color: var(--gpg-text);
+  font: inherit;
+  font-size: 0.8rem;
+}
+
+.input::placeholder {
+  color: var(--gpg-muted);
+}
+
+/* App.css 全局有 input{outline:none}，所以焦点环必须自己补 */
+.input:focus-visible {
+  border-color: var(--gpg-accent);
+  outline: 1px solid var(--gpg-accent);
+  outline-offset: -1px;
+}
+
+.submit {
+  flex: 0 0 auto;
+  padding: 0.45rem 1rem;
+  border: 1px solid var(--gpg-accent);
+  border-radius: 4px;
+  background-color: var(--gpg-accent);
+  color: #ffffff;
+  font: inherit;
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+/* ⚠️ App.css 的 button:hover(0,1,1) 会压过单类名规则(0,1,0)，必须显式覆盖 */
+.submit:hover,
+.submit:active {
+  border-color: var(--gpg-accent);
+  background-color: #1a8fd6;
+  box-shadow: none;
+}
+
+.submit:disabled {
+  border-color: var(--gpg-border);
+  background-color: transparent;
+  color: var(--gpg-muted);
+  cursor: not-allowed;
+}
+
+/* ---------- 示例问法 ---------- */
+
+.examples {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.exampleBtn {
+  padding: 3px 9px;
+  border: 1px solid var(--gpg-border);
+  border-radius: 999px;
+  background-color: transparent;
+  color: var(--gpg-muted);
+  font: inherit;
+  font-size: 0.72rem;
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+
+.exampleBtn:hover,
+.exampleBtn:active {
+  border-color: var(--gpg-accent);
+  background-color: transparent;
+  box-shadow: none;
+  color: var(--gpg-text);
+}
+
+/* ---------- 状态提示 ---------- */
+
+.status {
+  margin: 12px 0 0;
+  font-size: 0.78rem;
+  line-height: 1.7;
+}
+
+.status[data-state="running"] {
+  color: var(--gpg-muted);
+}
+
+.status[data-state="rejected"] {
+  color: #ffd24a;
+}
+
+.status[data-state="error"] {
+  color: #ff8a8a;
+}
+
+/* 解析说明：让用户看到「这句话被理解成了什么」 */
+.parsed {
+  margin: 12px 0 0;
+  padding: 8px 10px;
+  border-left: 2px solid var(--gpg-accent);
+  background-color: rgba(0, 122, 204, 0.12);
+  color: var(--gpg-text);
+  font-size: 0.78rem;
+  line-height: 1.6;
+}
+
+/* ---------- 结果表格（原生 table + 纯 CSS） ---------- */
+
+.tableWrap {
+  margin-top: 12px;
+  overflow-x: auto;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.75rem;
+}
+
+.table th,
+.table td {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--gpg-border);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.table th {
+  color: var(--gpg-muted);
+  font-weight: 600;
+  letter-spacing: 0.03em;
+}
+
+.table td {
+  color: var(--gpg-text);
+  /* 等宽数字：数值列不会随位数变化左右抖动 */
+  font-variant-numeric: tabular-nums;
+}
+
+.table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.table tbody tr:hover td {
+  background-color: rgba(255, 255, 255, 0.03);
+}
+
+/* ---------- 调试信息：SQL 与绑定参数 ---------- */
+
+.debug {
+  margin: 12px 0 0;
+  padding: 8px 10px;
+  border: 1px dashed rgba(140, 140, 140, 0.35);
+  border-radius: 4px;
+  color: var(--gpg-muted);
+  font-size: 0.7rem;
+  line-height: 1.6;
+}
+
+.debugLabel {
+  display: block;
+  margin-bottom: 2px;
+  letter-spacing: 0.04em;
+}
+
+.debug code {
+  display: block;
+  color: var(--gpg-text);
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 0.95em;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
