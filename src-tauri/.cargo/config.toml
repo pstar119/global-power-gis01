@@ -1,0 +1,26 @@
+# 构建期路径重映射：避免把「编译机的用户名与工程目录」写进对外分发的二进制。
+#
+# 背景（实测发现，不是推测）：
+#   Rust 的 panic!/assert! 会把 file!() 求值成源文件的**绝对路径**并静态嵌入二进制。
+#   实测 release 产物里有 259 处形如
+#       C:\Users\Administrator\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\...
+#   的依赖库路径。它们不含任何密钥，也不含本项目路径（D:\Projects 命中 0 次），
+#   且 strip = true 也去不掉（这些是字符串常量，不是调试符号）。
+#   但正式发布版不该暴露编译机目录结构，故在此统一重映射为中性前缀。
+#
+# ⚠️ 换一台机器构建时，把下面的前缀改成你自己的路径即可；
+#    前缀不匹配时该条规则静默不生效，不会导致构建失败。
+#
+# ⚠️ 修改本文件会使 RUSTFLAGS 变化 → Cargo 的 fingerprint 改变 → 全量重新编译。
+[build]
+rustflags = [
+  # 依赖库缓存路径（命中最多，必须放在更短的前缀之前）
+  "--remap-path-prefix",
+  "C:\\Users\\Administrator\\.cargo=/cargo",
+  # 兜底：其余出现在用户目录下的路径
+  "--remap-path-prefix",
+  "C:\\Users\\Administrator=~",
+  # 本项目源码路径
+  "--remap-path-prefix",
+  "D:\\Projects\\global-power-gis=/app",
+]
