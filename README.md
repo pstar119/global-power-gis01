@@ -51,6 +51,7 @@ npm run tauri dev
 | `npm run build` | 只构建前端产物到 `dist/` |
 | `npm run tauri build` | 构建并打包桌面应用安装包 |
 | `node scripts/fetch_basemap.mjs` | 生成离线底图（见下），**全新克隆后必须先跑一次** |
+| `node scripts/fetch_glyphs.mjs` | 生成离线中文字形（见下），同上 |
 
 ### 离线底图（必做的前置步骤）
 
@@ -72,7 +73,23 @@ node scripts/fetch_basemap.mjs                   # 生成 src-tauri/resources/ma
   实测「启动 + 拖动 + 放大」全过程只读取了 1.78 MB / 31.76 MB。
 - 底图缺失时应用会正常启动，只显示纯色背景并给出提示，不会崩溃。
 
-## 目录结构
+### 离线中文字形（必做的前置步骤）
+
+底图地名用中文渲染，靠的是 MapLibre v6 的 **`font-faces`** 样式属性 —— 它把字体文件
+交给浏览器的 CSS Font Loading API 本地绘制，**不需要任何字形（glyphs）服务器**：
+
+- 样式中**完全不设 `glyphs`**。MapLibre 的 GlyphManager 在 glyphs 为空时会走本地绘制，
+  因此一个字形请求都不会发出，真正离线。
+  （顺带一提：Protomaps 官方字体资源里**没有 CJK**，其 CJK 码位区间返回的是空字形，
+  所以本来也没有现成的中文字形服务器可用。）
+- 字体取自 `@fontsource/noto-sans-sc`（按 unicode-range 切成 101 个子集）。
+  `scripts/fetch_glyphs.mjs` 会先扫底图归档、统计 `places` 图层实际用到的码位，
+  **只下载命中的子集**（实测 86 个 / 2.1 MB，全量约 4 MB）。
+- `font-faces` 是**懒加载**的：只有某个字真的被画出来时才去取它所在的子集。
+- 字体文件在 `public/fonts/`（已 gitignore）；生成的清单
+  `src/lib/basemapFonts.generated.ts` 进 Git —— 缺字体时只会告警回退，不会崩。
+
+### 目录结构
 
 ```
 ├─ index.html
@@ -99,19 +116,21 @@ node scripts/fetch_basemap.mjs                   # 生成 src-tauri/resources/ma
 
 ## 已知限制
 
-- **底图没有文字标注（无地名）** —— 阶段26 的已知妥协。
-  - 现象：矢量底图只渲染陆地 / 水域 / 道路 / 边界，**看不出任何地名**。
-  - 原因：文字渲染必须依赖 `glyphs` 字形服务器，而本项目样式是**全离线内联**的，
-    没有字体源；MapLibre 的 `symbol` 图层在缺 `glyphs` 时 `text-field` 根本渲染不出来。
-  - 数据侧其实是够的：底图归档的 `places` 图层**自带 `name:zh-Hans` / `name:zh-Hant`
-    （中文地名）**，所以「恢复中文标签」在数据上可行，缺的只是字形包。
-  - 代价：需要额外打包 CJK 字形范围（体积代价较大，具体数值待实测），
-    阶段26 为控制体积**暂不引入**，地图上的文字信息目前由聚合数字的 HTML 标记承担。
-  - 现状：**恢复中文标签是下一阶段（阶段27）的目标。**
+- **极少数地名仍会缺字** —— 阶段27 接入中文字形后的残留边界。
+  - 现象：个别地名可能少一两个字，而不是整条标签不显示。
+  - 原因：字形按需裁剪（见下方「离线中文字形」），我们只下载了
+    `places` 图层实际用到的码位所命中的 86 个字体子集。
+    实测 1766 个码位里有 **23 个没有任何子集覆盖**（缅甸文、泰文，以及一个
+    CJK 扩展 B 区汉字），这些字无字形可用。
+  - 已有缓解：标签回退链是 `name:zh-Hans → name:zh-Hant → name:en → name`，
+    所以绝大多数情况会退回英文而不是显示空白。
 - **离线底图有覆盖范围**：全球 z0-z4 + 中国中东部（bbox `98,18,128,46`）z5-z8。
   该范围之外放大到 z5 以上只是把 z4 瓦片 overzoom —— 矢量放大不会糊，但细节不再增加。
-- **全新克隆后必须先跑一次 `node scripts/fetch_basemap.mjs` 才能打包**，
-  因为底图归档不进 Git（见上方「离线底图」）。
+- **全新克隆后必须先跑两个生成脚本才能打包**（产物都不进 Git，见下）：
+  ```bash
+  node scripts/fetch_basemap.mjs   # 离线底图，约 32 MB
+  node scripts/fetch_glyphs.mjs    # 离线中文字形，约 2.1 MB
+  ```
 
 ## 说明
 

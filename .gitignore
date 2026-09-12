@@ -27,6 +27,12 @@ dist-ssr
 #    所以全新克隆后必须先跑一次 `node scripts/fetch_basemap.mjs` 才能出安装包。
 /src-tauri/resources/maps/*.pmtiles
 
+# 阶段27：离线中文字形（由 scripts/fetch_glyphs.mjs 按需裁出的 woff2 子集，约 2.1 MB）。
+# 同上：派生且可用脚本重建，不进仓库。
+# 注意这里只忽略字体二进制；src/lib/basemapFonts.generated.ts 清单是进 Git 的，
+# 这样缺字体时应用仍能编译，MapLibre 只会告警并回退到系统字体。
+/public/fonts/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

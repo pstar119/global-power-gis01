@@ -20,6 +20,8 @@ import {
 import "maplibre-gl/dist/maplibre-gl.css";
 import { PMTiles, Protocol } from "pmtiles";
 import { FUEL_LEGEND, fuelColor } from "../lib/fuel";
+// 阶段27：离线中文字形的 `font-faces` 清单（由 scripts/fetch_glyphs.mjs 生成）
+import { BASEMAP_FONT_FACES, BASEMAP_FONT_FAMILY } from "../lib/basemapFonts.generated";
 import {
   MAX_HIGHLIGHT_POINTS,
   buildBoundsSql,
@@ -60,6 +62,13 @@ const BASEMAP_RESOURCE = "maps/basemap.pmtiles";
 
 /** 底图数据源 id */
 const BASEMAP_SOURCE = "basemap";
+
+/**
+ * 地名标签图层 id。
+ * 它必须压在所有电力图层（线路/变电站/电厂/聚合/高亮）**之上**，
+ * 否则 3.5 万个电厂点会把文字盖得看不见 —— 建图后在 load 回调里用 moveLayer 提到最顶。
+ */
+const BASEMAP_LABEL_LAYER_ID = "basemap-place-labels";
 
 /**
  * ⚠️ 底图是 Protomaps 的 ODbL Produced Work，**署名 OpenStreetMap 是法律要求**，
@@ -552,6 +561,67 @@ const BASEMAP_LAYERS: LayerSpecification[] = [
       "line-width": ["interpolate", ["linear"], ["zoom"], 2, 0.3, 8, 0.8],
     },
   },
+  {
+    // 阶段27：中文地名。
+    //
+    // 数据实测（不是照抄文档）：国家名就在 `places` 层且 `kind = "country"`，
+    // 实测 48/48 个国家要素都带 `name:zh-Hans`；`kind = "region"`（省/州）、
+    // `kind = "locality"`（市/town）。所以一层就够了。
+    id: BASEMAP_LABEL_LAYER_ID,
+    type: "symbol",
+    source: BASEMAP_SOURCE,
+    "source-layer": "places",
+    // Protomaps 已经给每个地名算好了「最早应在哪一级出现」的 min_zoom，直接拿它当过滤器，
+    // 比自己按人口/行政级别拍一套分级规则更贴合数据，也不会在低级别把地名挤成一团。
+    filter: ["<=", ["get", "min_zoom"], ["zoom"]],
+    layout: {
+      // ⚠️ 这条回退链必须与 `scripts/fetch_glyphs.mjs` 里扫字形用的 NAME_KEYS 完全一致。
+      //    否则会出现「扫字形时算的是 A 字、实际渲染用的是 B 字」→ 图上缺字。
+      //    `name:en` 是关键兜底：实测有 23 个码位（缅甸文/泰文等）没有任何字体子集覆盖，
+      //    没有英文兜底时那些地方会是空白标签。
+      "text-field": [
+        "coalesce",
+        ["get", "name:zh-Hans"],
+        ["get", "name:zh-Hant"],
+        ["get", "name:en"],
+        ["get", "name"],
+      ],
+      "text-font": [BASEMAP_FONT_FAMILY],
+      // 国家 > 省/州 > 城市：用字号与颜色拉开层次。
+      // ⚠️ 不能靠 font-weight 区分 —— CJK 的字重由字体文件自带，
+      //    样式里的 light/regular/medium/bold 关键字对表意文字不生效。
+      "text-size": [
+        "interpolate",
+        ["linear"],
+        ["zoom"],
+        2,
+        ["case", ["==", ["get", "kind"], "country"], 12, ["==", ["get", "kind"], "region"], 10, 9],
+        6,
+        ["case", ["==", ["get", "kind"], "country"], 15, ["==", ["get", "kind"], "region"], 12, 11],
+        12,
+        ["case", ["==", ["get", "kind"], "country"], 18, ["==", ["get", "kind"], "region"], 14, 13],
+      ],
+      "text-max-width": 8,
+      "text-padding": 4,
+      // 默认 false：交给 MapLibre 做碰撞检测，重叠的地名会被自动抽掉，不会糊成一片
+      "text-allow-overlap": false,
+    },
+    paint: {
+      "text-color": [
+        "match",
+        ["get", "kind"],
+        "country",
+        "#e8eef6",
+        "region",
+        "#c3cdda",
+        "#a7b3c2",
+      ],
+      // 描边用底色：深色底图上没有 halo 的文字在某些色块上会读不清
+      "text-halo-color": BASEMAP_PAINT.background,
+      "text-halo-width": 1.2,
+      "text-halo-blur": 0.4,
+    },
+  },
 ];
 
 /**
@@ -635,6 +705,20 @@ function buildBasemapStyle(basemap: BasemapHandle | null): StyleSpecification {
 
   return {
     version: 8,
+    // 阶段27：把中文字形交给浏览器的 CSS Font Loading API 本地渲染。
+    //
+    // 🔴 为什么 **完全不设 `glyphs`**：
+    // MapLibre 的 GlyphManager 里有这么一条判断（源码 lib 里实测）：
+    //     if (!this.url || isCluster(id) || this._charUsesLocalIdeographFontFamily(codePoint))
+    //         → 用本地字体绘制
+    // 也就是说 `glyphs` 为空时**所有**字符都走本地绘制，一个字形请求都不会发出去，
+    // 比“搞一个字形服务器”更符合本项目「完全离线」的定位。
+    // 实测 Protomaps 的 basemaps-assets 只有 Noto Sans Regular/Medium/Italic（无 CJK，
+    // CJK 码位区间返回 29 字节的空字形），所以本来也没现成的中文字形服务器可用。
+    //
+    // `font-faces` 是懒加载的（源码注释：“each file waits until a codepoint it covers is
+    // actually drawn”），所以声明了 86 条也不会在启动时把 2.1 MB 全下下来。
+    "font-faces": BASEMAP_FONT_FACES,
     sources: {
       [BASEMAP_SOURCE]: {
         type: "vector",
@@ -684,35 +768,41 @@ function renderHighlight(
     data,
     cluster: false,
   });
-  map.addLayer({
-    id: HIGHLIGHT_LAYER_ID,
-    type: "circle",
-    source: HIGHLIGHT_SOURCE,
-    paint: {
-      // 阶段24：整体比底图点大一号（6/8.5/11/14 对 3/5/7/10）。
-      //
-      // ⚠️ 这里**刻意不做 zoom 联动**：高亮通常只有几个到几十个点，
-      //    需要任何缩放级别都醒目。底图要联动是因为点太多会糊，
-      //    高亮没有这个问题。
-      //
-      // 「更大 + 金色描边」是双重信号：只换成金色的话，
-      // 在点密集的区域容易被底图点淹没，找不到命中的是哪几个。
-      "circle-radius": [
-        "step",
-        ["get", "capacity"],
-        6,
-        100,
-        8.5,
-        500,
-        11,
-        1000,
-        14,
-      ],
-      "circle-color": "transparent",
-      "circle-stroke-color": "#ffd24a",
-      "circle-stroke-width": 2,
+  map.addLayer(
+    {
+      id: HIGHLIGHT_LAYER_ID,
+      type: "circle",
+      source: HIGHLIGHT_SOURCE,
+      paint: {
+        // 阶段24：整体比底图点大一号（6/8.5/11/14 对 3/5/7/10）。
+        //
+        // ⚠️ 这里**刻意不做 zoom 联动**：高亮通常只有几个到几十个点，
+        //    需要任何缩放级别都醒目。底图要联动是因为点太多会糊，
+        //    高亮没有这个问题。
+        //
+        // 「更大 + 金色描边」是双重信号：只换成金色的话，
+        // 在点密集的区域容易被底图点淹没，找不到命中的是哪几个。
+        "circle-radius": [
+          "step",
+          ["get", "capacity"],
+          6,
+          100,
+          8.5,
+          500,
+          11,
+          1000,
+          14,
+        ],
+        "circle-color": "transparent",
+        "circle-stroke-color": "#ffd24a",
+        "circle-stroke-width": 2,
+      },
     },
-  });
+    // 阶段27：高亮层插到地名标签**之下**，保证文字始终可读。
+    // （高亮层是首次高亮时才建的，那时标签层一定已存在；这里仍做一次判空，
+    //   万一以后标签层被去掉也不会抛错。）
+    map.getLayer(BASEMAP_LABEL_LAYER_ID) ? BASEMAP_LABEL_LAYER_ID : undefined,
+  );
 }
 
 /** 清空高亮（保留图层，避免反复增删） */
@@ -1330,6 +1420,13 @@ function MapPage({ command = null }: MapPageProps) {
                 map.on("mouseleave", layerId, () => {
                   map.getCanvas().style.cursor = "";
                 });
+              }
+
+              // 阶段27：地名标签必须压在所有电力图层之上。
+              // 样式里的图层先于本回调里的 addLayer 执行，所以现在用 moveLayer（不给 beforeId
+              // 即移到最顶）把它提上来 —— 否则 3.5 万个电厂点会把文字盖住。
+              if (map.getLayer(BASEMAP_LABEL_LAYER_ID)) {
+                map.moveLayer(BASEMAP_LABEL_LAYER_ID);
               }
 
               // 地图与数据都就绪了，到这一步才能执行飞行与高亮。
