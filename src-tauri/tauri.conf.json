@@ -21,7 +21,11 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost asset: http://asset.localhost https://demotiles.maplibre.org https://api.deepseek.com https://dashscope.aliyuncs.com https://open.bigmodel.cn http://localhost:11434 http://127.0.0.1:11434; img-src 'self' data: blob: https://demotiles.maplibre.org; worker-src 'self' blob:; child-src 'self' blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:"
+      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost asset: http://asset.localhost https://api.deepseek.com https://dashscope.aliyuncs.com https://open.bigmodel.cn http://localhost:11434 http://127.0.0.1:11434; img-src 'self' data: blob:; worker-src 'self' blob:; child-src 'self' blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:",
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["$RESOURCE/maps/**"]
+      }
     }
   },
   "plugins": {
@@ -36,9 +40,10 @@
     "copyright": "© 2026 pstar119. 电厂数据 © WRI Global Power Plant Database (CC BY 4.0)",
     "category": "Utility",
     "shortDescription": "全球电力设施 GIS 桌面工具",
-    "longDescription": "Global Power GIS：在离线地图上浏览全球电厂分布，按燃料类型与装机容量筛选，支持自然语言查询与结果高亮定位。内置 WRI Global Power Plant Database 全量数据，装完即可使用。",
+    "longDescription": "Global Power GIS：在离线地图上浏览全球电厂分布，按燃料类型与装机容量筛选，支持自然语言查询与结果高亮定位。内置 WRI Global Power Plant Database 全量数据与 Protomaps 离线底图，装完即可使用。",
     "resources": {
-      "resources/seed/global_power_gis.db": "seed/global_power_gis.db"
+      "resources/seed/global_power_gis.db": "seed/global_power_gis.db",
+      "resources/maps/basemap.pmtiles": "maps/basemap.pmtiles"
     },
     "windows": {
       "nsis": {

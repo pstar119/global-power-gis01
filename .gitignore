@@ -21,6 +21,12 @@ dist-ssr
 # 阶段14：原始数据缓存（如 WRI 全球电厂 CSV，约 11 MB）
 /data/
 
+# 阶段26：真实离线底图（由 scripts/fetch_basemap.mjs 从 Protomaps 公开归档切出，约 32 MB）。
+# 它是可完整重建的派生产物（一份归档 + 一个脚本即可重现），因此不进仓库。
+# ⚠️ 注意：tauri.conf.json 的 bundle.resources 会引用它，
+#    所以全新克隆后必须先跑一次 `node scripts/fetch_basemap.mjs` 才能出安装包。
+/src-tauri/resources/maps/*.pmtiles
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

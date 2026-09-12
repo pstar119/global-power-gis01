@@ -1,5 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import Database from "@tauri-apps/plugin-sql";
+// 阶段26：读取随安装包分发的离线底图。
+// convertFileSrc 把本地绝对路径转成 `asset://localhost/...`（实现了真正的 HTTP Range）；
+// resolveResource 把相对资源路径解析成绝对路径（随安装包分发的 $RESOURCE 目录）。
+import { convertFileSrc } from "@tauri-apps/api/core";
+import { resolveResource } from "@tauri-apps/api/path";
 import type { FeatureCollection, LineString, Point } from "geojson";
 // 仅用命名导入：maplibre-gl 的类型声明不提供 default export
 import {
@@ -9,6 +14,7 @@ import {
   ScaleControl,
   addProtocol,
   type GeoJSONSource,
+  type LayerSpecification,
   type StyleSpecification,
 } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
@@ -36,14 +42,36 @@ const LAYER_SWATCH: Record<string, string> = {
 };
 
 /**
- * 本地离线瓦片夹具，由 `node scripts/make_test_pmtiles.mjs` 生成。
- * 几何全部是程序合成的图形，**不含任何真实电力数据**。
- * 文件放在 `public/` 下，开发与打包后都用相对路径读取。
+ * 阶段26：真实离线底图。
+ *
+ * 文件由 `node scripts/fetch_basemap.mjs` 从 Protomaps 公开的行星 PMTiles 归档里
+ * 切出（全球 z0-z4 + 中国中东部 z5-z8，实测 1107 个瓦片 / 31.76 MB），
+ * 并已加入 `.gitignore`（可完整重建的派生产物，不进 Git）。
+ *
+ * 🔴 为什么必须用 Tauri 的 asset 协议，而不是 `public/` 下的相对路径：
+ * 32 MB 的归档**绝不能整包读进内存**，pmtiles 必须能按需发 HTTP Range 请求。
+ * 阶段11 实测 `public/` 下的文件由 `tauri.localhost`（内嵌资源协议）提供，
+ * 而它**不实现 Range**：收到 `Range: bytes=0-16383` 仍返回 200 + 全量正文，
+ * 且不带 Content-Length / Content-Range。pmtiles 的 FetchSource 会据此判定
+ * 「后端不支持字节服务」并抛错，表现为底图只剩一层近黑的背景色。
+ * `asset.localhost` 是为本地文件设计的协议，实现了真正的 Range。
  */
-const FIXTURE_PATH = "power-fixture.pmtiles";
+const BASEMAP_RESOURCE = "maps/basemap.pmtiles";
 
-/** 内存归档在协议表里的键：样式里的 `pmtiles://<key>` 必须与它完全一致 */
-const FIXTURE_KEY = "power-fixture.pmtiles";
+/** 底图数据源 id */
+const BASEMAP_SOURCE = "basemap";
+
+/**
+ * ⚠️ 底图是 Protomaps 的 ODbL Produced Work，**署名 OpenStreetMap 是法律要求**，
+ * 这段文字不能删。它与 WRI 电厂数据的署名分开挂：底图挂底图源，
+ * WRI 的 CC BY 4.0 署名挂到电厂数据源上（见 PLANTS_SOURCE 的 addSource）。
+ */
+const BASEMAP_ATTRIBUTION =
+  "底图 © Protomaps (ODbL) · © OpenStreetMap contributors";
+
+/** 无法加载底图时给用户的提示（文件缺失 / 协议不支持 Range） */
+const BASEMAP_MISSING_NOTICE =
+  "未找到离线底图，地图只显示背景色。请先运行 node scripts/fetch_basemap.mjs 生成底图。";
 
 const INITIAL_CENTER: [number, number] = [0, 20];
 const INITIAL_ZOOM = 1.5;
@@ -73,7 +101,7 @@ const HIGHLIGHT_LAYER_ID = "highlight-points";
  * ⚠️ 图层堆叠顺序很关键：输电线路必须加在**点图层之下**，
  *    否则灰色线条会横穿彩色电厂点与变电站点，视觉噪声极大。
  *    实际顺序由 addLayer 的调用次序决定（后加的在上面），
- *    即：fixture → 输电线路 → 变电站 → 电厂 → 聚合 → 高亮。
+ *    即：底图 → 输电线路 → 变电站 → 电厂 → 聚合 → 高亮。
  */
 const SUBSTATIONS_SOURCE = "substations-data";
 const SUBSTATIONS_LAYER_ID = "substation-points";
@@ -356,23 +384,13 @@ async function loadLinesGeoJson(): Promise<FeatureCollection> {
 }
 
 /**
- * 把整个归档读进内存后自建的 PMTiles Source。
+ * 内存退化路径用的 PMTiles Source。
  *
- * ⚠️ 为什么不让 pmtiles 自己去发 Range 请求（`pmtiles://http://...`）？
- * 因为生产环境里 `public/` 下的文件是由 Tauri 的 `tauri.localhost`（内嵌资源协议）
- * 提供的，而它**不实现 HTTP Range**：即使收到 `Range: bytes=0-16383`，也返回
- * `200` + 全量正文，且**不带 Content-Length / Content-Range**。
- * pmtiles 的 FetchSource 据此判定"后端不支持字节服务"并抛错，
- * 结果是底图只剩一层背景色（近黑）、页面上完全没有网格。
- *
- * 夹具只有 ~100 KB，整包读进内存最稳，而且 dev 与生产走**完全相同**的代码路径
- * （dev 下 Vite 其实支持 Range，但没必要为此分叉出两套逻辑）。
- *
- * 🔴 **只能用于小文件。** 接入 100 MB+ 的真实离线归档时必须改回 Tauri 的
- * asset 协议（`asset.localhost`，它实现了真正的 Range），
- * 绡不能把大数据整包读进内存。
+ * ⚠️ 只有在 asset 协议**不支持 Range** 时才会用到它：那时只能把归档整包读进内存再切片。
+ * 当前归档 33 MB，这么做还能接受；但换成行星级归档（100 GB+）就完全不可行，
+ * 所以它只是兵底，不是主路径。
  */
-class ByteSource {
+class MemorySource {
   #buffer: ArrayBuffer;
   #key: string;
 
@@ -382,7 +400,7 @@ class ByteSource {
   }
 
   async getBytes(offset: number, length: number): Promise<{ data: ArrayBuffer }> {
-    // 返回独立副本，不把整个归档的底层 buffer 泄需出去
+    // 返回独立副本，不把整个归档的底层 buffer 泄露出去
     return { data: this.#buffer.slice(offset, offset + length) };
   }
 
@@ -391,105 +409,248 @@ class ByteSource {
   }
 }
 
+/** 底图归档的定位结果 */
+type BasemapHandle = {
+  /** 协议表里的键：Range 模式是 asset URL，内存模式是资源路径 */
+  key: string;
+  minZoom: number;
+  maxZoom: number;
+  /** range = 按需 Range 读取（首选）；memory = 整包读入内存（退化路径） */
+  mode: "range" | "memory";
+};
+
+/** 确认拿到的确实是 PMTiles 归档，而不是一段 HTML 错误页 */
+function assertPmtilesMagic(head: Uint8Array): void {
+  // 127 字节的头部以 7 字节魔数「PMTiles」开头
+  const magic = String.fromCharCode(...head.subarray(0, 7));
+  if (magic !== "PMTiles") {
+    throw new Error(`不是合法的 PMTiles 归档（magic="${magic}"）`);
+  }
+}
+
 /**
- * 协议注册 + 归档加载，全程只执行一次。
+ * 深色离线底图配色。
  *
- * 两个必须遵守的点：
+ * 设计目标：陆地/水域/道路/边界都能分辨，但**不能抢眼** ——
+ * 地图的主角是电厂与变电站点，底图只是参照物。所以整体明度对比压得很低，
+ * 并且刻意避开数据用色（青蓝 #3fd0c9 与金色 #ffb300 附近），以免混淆。
+ */
+const BASEMAP_PAINT = {
+  background: "#0b0f14",
+  earth: "#161c23",
+  landcover: "#1a2119",
+  landuse: "#1d232b",
+  water: "#0e2338",
+  river: "#1b4a6e",
+  roadMinor: "#2a3340",
+  roadMajor: "#3d4857",
+  boundary: "#39434f",
+} as const;
+
+/** 背景图层：无论底图是否可用都要有，否则数据点会浮在白色上 */
+const BACKGROUND_LAYER: LayerSpecification = {
+  id: "background",
+  type: "background",
+  paint: { "background-color": BASEMAP_PAINT.background },
+};
+
+/**
+ * 底图图层栈。
+ *
+ * ⚠️ `source-layer` 的取值不是照抄文档，而是**把切出来的归档解开、逐层打印出来的**：
+ * 本归档实际只有 earth / landcover / landuse / water / roads / boundaries / places
+ * 七层（`scripts/fetch_basemap.mjs` 的回读校验里也在查这个）。
+ * buildings / pois / transit 只出现在 z13 以后，而本归档最高只到 z8，所以不存在。
+ *
+ * ⚠️ 这里**没有 symbol 图层**：文字渲染需要 `glyphs` 字体服务器，
+ * 而本项目样式是全离线内联的，没有字体源。地名改用 HTML 标记渲染（见聚合数字标记）。
+ * 注：归档里的 `places` 层其实带 `name:zh-Hans`，将来若打包 CJK 字形包可以直接用。
+ */
+const BASEMAP_LAYERS: LayerSpecification[] = [
+  {
+    id: "basemap-earth",
+    type: "fill",
+    source: BASEMAP_SOURCE,
+    "source-layer": "earth",
+    paint: { "fill-color": BASEMAP_PAINT.earth },
+  },
+  {
+    id: "basemap-landcover",
+    type: "fill",
+    source: BASEMAP_SOURCE,
+    "source-layer": "landcover",
+    paint: { "fill-color": BASEMAP_PAINT.landcover, "fill-opacity": 0.55 },
+  },
+  {
+    id: "basemap-landuse",
+    type: "fill",
+    source: BASEMAP_SOURCE,
+    "source-layer": "landuse",
+    paint: { "fill-color": BASEMAP_PAINT.landuse, "fill-opacity": 0.6 },
+  },
+  {
+    id: "basemap-water",
+    type: "fill",
+    source: BASEMAP_SOURCE,
+    "source-layer": "water",
+    paint: { "fill-color": BASEMAP_PAINT.water },
+  },
+  {
+    // 河流在数据里也是**面**（kind_detail=river），只靠填充几乎看不见，所以补一层描边
+    id: "basemap-river",
+    type: "line",
+    source: BASEMAP_SOURCE,
+    "source-layer": "water",
+    filter: ["==", ["get", "kind_detail"], "river"],
+    paint: {
+      "line-color": BASEMAP_PAINT.river,
+      "line-width": ["interpolate", ["linear"], ["zoom"], 4, 0.3, 8, 0.9, 12, 1.8],
+    },
+  },
+  {
+    id: "basemap-road-minor",
+    type: "line",
+    source: BASEMAP_SOURCE,
+    "source-layer": "roads",
+    paint: {
+      "line-color": BASEMAP_PAINT.roadMinor,
+      "line-width": ["interpolate", ["linear"], ["zoom"], 4, 0.2, 8, 0.6, 12, 1.4],
+    },
+  },
+  {
+    id: "basemap-road-major",
+    type: "line",
+    source: BASEMAP_SOURCE,
+    "source-layer": "roads",
+    // ⚠️ MapLibre 的 `match` 标签必须是**字面量**，不能写成数组；
+    // 取值 motorway / motorway_link 是实测出来的，不是猜的。
+    filter: [
+      "match",
+      ["get", "kind_detail"],
+      "motorway",
+      true,
+      "motorway_link",
+      true,
+      "trunk",
+      true,
+      "primary",
+      true,
+      false,
+    ],
+    paint: {
+      "line-color": BASEMAP_PAINT.roadMajor,
+      "line-width": ["interpolate", ["linear"], ["zoom"], 4, 0.5, 8, 1.4, 12, 3],
+    },
+  },
+  {
+    id: "basemap-boundary",
+    type: "line",
+    source: BASEMAP_SOURCE,
+    "source-layer": "boundaries",
+    paint: {
+      "line-color": BASEMAP_PAINT.boundary,
+      "line-width": ["interpolate", ["linear"], ["zoom"], 2, 0.3, 8, 0.8],
+    },
+  },
+];
+
+/**
+ * 协议注册 + 底图定位，全程只执行一次。
+ *
+ * 三个必须遵守的点：
  * 1. MapLibre 的协议注册表是**全局**的，重复注册同名协议会抛错；而 `main.tsx`
  *    开了 StrictMode，effect 会「执行 → 清理 → 再执行」，所以这里必须幂等。
  * 2. 正因如此，cleanup 里**不能**调 removeProtocol —— 一旦摘掉，第二次建图时
  *    协议就没了，表现为瓦片全空且控制台不报错。
+ * 3. 用 127 字节（正好是 PMTiles 头部长度）的**探针**确认底层协议真的支持 Range。
+ *    不支持时立刻退化并给出明确提示，而不是让用户对着一张近黑的空地图发懵。
  */
-let pmtilesReady: Promise<void> | null = null;
+let basemapReady: Promise<BasemapHandle | null> | null = null;
 
-function ensurePmtilesProtocol(): Promise<void> {
-  pmtilesReady ??= (async () => {
+function ensurePmtilesProtocol(): Promise<BasemapHandle | null> {
+  basemapReady ??= (async () => {
     const protocol = new Protocol();
     // pmtiles v4 的处理器叫 tilev4（不是 tile）
     addProtocol("pmtiles", protocol.tilev4);
 
-    const res = await fetch(FIXTURE_PATH);
-    if (!res.ok) {
-      throw new Error(`加载 ${FIXTURE_PATH} 失败：HTTP ${res.status}`);
+    try {
+      const absPath = await resolveResource(BASEMAP_RESOURCE);
+      const url = convertFileSrc(absPath);
+
+      // ---- 首选：让 pmtiles 自己按需发 Range 请求 ----
+      const probe = await fetch(url, { headers: { Range: "bytes=0-126" } });
+      if (probe.status === 206) {
+        assertPmtilesMagic(new Uint8Array(await probe.arrayBuffer()));
+        const archive = new PMTiles(url);
+        protocol.add(archive);
+        const header = await archive.getHeader();
+        console.info(
+          `[MapPage] 离线底图就绪（Range 读取）：${absPath}，z${header.minZoom}-${header.maxZoom}，` +
+            `${header.numAddressedTiles} 个瓦片，Content-Range=${probe.headers.get("content-range") ?? "-"}`,
+        );
+        return {
+          key: url,
+          minZoom: header.minZoom,
+          maxZoom: header.maxZoom,
+          mode: "range",
+        };
+      }
+
+      // ---- 退化：协议不支持 Range，只能整包读进内存 ----
+      console.warn(
+        `[MapPage] 底图协议未按 Range 返回（HTTP ${probe.status}，期望 206），` +
+          `退回整包读取。当前归档 33 MB 尚可，但这说明 asset 协议没有生效。`,
+      );
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`读取底图失败：HTTP ${res.status}`);
+      const buffer = await res.arrayBuffer();
+      assertPmtilesMagic(new Uint8Array(buffer, 0, 7));
+      const archive = new PMTiles(new MemorySource(buffer, BASEMAP_RESOURCE));
+      protocol.add(archive);
+      const header = await archive.getHeader();
+      return {
+        key: BASEMAP_RESOURCE,
+        minZoom: header.minZoom,
+        maxZoom: header.maxZoom,
+        mode: "memory",
+      };
+    } catch (err) {
+      console.error(
+        "[MapPage] 离线底图不可用，将只显示纯色背景。" +
+          "请先运行 `node scripts/fetch_basemap.mjs` 生成底图。",
+        err,
+      );
+      return null;
     }
-    // 必须先于建图完成，否则 MapLibre 第一批瓦片请求会全部落空
-    const buffer = await res.arrayBuffer();
-    protocol.add(new PMTiles(new ByteSource(buffer, FIXTURE_KEY)));
   })();
 
-  return pmtilesReady;
+  return basemapReady;
 }
 
-/** 用本地 .pmtiles 拼一个内联样式，彻底摆脫在线演示瓦片 */
-function buildFixtureStyle(): StyleSpecification {
-  // pmtiles:// 后面给的不是网络地址，而是**内存归档在协议表里的键**：
-  // Protocol.add() 用 source.getKey() 注册，两名字符串必须完全一致。
+/** 用真实离线底图拼一个内联样式，彻底摆脱在线演示瓦片 */
+function buildBasemapStyle(basemap: BasemapHandle | null): StyleSpecification {
+  if (!basemap) {
+    return { version: 8, sources: {}, layers: [BACKGROUND_LAYER] };
+  }
+
   return {
     version: 8,
     sources: {
-      "power-fixture": {
+      [BASEMAP_SOURCE]: {
         type: "vector",
-        url: `pmtiles://${FIXTURE_KEY}`,
-        // 夹具只做到 z4；再放大由 MapLibre 自动 overzoom
-        maxzoom: 4,
-        // ⚠️ WRI 数据采用 CC BY 4.0 许可，**要求署名**，这段来源说明必须保留。
-        // 底图瓦片目前仍是阶段11 的合成夹具，两者性质不同，必须分别说明。
-        attribution:
-          "电厂数据 © WRI Global Power Plant Database (CC BY 4.0)；离线瓦片为合成测试数据。",
+        // ⚠️ 这里用 `tiles` 而不是 `url`，是个踩过坑的选择：
+        //    用 `url` 时 MapLibre 会去问协议的 TileJSON，而协议会把**归档 header 里的
+        //    bbox 当作 bounds 返回**（我们切的是中国中东部），MapLibre 据此裁剪瓦片
+        //    请求 —— 于是缩小到 z0 看全球时，中国以外会是一片空白。
+        //    自己写 `tiles` + 明确的全球 bounds，既避开这个陷阱，又省掉一次请求。
+        tiles: [`pmtiles://${basemap.key}/{z}/{x}/{y}`],
+        minzoom: basemap.minZoom,
+        maxzoom: basemap.maxZoom,
+        bounds: [-180, -85.0511, 180, 85.0511],
+        attribution: BASEMAP_ATTRIBUTION,
       },
     },
-    layers: [
-      {
-        id: "background",
-        type: "background",
-        paint: { "background-color": "#101418" },
-      },
-      // ⚠️ 以下 4 个是**合成夹具**图层：几何全部是程序生成的格子，
-      //    不对应任何真实地理位置，仅用于证明离线瓦片通道可用。
-      //    真实电厂数据叠加在其上，所以这里把不透明度压得很低，
-      //    避免干扰对真实点的观察。
-      //    `maxzoom: 7` 表示 zoom >= 7 时隐藏（MapLibre 的语义是“大于等于即隐藏”）：
-      //    夹具只做到 z4，再放大就会 overzoom 成空白格子，不如直接让位给真实数据。
-      {
-        id: "fixture-substations",
-        type: "fill",
-        source: "power-fixture",
-        "source-layer": "substations",
-        maxzoom: 7,
-        paint: { "fill-color": "#007acc", "fill-opacity": 0.1 },
-      },
-      {
-        id: "fixture-substation-borders",
-        type: "line",
-        source: "power-fixture",
-        "source-layer": "substations",
-        maxzoom: 7,
-        paint: { "line-color": "#4daafc", "line-width": 1, "line-opacity": 0.18 },
-      },
-      {
-        id: "fixture-power-lines",
-        type: "line",
-        source: "power-fixture",
-        "source-layer": "power-lines",
-        maxzoom: 7,
-        paint: { "line-color": "#7fd4ff", "line-width": 1.5, "line-opacity": 0.18 },
-      },
-      {
-        id: "fixture-power-plants",
-        type: "circle",
-        source: "power-fixture",
-        "source-layer": "power-plants",
-        maxzoom: 7,
-        paint: {
-          "circle-radius": 5,
-          "circle-color": "#ffb300",
-          "circle-opacity": 0.12,
-          "circle-stroke-color": "#3a2a00",
-          "circle-stroke-width": 1,
-          "circle-stroke-opacity": 0.12,
-        },
-      },
-    ],
+    layers: [BACKGROUND_LAYER, ...BASEMAP_LAYERS],
   };
 }
 
@@ -731,8 +892,9 @@ function MapPage({ command = null }: MapPageProps) {
   useEffect(() => {
     if (!mapContainerRef.current) return;
 
-    // 归档现在是异步读进内存的，所以建图必须等它就绪：
+    // 底图归档的定位是异步的（要解析资源路径并探测 Range），所以建图必须等它就绪：
     // 否则建图时 MapLibre 的第一批瓦片请求会全部落空。
+    // 注意：它**不会** reject，拿不到底图时返回 null，此时退化成纯色背景。
     let disposed = false;
     /** 页面用 display:none 切换可见性，容器尺寸会变，需要它来触发 map.resize() */
     let resizeObserver: ResizeObserver | null = null;
@@ -756,23 +918,30 @@ function MapPage({ command = null }: MapPageProps) {
     });
 
     ensurePmtilesProtocol()
-      .then(() => {
+      .then((basemap) => {
         // 等待期间组件可能已卸载（StrictMode 下必然发生一次），此时不能再建图
         if (disposed || !mapContainerRef.current) return;
 
         const map = new MapLibreMap({
           container: mapContainerRef.current,
-          style: buildFixtureStyle(),
+          style: buildBasemapStyle(basemap),
           center: INITIAL_CENTER,
           zoom: INITIAL_ZOOM,
           // 保留版权信息（合规），右下角紧凑显示，不与我们左下角的比例尺冲突
           attributionControl: { compact: true },
           // 阶段15 从 6 提到 12。原来的 6 是为合成夹具设的，但它会把
           // clusterMaxZoom(8) 卡死 —— 点击聚合点算出的目标级别被截断后，
-          // 永远展不开到单个电厂。夹具现在改由各图层的 maxzoom:7 负责隐藏。
+          // 永远展不开到单个电厂。
+          // 阶段26：底图最高只切到 z8，再往里由 MapLibre 自动 overzoom（矢量放大不糊，
+          // 只是细节不再增加），所以底图的级别上限不再限制地图的 maxZoom。
           maxZoom: 12,
         });
         mapRef.current = map;
+
+        // 底图缺失时明确告知用户，而不是让人对着一张空地图猜
+        if (!basemap) {
+          setMapNotice(BASEMAP_MISSING_NOTICE);
+        }
 
         // ⚠️ 页面常驻、用 display:none 切换可见性，容器尺寸会从 0 变回正常，
         //    MapLibre 必须 resize 才能重算画布尺寸与瓦片加载范围。
@@ -909,6 +1078,10 @@ function MapPage({ command = null }: MapPageProps) {
                 cluster: true,
                 clusterRadius: 50,
                 clusterMaxZoom: 8,
+                // ⚠️ WRI 数据采用 CC BY 4.0 许可，**要求署名**，这段来源说明必须保留。
+                // 阶段26 之前它被挂在底图源上（权宜之计）；现在底图源挂 OSM 署名，
+                // 这里才是它真正该在的位置。
+                attribution: "电厂数据 © WRI Global Power Plant Database (CC BY 4.0)",
               });
 
               // 图层一：聚合圆（只渲染带 point_count 的要素）
