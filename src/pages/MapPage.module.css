@@ -42,6 +42,12 @@
   left: 12px;
   min-width: 148px;
   padding: 0.375rem;
+  /* 阶段30：面板里多了 5 个电压档复选框。窗口最矮可到 700px（见 tauri.conf.json），
+     不加限制会从底部溢出到地图外面。
+     上限扣除的是左下角「本视野」统计面板（约 72px + 下方 46px + 间隙）：
+     两大面板都在左侧，必须错开，否则统计面板会盖住图例底部。 */
+  max-height: calc(100% - 140px);
+  overflow-y: auto;
 }
 
 /* 面板标题：“图层控制”从纯文本换成可点击的折叠开关 */
@@ -97,6 +103,68 @@
    不加这条，折叠后列表根本隐藏不掉。 */
 .layerList[hidden] {
   display: none;
+}
+
+/* ---------- 阶段30：电压分级复选框 ---------- */
+
+.tierGroup {
+  margin-top: 0.375rem;
+  padding-top: 0.375rem;
+  border-top: 1px solid var(--gpg-border);
+}
+
+/* 同上：作者样式会盖掉 UA 的 [hidden]{display:none} */
+.tierGroup[hidden] {
+  display: none;
+}
+
+.tierList {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tierItem {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.1875rem 0.25rem;
+  border-radius: 4px;
+  color: var(--gpg-muted);
+  font-size: 0.7rem;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.tierItem:hover {
+  background-color: var(--gpg-hover);
+  color: var(--gpg-text);
+}
+
+/* 原生复选框：只调尺寸与强调色，不自造外观（保留系统语义与无障碍） */
+.tierCheck {
+  flex: 0 0 auto;
+  width: 13px;
+  height: 13px;
+  margin: 0;
+  accent-color: #4daafc;
+  cursor: pointer;
+}
+
+/* 面板内每行都用紧凑行高。
+   App.css 全局 `line-height: 1.5`（=24px）对 0.7rem 的小行意味着「字形 11px、行框 24px」，
+   每行白多出 8px —— 5 个电压档 + 15 个燃料类型叠起来就是上百像素，
+   直接把左上面板撑到和左下统计面板重叠。 */
+.layerPanel .legendItem,
+.layerPanel .legendLine,
+.layerPanel .legendFoot,
+.tierItem,
+.statsTitle,
+.statsList li {
+  line-height: 1.4;
 }
 
 .layerBtn {
@@ -440,4 +508,65 @@
   font-size: 0.75rem;
   line-height: 1.5;
   text-align: center;
+}
+
+/* ---------- 阶段30：当前视野数据统计 ----------
+   左下角、比例尺上方：左上是图层面板、右上是缩放控件、右下是版权、底部中间是提示，
+   只剩这个位置不会碰撞（侧边栏可以折叠，放侧边栏底部会被一起藏掉）。
+   `pointer-events: none` —— 它只是显示器，绝不能挡住地图拖拽与点击。 */
+.statsPanel {
+  position: absolute;
+  left: 12px;
+  bottom: 46px;
+  z-index: 1;
+  min-width: 148px;
+  padding: 0.5rem 0.625rem;
+  border: 1px solid var(--gpg-border);
+  border-radius: 6px;
+  background-color: rgba(37, 37, 38, 0.9);
+  -webkit-backdrop-filter: blur(4px);
+  backdrop-filter: blur(4px);
+  color: var(--gpg-text);
+  font-size: 0.75rem;
+  pointer-events: none;
+}
+
+.statsTitle {
+  margin: 0 0 0.25rem;
+  color: var(--gpg-muted);
+  font-size: 0.65rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+}
+
+/* 单行排列：三项统计挤在一行（不换行，宁可面板变宽），
+   面板高度 ≈ 72px，不会与上方图层控制面板撞上 */
+.statsList {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: nowrap;
+  align-items: baseline;
+  gap: 0 0.625rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.statsList li:not(:first-child)::before {
+  content: "·";
+  margin-right: 0.5rem;
+  color: var(--gpg-muted);
+}
+
+/* 数字等宽，跳动时不左右抖 */
+.statsList b {
+  color: #4daafc;
+  font-variant-numeric: tabular-nums;
+}
+
+.statsNote {
+  margin: 0.375rem 0 0;
+  color: var(--gpg-muted);
+  font-size: 0.75rem;
+  line-height: 1.3;
 }

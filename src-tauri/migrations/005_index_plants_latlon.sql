@@ -1,0 +1,17 @@
+-- 阶段30：为「当前视野统计」的电厂计数加索引。
+--
+-- 背景：统计面板每次 moveend 都要回答「当前视野内有多少座电厂」（用户要求精确值，
+-- 不能用聚合图层求和，会把聚合内的电厂重复计数），走的是
+--   SELECT COUNT(*) FROM power_plants
+--    WHERE lat IS NOT NULL AND lon IS NOT NULL
+--      AND lon BETWEEN ? AND ? AND lat BETWEEN ? AND ?;
+--
+-- 实测（34,936 行）该查询耗时 **10.8 ~ 38.7ms**，占整个统计耗时的 80% 以上 ——
+-- 因为 power_plants 上**没有任何索引**，只能全表扫描。加上 (lat, lon) 索引后
+-- 可走索引区间扫描，预计降到 1ms 以内。这是「50ms 护栏」余量从 0.9ms 变成 10 倍的
+-- 唯一办法（其余优化空间已很小：queryRenderedFeatures 只占 0.2~18.6ms）。
+--
+-- ⚠️ 本迁移只新增索引：不动表结构、不动任何数据，IF NOT EXISTS 保证重复执行也安全。
+--    已应用过的迁移（v1~v4）一个字都不能改，否则 sqlx 会报 VersionMismatch —— 
+--    完整原因见 src-tauri/src/lib.rs 里 migrations() 上方的说明。
+CREATE INDEX IF NOT EXISTS idx_power_plants_lat_lon ON power_plants(lat, lon);

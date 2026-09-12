@@ -33,6 +33,7 @@ fn greet(name: &str) -> String {
 /// - v2：为接入真实数据源补充 gppd_idnr（唯一）与 primary_fuel 两列
 /// - v3：灌入阶段21 的电力网络**演示数据**（200 变电站 / 100 线路）—— 已冻结，见下
 /// - v4：清空 v3 遗留的演示行（阶段28 起改用真实 OSM 数据）
+/// - v5：为「当前视野统计」的电厂计数加 (lat, lon) 索引（阶段30）
 ///
 /// 🔴 为什么 v3 **不能删**（这是实测 + 读源码换来的结论，别再试一次）：
 ///
@@ -94,6 +95,15 @@ fn migrations() -> Vec<Migration> {
             version: 4,
             description: "clear_demo_power_grid",
             sql: include_str!("../migrations/004_clear_demo_power_grid.sql"),
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 5,
+            description: "index_plants_lat_lon",
+            // 纯新增索引：不动表结构、不动数据。
+            // 不重新生成 seed/global_power_gis.db —— 首次启动时本迁移会自动补上索引，
+            // 所以不必为了一个索引去提交一个 3MB 的二进制差异。
+            sql: include_str!("../migrations/005_index_plants_latlon.sql"),
             kind: MigrationKind::Up,
         },
     ]

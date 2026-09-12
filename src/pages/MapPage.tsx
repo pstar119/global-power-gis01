@@ -15,6 +15,7 @@ import {
   addProtocol,
   type GeoJSONSource,
   type LayerSpecification,
+  type MapGeoJSONFeature,
   type StyleSpecification,
 } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
@@ -184,6 +185,31 @@ const OSM_LINE_TIERS: ReadonlyArray<{
 const OSM_SUBSTATION_LAYER_ID = "osm-substations";
 const OSM_PLANT_LAYER_ID = "osm-plants";
 
+/**
+ * 阶段30：电压分级开关的显示文案。
+ * 键直接用 `vclass` 取值 —— 与 `OSM_LINE_TIERS`、以及瓦片属性一一对应，
+ * 不需要任何映射表，也不会出现「开关名对不上图层」的错位。
+ */
+const TIER_LABEL: Record<string, string> = {
+  "735+": "735kV 以上",
+  "500-734": "500-734kV",
+  "220-499": "220-499kV",
+  "<220": "220kV 以下",
+  unknown: "电压未知",
+};
+
+/** 全部分级的键（含 unknown） */
+const LINE_TIER_KEYS: readonly string[] = OSM_LINE_TIERS.map((t) => t.vclass);
+
+/**
+ * 默认开启的分级：除「电压未知」外全开。
+ * 实测长三角有 7,917 条线路没有 `voltage` 标签（约 35%），把它们归进任何一档都是误导，
+ * 所以单独一档且**默认关闭**。
+ */
+const DEFAULT_ON_TIERS: readonly string[] = OSM_LINE_TIERS
+  .filter((t) => t.vclass !== "unknown")
+  .map((t) => t.vclass);
+
 /** 归档与小样本都拿不到时的提示 */
 const OSM_MISSING_NOTICE =
   "未找到 OSM 电网数据。生成顺序：python scripts/fetch_osm_power.py --preset yrd → " +
@@ -341,6 +367,38 @@ function formatLngLat([lon, lat]: [number, number]): string {
  *
  * 先 Database.load() 确保插件的连接池已建立，再 db.select(...)。
  */
+
+/**
+ * 阶段30：统计**当前视野**内的电厂数量（精确）。
+ *
+ * 为什么不和线路/变电站一样用 queryRenderedFeatures 求和：
+ * 电厂是**聚合**（cluster）图层，图层查询拿到的是聚合体（带 point_count），
+ * 求和会把聚合内的电厂重复计数；同一个电厂还可能落在多张瓦片的缓冲区里。
+ * 数据库一句 COUNT 就是精确值，而且它是只读 SELECT，不触碰「前端只读」红线。
+ *
+ * ⚠️ 边界值直接插进 SQL：取值来自 `map.getBounds()` 并经 `Number()` 强转，
+ *    是纯数字而非用户输入，没有注入面。比依赖占位符语法（`?` / `$1`）在
+ *    tauri-plugin-sql 上的具体行为更稳妥。
+ */
+async function loadPlantCountInBox(
+  west: number,
+  south: number,
+  east: number,
+  north: number,
+): Promise<number> {
+  const db = await Database.load(DB_URL);
+  const w = Number(west);
+  const s = Number(south);
+  const e = Number(east);
+  const n = Number(north);
+  const rows = (await db.select(
+    "SELECT COUNT(*) AS c FROM power_plants " +
+      "WHERE lat IS NOT NULL AND lon IS NOT NULL " +
+      `AND lon BETWEEN ${w} AND ${e} AND lat BETWEEN ${s} AND ${n}`,
+  )) as Array<{ c: number }>;
+  return rows[0]?.c ?? 0;
+}
+
 async function loadPlantsGeoJson(): Promise<FeatureCollection> {
   const db = await Database.load(DB_URL);
 
@@ -1071,9 +1129,32 @@ function MapPage({ command = null }: MapPageProps) {
   const [mapNotice, setMapNotice] = useState<string | null>(null);
 
   // 图层可见性：纯视觉开关，不加载任何数据
+  // 阶段30：除三个大开关外，还包含 4 个电压分级键（「电压未知」不在其中 = 默认关闭）
   const [visibleLayers, setVisibleLayers] = useState<readonly string[]>(() => [
     ...LAYERS,
+    ...DEFAULT_ON_TIERS,
   ]);
+
+  /**
+   * 地图与数据是否都就绪。
+   * `mapReadyRef` 是 ref，不触发重渲染；统计效果需要 state 版才能在就绪那一刻自动跑一次。
+   */
+  const [mapReady, setMapReady] = useState(false);
+
+  /**
+   * 阶段30：当前视野统计。
+   * `exact=false` 表示低级别（z<8）瓦片为压体积未保留 `osm_id`，
+   * 无法跨瓦片去重，只能按源统计（含瓦片边缘重复）。
+   */
+  const [viewStats, setViewStats] = useState<{
+    plants: number;
+    lines: number;
+    substations: number;
+    exact: boolean;
+  } | null>(null);
+
+  /** 输电线路总开关的状态：任一电压档开启即为「开」 */
+  const anyTierOn = LINE_TIER_KEYS.some((k) => visibleLayers.includes(k));
 
   /**
    * visibleLayers 的 ref 镜像。
@@ -1688,6 +1769,7 @@ function MapPage({ command = null }: MapPageProps) {
               // 地图与数据都就绪了，到这一步才能执行飞行与高亮。
               // 顺便消费掉可能早于地图到达的那条指令。
               mapReadyRef.current = true;
+              setMapReady(true);
               tryApplyCommand();
             })
             .catch((err: unknown) => {
@@ -1729,6 +1811,25 @@ function MapPage({ command = null }: MapPageProps) {
     );
   };
 
+  /** 阶段30：切换单个电压分级 */
+  const toggleTier = (vclass: string) => {
+    setVisibleLayers((prev) =>
+      prev.includes(vclass) ? prev.filter((n) => n !== vclass) : [...prev, vclass],
+    );
+  };
+
+  /**
+   * 阶段30：输电线路总开关 —— 一键全开 / 全关所有电压档。
+   * 规则：当前「有任一档开启」就全部关闭；一档都不开则全部开启（含「电压未知」）。
+   */
+  const toggleAllTiers = () => {
+    setVisibleLayers((prev) => {
+      const on = LINE_TIER_KEYS.some((k) => prev.includes(k));
+      const rest = prev.filter((n) => !LINE_TIER_KEYS.includes(n));
+      return on ? rest : [...rest, ...LINE_TIER_KEYS];
+    });
+  };
+
   /**
    * 阶段21：把「图层控制」的开关真正接到 MapLibre 上。
    *
@@ -1744,33 +1845,29 @@ function MapPage({ command = null }: MapPageProps) {
     const map = mapRef.current;
     if (!map || !mapReadyRef.current) return;
 
-    const visibility = (name: string) =>
-      visibleLayers.includes(name) ? "visible" : "none";
-
-    // 前三个图层都由「电厂」开关统一控制：高亮层是查询结果的叠加，
-    // 若单独留着，会出现「电厂关掉了但还飘着一圈金环」的怪状。
-    // ⚠️ 输电线路的热区层必须跟着视觉线一起开关，否则会出现
-    //    「线看不见了、却还能点到它的弹窗」的幽灵交互。
-    // ‼️ 阶段28：旧的两个开关现在接的是 **OSM 真实数据**。
-    //    上一阶段删掉了仿真数据，这里的 SQL 查询已返回空集，
-    //    正好把开关接到新图层上，不必重写 UI。
-    //    ⚠️ `osm-line-unknown` 故意不放进任何组：
-    //    控制它的名字不在 visibleLayers 里，于是始终是 none，
-    //    直到下一阶段加上「电压等级复选框列表」时它会自动生效。
-    const groups: ReadonlyArray<readonly [string, readonly string[]]> = [
-      ["电厂", [CLUSTER_LAYER_ID, PLANT_LAYER_ID, HIGHLIGHT_LAYER_ID, OSM_PLANT_LAYER_ID]],
-      ["变电站", [SUBSTATIONS_LAYER_ID, OSM_SUBSTATION_LAYER_ID]],
-      ["输电线路", [LINES_LAYER_ID, LINES_HIT_LAYER_ID, ...OSM_LINE_TIERS.filter((t) => t.vclass !== "unknown").map((t) => t.id)]],
-      ["电压未知", ["osm-line-unknown"]],
-    ];
-
-    for (const [name, ids] of groups) {
+    const apply = (ids: readonly string[], on: boolean) => {
       for (const id of ids) {
         if (map.getLayer(id)) {
-          map.setLayoutProperty(id, "visibility", visibility(name));
+          map.setLayoutProperty(id, "visibility", on ? "visible" : "none");
         }
       }
+    };
+    const on = (name: string) => visibleLayers.includes(name);
+
+    // 「电厂」统一控制 4 个图层：高亮层是查询结果的叠加，
+    // 若单独留着，会出现「电厂关掉了但还飘着一圈金环」的怪状。
+    apply([CLUSTER_LAYER_ID, PLANT_LAYER_ID, HIGHLIGHT_LAYER_ID, OSM_PLANT_LAYER_ID], on("电厂"));
+    apply([SUBSTATIONS_LAYER_ID, OSM_SUBSTATION_LAYER_ID], on("变电站"));
+
+    // ⚠️ 输电线路的热区层必须跟着视觉线一起开关，否则会出现
+    //    「线看不见了、却还能点到它的弹窗」的幽灵交互。
+    // ‼️ 阶段30：输电线路细化为「一个电压档一个开关」，键直接用 vclass。
+    //    `osm-line-unknown` 不再是特例 —— 它只是普通的第 5 档（默认关闭）。
+    for (const tier of OSM_LINE_TIERS) {
+      apply([tier.id], on(tier.vclass));
     }
+    // 旧的 DB 演示线层（阶段28 已清空）与热区层跟随「任一档开启」
+    apply([LINES_LAYER_ID, LINES_HIT_LAYER_ID], LINE_TIER_KEYS.some((k) => on(k)));
 
     // 聚合数字是 HTML Marker，上面的 setLayoutProperty 管不到它
     if (visibleLayers.includes("电厂")) {
@@ -1779,6 +1876,102 @@ function MapPage({ command = null }: MapPageProps) {
       labelApiRef.current?.clear();
     }
   }, [visibleLayers]);
+
+  /**
+   * 阶段30：当前视野数据统计。
+   *
+   * 触发：`moveend`（平移与缩放结束都会触发）+ 200ms 防抖。
+   * 口径（比数字本身更重要，面板上同步标注）：
+   *   · 电厂 —— SQL bbox 精确计数（聚合图层不能按要素求和，会把聚合内的电厂重复计数）
+   *   · 线路段 / 变电站 —— `queryRenderedFeatures`：只数**真的渲染在视野内**的要素，
+   *     且天然跟随上面的复选框；`querySourceFeatures` 会把视野外瓦片缓冲区里的要素
+   *     也算进来，数值明显偏大且与开关脱钩（因此不用它）。
+   *   · 跨瓦片重复：z≥8 的瓦片带 `osm_id`，按它去重 → 精确；
+   *     z<8 的低级别瓦片为压体积没保留 `osm_id`，无法去重 → 显示为 `≈`。
+   *
+   * ⚠️ 性能护栏：耗时写进控制台；超过 50ms 额外告警（按约定此时应停下来汇报，不硬撑）。
+   */
+  useEffect(() => {
+    if (!mapReady) return;
+    const map = mapRef.current;
+    if (!map) return;
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let cancelled = false;
+
+    /** 同一要素可能被相邻瓦片各带一份（缓冲区重叠），z≥8 时用 osm_id 去重 */
+    const countUnique = (feats: MapGeoJSONFeature[], exact: boolean): number => {
+      if (!exact) return feats.length;
+      const seen = new Set<unknown>();
+      for (const f of feats) {
+        const id = f.properties?.osm_id;
+        if (id != null) seen.add(id);
+      }
+      return seen.size;
+    };
+
+    const run = () => {
+      const t0 = performance.now();
+      const zoom = map.getZoom();
+      const exact = zoom >= 8;
+      const on = (name: string) => visibleLayersRef.current.includes(name);
+
+      // 只查**当前开启**的电压档：关掉的档不应出现在统计里
+      const lineLayers = OSM_LINE_TIERS.filter((t) => on(t.vclass)).map((t) => t.id);
+      const lines = lineLayers.length
+        ? countUnique(map.queryRenderedFeatures({ layers: lineLayers }), exact)
+        : 0;
+      const substations = on("变电站")
+        ? countUnique(
+            map.queryRenderedFeatures({ layers: [OSM_SUBSTATION_LAYER_ID] }),
+            exact,
+          )
+        : 0;
+      // 拆两段计时：渲染查询是同步的，剩下全部是 SQL 往返（电厂精确计数走数据库）
+      const tRender = performance.now();
+
+      const b = map.getBounds();
+      const plantsPromise = on("电厂")
+        ? loadPlantCountInBox(b.getWest(), b.getSouth(), b.getEast(), b.getNorth())
+        : Promise.resolve(0);
+
+      void plantsPromise
+        .then((plants) => {
+          if (cancelled) return;
+          const ms = performance.now() - t0;
+          const msRender = tRender - t0;
+          console.debug(
+            `[MapPage] 视野统计 ${ms.toFixed(1)}ms（渲染查询 ${msRender.toFixed(1)}ms + 数据库 ${(ms - msRender).toFixed(1)}ms，` +
+              `z=${zoom.toFixed(2)}，${exact ? "按 osm_id 去重" : "低级别按源统计"}）：` +
+              `电厂 ${plants} / 线路段 ${lines} / 变电站 ${substations}`,
+          );
+          if (ms > 50) {
+            console.warn(`[MapPage] ⚠️ 视野统计超过 50ms 护栏：${ms.toFixed(1)}ms`);
+          }
+          setViewStats({ plants, lines, substations, exact });
+        })
+        .catch((err: unknown) => {
+          console.error("[MapPage] 视野统计失败", err);
+        });
+    };
+
+    const schedule = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(run, 200);
+    };
+
+    map.on("moveend", schedule);
+    map.on("zoomend", schedule);
+    // 建图完成后立即算一次，避免面板长时间停在「—」
+    schedule();
+
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+      map.off("moveend", schedule);
+      map.off("zoomend", schedule);
+    };
+  }, [mapReady, visibleLayers]);
 
   return (
     <div className={styles.viewport}>
@@ -1802,7 +1995,9 @@ function MapPage({ command = null }: MapPageProps) {
 
         <ul id="map-layer-list" className={styles.layerList} hidden={!panelOpen}>
           {LAYERS.map((name) => {
-            const isVisible = visibleLayers.includes(name);
+            // 「输电线路」是总开关：状态 = 任一电压档开启；点击 = 全开 / 全关
+            const isVisible =
+              name === "输电线路" ? anyTierOn : visibleLayers.includes(name);
 
             return (
               <li key={name}>
@@ -1810,7 +2005,9 @@ function MapPage({ command = null }: MapPageProps) {
                   type="button"
                   className={styles.layerBtn}
                   aria-pressed={isVisible}
-                  onClick={() => toggleLayer(name)}
+                  onClick={() =>
+                    name === "输电线路" ? toggleAllTiers() : toggleLayer(name)
+                  }
                 >
                   <span
                     className={styles.layerSwatch}
@@ -1823,6 +2020,34 @@ function MapPage({ command = null }: MapPageProps) {
             );
           })}
         </ul>
+
+        {/* 阶段30：输电线路按电压分级。
+            用原生 `<input type="checkbox">`：语义与无障碍最好，也不必为「选中态」自造样式。
+            色块取自与地图**同一份** `OSM_LINE_TIERS[].color`，所以开关本身就是图例，
+            永远不会和地图上的颜色脱节。 */}
+        <div className={styles.tierGroup} hidden={!panelOpen}>
+          <p className={styles.legendTitle}>输电线路（按电压分级）</p>
+          <ul className={styles.tierList}>
+            {OSM_LINE_TIERS.map((tier) => (
+              <li key={tier.vclass}>
+                <label className={styles.tierItem}>
+                  <input
+                    type="checkbox"
+                    className={styles.tierCheck}
+                    checked={visibleLayers.includes(tier.vclass)}
+                    onChange={() => toggleTier(tier.vclass)}
+                  />
+                  <span
+                    className={styles.layerSwatch}
+                    style={{ background: tier.color }}
+                    aria-hidden="true"
+                  />
+                  {TIER_LABEL[tier.vclass] ?? tier.vclass}
+                </label>
+              </li>
+            ))}
+          </ul>
+        </div>
 
         {/* 燃料类型图例：纯 DOM + CSS，色块颜色取自与地图同一份 FUEL_COLORS，
             不引入任何图表 / 配色库。随图层面板一同折叠。 */}
@@ -1901,6 +2126,45 @@ function MapPage({ command = null }: MapPageProps) {
 
       {/* 地图指令的执行结果提示（如「已高亮 N 个匹配的电厂」） */}
       {mapNotice && <p className={styles.mapNotice}>{mapNotice}</p>}
+
+      {/* 阶段30：当前视野数据统计。
+          放左下角、比例尺上方 —— 左上是图层面板、右上是缩放、右下是版权、底部中间是提示，
+          只剩这个位置不会碰撞。`pointer-events: none` 保证它不挡地图拖拽。 */}
+      <section
+        className={styles.statsPanel}
+        aria-label="当前视野数据统计"
+        aria-live="polite"
+      >
+        <p className={styles.statsTitle}>本视野</p>
+        <ul className={styles.statsList}>
+          <li>
+            电厂 <b>{viewStats ? viewStats.plants.toLocaleString() : "—"}</b> 座
+          </li>
+          <li>
+            线路段{" "}
+            <b>
+              {viewStats
+                ? `${viewStats.exact ? "" : "≈"}${viewStats.lines.toLocaleString()}`
+                : "—"}
+            </b>{" "}
+            段
+          </li>
+          <li>
+            变电站{" "}
+            <b>
+              {viewStats
+                ? `${viewStats.exact ? "" : "≈"}${viewStats.substations.toLocaleString()}`
+                : "—"}
+            </b>{" "}
+            座
+          </li>
+        </ul>
+        <p className={styles.statsNote}>
+          {viewStats && !viewStats.exact
+            ? "z<8 为按源统计（含瓦片边缘重复）"
+            : "z≥8 已按 osm_id 去重"}
+        </p>
+      </section>
     </div>
   );
 }
