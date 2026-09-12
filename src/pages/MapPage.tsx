@@ -98,6 +98,16 @@ const SUBSTATION_COLOR = "#3fd0c9";
 /** 输电线路用中性灰，在 #101418 深底上可见但不抢眼 */
 const LINE_COLOR = "#8b96a8";
 
+/**
+ * 执行查询后的最低缩放级别。
+ *
+ * fitBounds 只能限制 maxZoom，**没有 minZoom**。而「全球前10大电厂」
+ * 这类结果本就散布在全球，bbox 会撑到接近整个地球，fitBounds 算出来的
+ * 级别很低 —— 点是看见了，但容量差异（半径分级）在那一级几乎看不出来。
+ * 所以在飞行结束后兜一次底。
+ */
+const MIN_COMMAND_ZOOM = 2.2;
+
 /** Popup 里展示的字段（来自 GeoJSON properties） */
 type PlantProperties = {
   name: string;
@@ -486,13 +496,17 @@ function buildFixtureStyle(): StyleSpecification {
 /** 把匹配的点写进高亮图层（图层只建一次，之后只改数据） */
 function renderHighlight(
   map: MapLibreMap,
-  rows: ReadonlyArray<{ lat: number; lon: number }>,
+  rows: ReadonlyArray<{ lat: number; lon: number; capacity_mw?: number | null }>,
 ) {
   const data: FeatureCollection = {
     type: "FeatureCollection",
     features: rows.map((r) => ({
       type: "Feature",
-      properties: {},
+      properties: {
+        // 半径同样按容量分级 —— 否则「前10大电厂」高亮出来是一样大的圈，
+        // 反而看不出谁更大，削弱了这个查询本身的意义
+        capacity: r.capacity_mw ?? 0,
+      },
       geometry: { type: "Point", coordinates: [r.lon, r.lat] },
     })),
   };
@@ -514,8 +528,25 @@ function renderHighlight(
     type: "circle",
     source: HIGHLIGHT_SOURCE,
     paint: {
-      // 放大 + 金色描边：与深色底图对比强，且不消耗持续 CPU
-      "circle-radius": 7,
+      // 阶段24：整体比底图点大一号（6/8.5/11/14 对 3/5/7/10）。
+      //
+      // ⚠️ 这里**刻意不做 zoom 联动**：高亮通常只有几个到几十个点，
+      //    需要任何缩放级别都醒目。底图要联动是因为点太多会糊，
+      //    高亮没有这个问题。
+      //
+      // 「更大 + 金色描边」是双重信号：只换成金色的话，
+      // 在点密集的区域容易被底图点淹没，找不到命中的是哪几个。
+      "circle-radius": [
+        "step",
+        ["get", "capacity"],
+        6,
+        100,
+        8.5,
+        500,
+        11,
+        1000,
+        14,
+      ],
       "circle-color": "transparent",
       "circle-stroke-color": "#ffd24a",
       "circle-stroke-width": 2,
@@ -624,6 +655,16 @@ function MapPage({ command = null }: MapPageProps) {
           // fitBounds 会自动算出贴合的范围级别，不用猜 zoom
           { padding: 90, duration: 1200, maxZoom: 11 },
         );
+
+        // ⚠️ 飞完再兜一层最低缩放。
+        //    fitBounds 只支持 maxZoom，不支持 minZoom；而结果散布全球时
+        //    算出的级别会很低，容量分级在那级别下几乎看不出来。
+        //    用 once 而不是 on，避免每次移动都检查。
+        map.once("moveend", () => {
+          if (mapRef.current && map.getZoom() < MIN_COMMAND_ZOOM) {
+            map.easeTo({ zoom: MIN_COMMAND_ZOOM, duration: 400 });
+          }
+        });
       }
 
       // 2) 取明细点做高亮（SQL 里多取一个，用于判断是否超限）
@@ -632,6 +673,7 @@ function MapPage({ command = null }: MapPageProps) {
         name: string;
         lat: number;
         lon: number;
+        capacity_mw: number | null;
       }>;
 
       if (points.length > MAX_HIGHLIGHT_POINTS) {
@@ -907,7 +949,24 @@ function MapPage({ command = null }: MapPageProps) {
                 source: PLANTS_SOURCE,
                 filter: ["!", ["has", "point_count"]],
                 paint: {
-                  "circle-radius": 5,
+                  // 阶段24：半径按装机容量分级，并与缩放级别联动。
+                  //
+                  // ⚠️ 为什么要联动：库里 3.5 万个点，容量跨度 0.1~7000 MW。
+                  //    若固定一套半径，低缩放时大点会糊成一片色块，
+                  //    高缩放时小点又几乎看不见 —— 两头都不好用。
+                  //    低缩放看分布密度，高缩放才看个体差异。
+                  //
+                  // step 是 MapLibre 原生表达式，语义等价于 switch-case，
+                  // 零依赖、零 JS 计算，且能感知 zoom（JS 预计算做不到这点）。
+                  "circle-radius": [
+                    "interpolate",
+                    ["linear"],
+                    ["zoom"],
+                    3,
+                    ["step", ["get", "capacity"], 1.2, 100, 2, 500, 3, 1000, 4.5],
+                    8,
+                    ["step", ["get", "capacity"], 3, 100, 5, 500, 7, 1000, 10],
+                  ],
                   // 颜色由属性携带（见 loadPlantsGeoJson 里的 fuelColor 映射）
                   "circle-color": ["get", "color"],
                   "circle-opacity": 0.9,

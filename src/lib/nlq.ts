@@ -46,7 +46,11 @@ const FUEL_ALIASES: ReadonlyArray<readonly [string, string]> = [
   ["废弃物", "Waste"],
 ];
 
-export type Intent = "country_stats" | "fuel_stats" | "global_stats";
+export type Intent =
+  | "country_stats"   // 按国家聚合
+  | "fuel_stats"      // 按燃料聚合
+  | "global_stats"    // 全球总量概览
+  | "plant_list";     // 按单个电厂列出（阶段24：前 N 大电厂）
 
 export interface ParsedQuery {
   intent: Intent;
@@ -88,11 +92,18 @@ export type ParseResult =
 /** 界面上提供的示例问法 */
 export const EXAMPLES: readonly string[] = [
   "全球煤电装机容量排名前5的国家",
+  "全球前10大电厂",
+  "中国最大的5个水电站",
   "中国有多少电厂",
-  "全球风电总装机容量",
   "全球燃料类型占比",
-  "全球有多少电厂",
 ];
+
+/**
+ * plant_list 不指定 limit 时的默认条数。
+ * 必须有一个默认值 —— 否则「列出电厂」这类问法会生成潜 LIMIT 的 SQL，
+ * 把 3.5 万行全拉回前端。
+ */
+export const DEFAULT_PLANT_LIMIT = 10;
 
 /** 长别名优先，避免短词先命中导致语义跑偏 */
 function matchAlias(
@@ -122,6 +133,18 @@ function decideIntent(
   fuel: string | undefined,
   country: string | undefined,
 ): Intent | null {
+  // ⚠️ 「个体词 + 要列表」优先，且必须放在国家维度判断**之前**。
+  //    否则「全球前10大电厂」里的「前10」「最大」会命中下面的
+  //    wantsCountryDim 正则，被误判成按国家聚合 —— 结果完全不对。
+  //
+  // ⚠️ 两个条件必须同时成立：「中国有多少电厂」虽然有个体词，
+  //    但问的是数量，应该继续走聚合；只有「前 N / 最大 / 哪些」
+  //    这类要具体名单的问法才走明细列表。
+  const individual = /电厂|电站|发电厂|发电站|机组/.test(text);
+  const wantsList =
+    /哪些|列出|列表|最大的?|最高的?|前\s*\d|top\s*\d|排名前/i.test(text);
+  if (individual && wantsList) return "plant_list";
+
   // ⚠️ 用「国家」而不是「国」，否则「中国」「美国」里的单字会误判
   const wantsCountryDim = /国家|地区|排名|排行|榜单|最多|最大|前\d|top\d/i.test(
     text,
@@ -191,6 +214,24 @@ ORDER BY capacity_mw DESC${limitSql}`,
     };
   }
 
+  // plant_list：按单个电厂列出，容量降序
+  if (intent === "plant_list") {
+    const { where, params } = buildFilter(query);
+    // ⚠️ 强制带上 LIMIT。limit 缺省时用默认值，绝不生成无 LIMIT 的查询 ——
+    //    那会把 34936 行明细全拉回前端并在表格里渲染。
+    return {
+      sql: `SELECT name,
+       country,
+       primary_fuel,
+       capacity_mw
+FROM power_plants
+${where}
+ORDER BY capacity_mw DESC
+LIMIT ?`,
+      params: [...params, plantListLimit(query)],
+    };
+  }
+
   // fuel_stats
   const where: string[] = [];
   const params: unknown[] = [];
@@ -223,6 +264,14 @@ export function describeQuery(query: ParsedQuery): string {
   const countryText = query.country ? countryLabel(query.country) : null;
 
   if (query.intent === "global_stats") return "全球总量概览";
+
+  if (query.intent === "plant_list") {
+    const parts = ["按单个电厂列出（容量降序）"];
+    if (fuelText) parts.push(`只统计「${fuelText}」`);
+    if (countryText) parts.push(`限定国家/地区「${countryText}」`);
+    parts.push(`取容量前 ${query.limit ?? DEFAULT_PLANT_LIMIT} 座`);
+    return parts.join("，");
+  }
 
   const parts: string[] = [];
   if (query.intent === "country_stats") {
@@ -305,6 +354,23 @@ function buildFilter(query: ParsedQuery): {
  */
 export function buildBoundsSql(query: ParsedQuery): SqlPlan {
   const { where, params } = buildFilter(query);
+
+  // ⚠️ plant_list 是「取前 N 座」，bbox 必须只覆盖这 N 座。
+  //    否则「全球前 10 大电厂」会去算全部 34936 个电厂的 bbox（≈ 整个地球），
+  //    飞过去之后就是全球视野，根本看不到那 10 个点。
+  if (query.intent === "plant_list") {
+    return {
+      sql: `SELECT MIN(lon) AS min_lon, MIN(lat) AS min_lat,
+       MAX(lon) AS max_lon, MAX(lat) AS max_lat
+FROM (SELECT lon, lat
+      FROM power_plants
+      ${where}
+      ORDER BY capacity_mw DESC
+      LIMIT ?)`,
+      params: [...params, plantListLimit(query)],
+    };
+  }
+
   return {
     sql: `SELECT MIN(lon) AS min_lon, MIN(lat) AS min_lat,
        MAX(lon) AS max_lon, MAX(lat) AS max_lat
@@ -314,14 +380,40 @@ ${where}`,
   };
 }
 
+/** plant_list 的条数：缺省用默认值，上限 50，避免拉回全部明细 */
+function plantListLimit(query: ParsedQuery): number {
+  return query.limit && query.limit > 0
+    ? Math.min(query.limit, 50)
+    : DEFAULT_PLANT_LIMIT;
+}
+
 /**
  * 求匹配的明细点，供地图高亮图层使用。
  * 多取一个（LIMIT +1）以便调用方判断是否超过了高亮上限。
+ *
+ * ⚠️ 阶段24 起带出 capacity_mw：高亮圆的半径也要按容量分级，
+ *    否则「全球前10大电厂」高亮出来的点全是一样大的圈，
+ *    反而看不出谁更大。
  */
 export function buildHighlightSql(query: ParsedQuery): SqlPlan {
   const { where, params } = buildFilter(query);
+
+  // ⚠️ 同理：plant_list 的高亮只能是前 N 座，并且必须按容量降序取。
+  //    不做这个限制的话，「全球前10大电厂」会去拉全部 34936 个点，
+  //    直接被 MAX_HIGHLIGHT_POINTS 上限保护挡掉，结果是「只飞行、未高亮」。
+  if (query.intent === "plant_list") {
+    return {
+      sql: `SELECT name, lat, lon, primary_fuel, capacity_mw
+FROM power_plants
+${where}
+ORDER BY capacity_mw DESC
+LIMIT ?`,
+      params: [...params, plantListLimit(query)],
+    };
+  }
+
   return {
-    sql: `SELECT name, lat, lon, primary_fuel
+    sql: `SELECT name, lat, lon, primary_fuel, capacity_mw
 FROM power_plants
 ${where}
 LIMIT ${MAX_HIGHLIGHT_POINTS + 1}`,

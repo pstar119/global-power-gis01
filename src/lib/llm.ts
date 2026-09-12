@@ -126,10 +126,12 @@ const INTENT_MAP: Record<string, Intent> = {
   country: "country_stats",
   fuel: "fuel_stats",
   global: "global_stats",
+  plant: "plant_list",
   // 容错：模型偶尔会照着内部命名输出
   country_stats: "country_stats",
   fuel_stats: "fuel_stats",
   global_stats: "global_stats",
+  plant_list: "plant_list",
 };
 
 const SYSTEM_PROMPT = `你是一个把自然语言问题解析成结构化查询条件的解析器。你**不回答**问题本身，只输出查询条件。
@@ -137,15 +139,23 @@ const SYSTEM_PROMPT = `你是一个把自然语言问题解析成结构化查询
 只输出一个 JSON 对象，不要任何解释文字，不要 markdown 代码块，不要前后缀。
 
 字段说明：
-- intent  必填，只能是 "country" | "fuel" | "global"
-    country = 按国家/地区聚合（问"哪些国家""排名""中国"等）
-    fuel    = 按燃料类型聚合（问"燃料构成""占比""风电总容量"等）
-    global  = 全球总量概览（问"全球有多少电厂""总装机容量"等）
+- intent  必填，只能是 "country" | "fuel" | "global" | "plant"
+    country = 按国家/地区**聚合**（问"哪些国家""国家排名"）
+    fuel    = 按燃料类型**聚合**（问"燃料构成""占比""风电总容量"）
+    global  = 全球总量概览（问"全球有多少电厂""总装机容量"）
+    plant   = 列出**具体电厂**（问"前10大电厂""最大的5个水电站"）
 - fuel    可选，只能取以下之一（大小写必须完全一致）：
     Coal, Gas, Oil, Nuclear, Hydro, Wind, Solar, Biomass,
     Geothermal, Waste, Storage, Cogeneration, Petcoke, Wave and Tidal, Other
 - country 可选，国家/地区的 ISO3 三字母码，例如 CHN、USA、IND、DEU
 - limit   可选，整数，表示"前 N 名"里的 N
+
+【最容易搞错的一点】看到"电厂/电站/机组"这类**个体**名词时，intent 必须是 "plant"；
+看到"国家/地区"这类**聚合**名词时，intent 才是 "country"。
+两者都常与"最大""前N"一起出现，必须靠名词本身区分：
+  全球前5大国家      -> country（比的是国家）
+  全球前10大电厂     -> plant  （比的是电厂）
+  中国最大的5个水电站 -> plant  （水电站是单个电厂）
 
 输出格式：{"ok":true,"intent":"country","fuel":"Coal","limit":5}
 无法理解、或与全球电力设施数据无关时：{"ok":false,"message":"简短说明原因"}
@@ -153,14 +163,22 @@ const SYSTEM_PROMPT = `你是一个把自然语言问题解析成结构化查询
 示例：
 全球煤电装机容量排名前5的国家
 {"ok":true,"intent":"country","fuel":"Coal","limit":5}
+装机容量最大的5个国家
+{"ok":true,"intent":"country","limit":5}
+全球前10大电厂
+{"ok":true,"intent":"plant","limit":10}
+全球最大的电厂有哪些
+{"ok":true,"intent":"plant","limit":10}
+中国最大的5个水电站
+{"ok":true,"intent":"plant","country":"CHN","fuel":"Hydro","limit":5}
+美国最大的3个天然气电厂
+{"ok":true,"intent":"plant","country":"USA","fuel":"Gas","limit":3}
 中国有多少电厂
 {"ok":true,"intent":"country","country":"CHN"}
 全球风电总装机容量
 {"ok":true,"intent":"fuel","fuel":"Wind"}
 全球燃料类型占比
 {"ok":true,"intent":"fuel"}
-装机容量最大的5个国家
-{"ok":true,"intent":"country","limit":5}
 全球有多少电厂
 {"ok":true,"intent":"global"}
 今天天气怎么样

@@ -38,6 +38,7 @@ const LS_KEYS = {
 
 /** 结果列名 -> 中文表头 */
 const COLUMN_LABELS: Record<string, string> = {
+  name: "电厂名称",
   country: "国家/地区",
   primary_fuel: "燃料类型",
   plants: "电厂数量",
