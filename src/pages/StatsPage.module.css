@@ -78,19 +78,89 @@
 
 .chartBox {
   display: flex;
-  align-items: center;
-  justify-content: center;
+  flex-direction: column;
+  gap: 12px;
   min-width: 0;
   box-sizing: border-box;
   min-height: 260px;
   padding: 1rem;
-  /* 虚线不用 --gpg-border(#3c3c3c)：压在 #2d2d30 底上几乎看不见 */
-  border: 1px dashed rgba(140, 140, 140, 0.4);
+  border: 1px solid var(--gpg-border);
   border-radius: 6px;
   background-color: var(--gpg-panel-bg);
+}
+
+/* 图表小标题 */
+.chartTitle {
+  margin: 0;
+  color: var(--gpg-muted);
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+/* ---------- 纯 CSS 横向条形图（零图表库） ----------
+   每行三列：标签 / 轨道 / 数值。轨道是固定高度的色槽，
+   内层 .barFill 的 width 由 React 行内 style 控制（百分比）。
+   tabular-nums 让数值列对齐，避免长短数字左右跳动。 */
+
+.barList {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.barRow {
+  display: grid;
+  /* 中间用 minmax(0, 1fr)：默认 min-width:auto 会被长标签撑破 */
+  grid-template-columns: 68px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.72rem;
+  line-height: 1.3;
+}
+
+.barLabel {
+  color: var(--gpg-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.barTrack {
+  height: 10px;
+  border-radius: 3px;
+  background-color: rgba(255, 255, 255, 0.06);
+  overflow: hidden;
+}
+
+.barFill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  /* 未显式传颜色时的兜底色（国家榜用它） */
+  background-color: var(--gpg-accent);
+  transition: width 0.35s ease;
+}
+
+.barValue {
+  color: var(--gpg-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* ---------- 加载中 / 出错 / 空库 ---------- */
+
+.stateHint {
+  margin: 12px 0 0;
   color: var(--gpg-muted);
   font-size: 0.8rem;
-  text-align: center;
+}
+
+.stateHint[data-state="error"] {
+  color: #ff8a8a;
 }
 
 /* ---------- 窄窗口降级（Tauri 窗口可自由缩放） ----------
