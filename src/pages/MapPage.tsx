@@ -70,6 +70,28 @@ function fuelColor(fuel: string | null): string {
 }
 
 /**
+ * 图例条目：燃料英文键 -> 中文标签（顺序即图例展示顺序）。
+ * 色块颜色不在这里写死，而是渲染时从 FUEL_COLORS 取 —— 避免颜色定义两处维护。
+ */
+const FUEL_LEGEND: ReadonlyArray<readonly [string, string]> = [
+  ["Coal", "煤电"],
+  ["Gas", "燃气"],
+  ["Oil", "燃油"],
+  ["Nuclear", "核电"],
+  ["Hydro", "水电"],
+  ["Wind", "风电"],
+  ["Solar", "光伏"],
+  ["Biomass", "生物质"],
+  ["Geothermal", "地热"],
+  ["Waste", "废弃物"],
+  ["Storage", "储能"],
+  ["Cogeneration", "热电联产"],
+  ["Petcoke", "石油焦"],
+  ["Wave and Tidal", "潮汐"],
+  ["Other", "其他"],
+];
+
+/**
  * 从 SQLite 读取电厂，转成 GeoJSON 供地图渲染。
  *
  * 数据由外部导入脚本写入（见 `scripts/import_wri_plants.py`），
@@ -185,7 +207,10 @@ function buildFixtureStyle(): StyleSpecification {
         url: `pmtiles://${FIXTURE_KEY}`,
         // 夹具只做到 z4；再放大由 MapLibre 自动 overzoom
         maxzoom: 4,
-        attribution: "合成测试数据（非真实电力数据）",
+        // ⚠️ WRI 数据采用 CC BY 4.0 许可，**要求署名**，这段来源说明必须保留。
+        // 底图瓦片目前仍是阶段11 的合成夹具，两者性质不同，必须分别说明。
+        attribution:
+          "电厂数据 © WRI Global Power Plant Database (CC BY 4.0)；离线瓦片为合成测试数据。",
       },
     },
     layers: [
@@ -376,6 +401,24 @@ function MapPage() {
             );
           })}
         </ul>
+
+        {/* 燃料类型图例：纯 DOM + CSS，色块颜色取自与地图同一份 FUEL_COLORS，
+            不引入任何图表 / 配色库。随图层面板一同折叠。 */}
+        <div className={styles.legend} hidden={!panelOpen}>
+          <p className={styles.legendTitle}>燃料类型</p>
+          <ul className={styles.legendList}>
+            {FUEL_LEGEND.map(([fuel, label]) => (
+              <li key={fuel} className={styles.legendItem}>
+                <span
+                  className={styles.legendSwatch}
+                  style={{ backgroundColor: fuelColor(fuel) }}
+                  aria-hidden="true"
+                />
+                {label}
+              </li>
+            ))}
+          </ul>
+        </div>
       </section>
 
       {/* 右上角：缩放控件（已接真实地图） */}

@@ -145,6 +145,58 @@
   background-color: var(--gpg-accent);
 }
 
+/* ---------- 左上：图例（燃料类型 -> 颜色） ----------
+   纯 CSS 实现：色块颜色由 JS 从与地图**同一份** FUEL_COLORS 映射传入，
+   不引入任何图表 / 配色库。用两列网格是为了在极窄面板里放下 15 种燃料。 */
+
+.legend {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--gpg-border);
+}
+
+/* ⚠️ 与 .layerList 同理：作者样式会盖掉浏览器默认的 [hidden]{display:none}，
+   必须显式声明，否则折叠时图例隐藏不掉。 */
+.legend[hidden] {
+  display: none;
+}
+
+.legendTitle {
+  margin: 0 0 6px;
+  padding: 0 0.5rem;
+  color: var(--gpg-muted);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+}
+
+.legendList {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 8px;
+  margin: 0;
+  padding: 0 0.5rem;
+  list-style: none;
+}
+
+.legendItem {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--gpg-text);
+  font-size: 0.7rem;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.legendSwatch {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  border-radius: 2px;
+}
+
 /* ---------- 右上：缩放控件 ---------- */
 
 .zoomControl {
