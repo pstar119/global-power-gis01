@@ -16,6 +16,8 @@
 - **当前视野统计**：地图左下角实时显示「本视野：X 座电厂 · Y 段线路 · Z 座变电站」，
   `moveend` + 200ms 防抖；z≥8 按 `osm_id` 去重（精确），z<8 因归档未保留 `osm_id` 而标注为「按源统计」
 
+![阶段30：图层电压分级开关与当前视野统计](docs/screenshots/phase30-voltage-tiers-and-viewport-stats.png)
+
 取数与切片流程见 [`README_OSM.md`](./README_OSM.md)。
 
 ## 技术栈
