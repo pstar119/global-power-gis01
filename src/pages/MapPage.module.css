@@ -272,8 +272,7 @@
   line-height: 1.5;
 }
 
-/* ---------- 聚合数字标记 ----------
-   数字用 HTML Marker 而非 symbol 图层：本项目样式是全离线内联的，
+/* ---------- 聚合数字标记 ----------   数字用 HTML Marker 而非 symbol 图层：本项目样式是全离线内联的，
    没有 `glyphs` 字体服务器，symbol 的 text-field 根本渲染不出来。
    圆本身由 circle 图层绘制，这里只负责把数字居中盖上去。 */
 
@@ -391,4 +390,29 @@
 .viewport :global(.maplibregl-popup-close-button:hover) {
   background-color: transparent;
   color: var(--gpg-text);
+}
+
+/* ---------- 地图指令执行结果提示 ----------
+   底部居中：左上角有图层面板、右上角有缩放控件、左下角有比例尺、右下角有版权，
+   只有底部中间是空的，且不易与它们重叠。 */
+
+.mapNotice {
+  position: absolute;
+  z-index: 1;
+  bottom: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: 70%;
+  margin: 0;
+  box-sizing: border-box;
+  padding: 6px 14px;
+  border: 1px solid var(--gpg-border);
+  border-radius: 999px;
+  background-color: rgba(37, 37, 38, 0.92);
+  -webkit-backdrop-filter: blur(4px);
+  backdrop-filter: blur(4px);
+  color: var(--gpg-text);
+  font-size: 0.75rem;
+  line-height: 1.5;
+  text-align: center;
 }

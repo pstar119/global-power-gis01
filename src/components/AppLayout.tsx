@@ -1,32 +1,36 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import Sidebar, { MENU_ITEMS, type MenuKey } from "./Sidebar";
 import TopBar from "./TopBar";
 import MapPage from "../pages/MapPage";
 import StatsPage from "../pages/StatsPage";
 import SettingsPage from "../pages/SettingsPage";
+import type { MapCommand, ParsedQuery } from "../lib/nlq";
 import styles from "./AppLayout.module.css";
 
 const APP_TITLE = "Global Power GIS";
 
-/** 按当前菜单项渲染内容区；三个页面各自管理留白与内容 */
-function renderContent(key: MenuKey, hint: string) {
-  switch (key) {
-    case "map":
-      return <MapPage />;
-
-    case "stats":
-      return <StatsPage hint={hint} />;
-
-    case "settings":
-      return <SettingsPage hint={hint} />;
-
-    default:
-      return null;
-  }
-}
+/** 取某个菜单项固定的 hint（页面标题），与当前激活项无关 */
+const hintOf = (key: MenuKey) =>
+  MENU_ITEMS.find((item) => item.key === key)?.hint ?? "";
 
 function AppLayout() {
   const [activeKey, setActiveKey] = useState<MenuKey>("map");
+
+  /**
+   * 跨页面向地图下达的指令。
+   *
+   * ⚠️ 刻意只用 useState 提升到这里，不引入 Zustand 等状态库：
+   *    跨页数据只有「一个可选命令」这一种，为它加一层依赖不划算。
+   * ⚠️ id 自增：MapPage 靠它去重，避免同一个命令被重复执行。
+   */
+  const [mapCommand, setMapCommand] = useState<MapCommand | null>(null);
+  const commandSeq = useRef(0);
+
+  const handleViewOnMap = (query: ParsedQuery) => {
+    commandSeq.current += 1;
+    setMapCommand({ ...query, id: commandSeq.current });
+    setActiveKey("map");
+  };
 
   const activeItem =
     MENU_ITEMS.find((item) => item.key === activeKey) ?? MENU_ITEMS[0];
@@ -43,7 +47,25 @@ function AppLayout() {
         <TopBar title={APP_TITLE} />
 
         <section className={styles.content} aria-label={activeItem.label}>
-          {renderContent(activeKey, activeItem.hint)}
+          {/* ⚠️ 三个页面**同时挂载**，只切换可见性而非卸载。
+              这样 MapLibre 实例、3.5 万个点与聚合索引只创建一次，
+              切页不再重建 —— 既让「在地图上查看」能瞬间响应，
+              也避免了反复 create/destroy 地图带来的泄漏风险。
+              代价是三页常驻内存，而地图那部分本来就只占一份，增量很小。 */}
+          <div className={styles.pageSlot} hidden={activeKey !== "map"}>
+            <MapPage command={mapCommand} />
+          </div>
+
+          <div className={styles.pageSlot} hidden={activeKey !== "stats"}>
+            <StatsPage hint={hintOf("stats")} />
+          </div>
+
+          <div className={styles.pageSlot} hidden={activeKey !== "settings"}>
+            <SettingsPage
+              hint={hintOf("settings")}
+              onViewOnMap={handleViewOnMap}
+            />
+          </div>
         </section>
       </div>
     </div>

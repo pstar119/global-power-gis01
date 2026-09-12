@@ -63,6 +63,24 @@ export interface SqlPlan {
   params: unknown[];
 }
 
+/**
+ * 跨页面向地图下达的指令。
+ *
+ * 放在这里是因为它直接复用 `ParsedQuery` 的字段（意图 + 筛选条件），
+ * 不需要再定义一套平行的结构。
+ */
+export interface MapCommand extends ParsedQuery {
+  /** 自增 id：MapPage 用它去重，避免同一个命令被重复执行 */
+  id: number;
+}
+
+/**
+ * 高亮点数的上限。
+ * 超过这个数量就只飞行、不高亮 —— 例如「中国全部电厂」有 4235 个，
+ * 全量高亮既无意义又卡顿。
+ */
+export const MAX_HIGHLIGHT_POINTS = 3000;
+
 export type ParseResult =
   | { ok: true; query: ParsedQuery; plan: SqlPlan; explanation: string }
   | { ok: false; message: string; suggestions: readonly string[] };
@@ -254,5 +272,59 @@ export function parseNaturalQuery(input: string): ParseResult {
     query,
     plan: buildSql(query),
     explanation: describeQuery(query),
+  };
+}
+
+/**
+ * 构造筛选条件（与 buildSql 保持一致）。
+ * ⚠️ 值一律走参数绑定，绝不拼接用户输入。
+ */
+function buildFilter(query: ParsedQuery): {
+  where: string;
+  params: unknown[];
+} {
+  // 没有坐标的点无法在地图上定位，所有地图相关查询都先排除
+  const conds: string[] = ["lat IS NOT NULL", "lon IS NOT NULL"];
+  const params: unknown[] = [];
+
+  if (query.fuel) {
+    conds.push("primary_fuel = ?");
+    params.push(query.fuel);
+  }
+  if (query.country) {
+    conds.push("country = ?");
+    params.push(query.country);
+  }
+
+  return { where: `WHERE ${conds.join(" AND ")}`, params };
+}
+
+/**
+ * 求匹配结果的地理范围，供地图 fitBounds 使用。
+ * bbox 完全由数据算出，不在代码里硬编码任何国家边界。
+ */
+export function buildBoundsSql(query: ParsedQuery): SqlPlan {
+  const { where, params } = buildFilter(query);
+  return {
+    sql: `SELECT MIN(lon) AS min_lon, MIN(lat) AS min_lat,
+       MAX(lon) AS max_lon, MAX(lat) AS max_lat
+FROM power_plants
+${where}`,
+    params,
+  };
+}
+
+/**
+ * 求匹配的明细点，供地图高亮图层使用。
+ * 多取一个（LIMIT +1）以便调用方判断是否超过了高亮上限。
+ */
+export function buildHighlightSql(query: ParsedQuery): SqlPlan {
+  const { where, params } = buildFilter(query);
+  return {
+    sql: `SELECT name, lat, lon, primary_fuel
+FROM power_plants
+${where}
+LIMIT ${MAX_HIGHLIGHT_POINTS + 1}`,
+    params,
   };
 }

@@ -14,6 +14,12 @@ import {
 import "maplibre-gl/dist/maplibre-gl.css";
 import { PMTiles, Protocol } from "pmtiles";
 import { FUEL_LEGEND, fuelColor } from "../lib/fuel";
+import {
+  MAX_HIGHLIGHT_POINTS,
+  buildBoundsSql,
+  buildHighlightSql,
+  type MapCommand,
+} from "../lib/nlq";
 import styles from "./MapPage.module.css";
 
 /** 图层清单：纯 UI 占位，不含任何真实数据 */
@@ -41,6 +47,15 @@ const PLANTS_SOURCE = "power-plants";
 const CLUSTER_LAYER_ID = "power-plant-clusters";
 /** 单个电厂的图层 id */
 const PLANT_LAYER_ID = "power-plant-points";
+
+/**
+ * 高亮图层的 source / layer id。
+ * ⚠️ 它必须是**独立的数据源**且 `cluster: false`：主数据源开了聚合，
+ *    在聚合级别下单个点根本不存在，也就无从高亮；而 cluster 是 source
+ *    创建时的属性，无法动态开关。
+ */
+const HIGHLIGHT_SOURCE = "highlight-points";
+const HIGHLIGHT_LAYER_ID = "highlight-points";
 
 /** Popup 里展示的字段（来自 GeoJSON properties） */
 type PlantProperties = {
@@ -280,17 +295,171 @@ function buildFixtureStyle(): StyleSpecification {
   };
 }
 
-function MapPage() {
+/** 把匹配的点写进高亮图层（图层只建一次，之后只改数据） */
+function renderHighlight(
+  map: MapLibreMap,
+  rows: ReadonlyArray<{ lat: number; lon: number }>,
+) {
+  const data: FeatureCollection = {
+    type: "FeatureCollection",
+    features: rows.map((r) => ({
+      type: "Feature",
+      properties: {},
+      geometry: { type: "Point", coordinates: [r.lon, r.lat] },
+    })),
+  };
+
+  const existing = map.getSource(HIGHLIGHT_SOURCE) as GeoJSONSource | undefined;
+  if (existing) {
+    existing.setData(data);
+    return;
+  }
+
+  // 首次使用才建图层（不参与聚合，所以在任何缩放级别下都看得到）
+  map.addSource(HIGHLIGHT_SOURCE, {
+    type: "geojson",
+    data,
+    cluster: false,
+  });
+  map.addLayer({
+    id: HIGHLIGHT_LAYER_ID,
+    type: "circle",
+    source: HIGHLIGHT_SOURCE,
+    paint: {
+      // 放大 + 金色描边：与深色底图对比强，且不消耗持续 CPU
+      "circle-radius": 7,
+      "circle-color": "transparent",
+      "circle-stroke-color": "#ffd24a",
+      "circle-stroke-width": 2,
+    },
+  });
+}
+
+/** 清空高亮（保留图层，避免反复增删） */
+function clearHighlight(map: MapLibreMap) {
+  const src = map.getSource(HIGHLIGHT_SOURCE) as GeoJSONSource | undefined;
+  if (src) src.setData({ type: "FeatureCollection", features: [] });
+}
+
+interface MapPageProps {
+  /** 来自设置页「在地图上查看」的指令；null 表示没有待执行的指令 */
+  command?: MapCommand | null;
+}
+
+function MapPage({ command = null }: MapPageProps) {
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
 
   // 图层控制面板的展开 / 折叠
   const [panelOpen, setPanelOpen] = useState(true);
 
+  /** 地图是否已完成建图 + 数据加载（此时才能执行飞行与高亮） */
+  const mapReadyRef = useRef(false);
+  /** 已执行过的命令 id，用于去重 */
+  const appliedIdRef = useRef(-1);
+  /** 早到的命令先存这里，等地图就绪后再消费 */
+  const pendingCommandRef = useRef<MapCommand | null>(null);
+  /** 给用户看的执行结果提示 */
+  const [mapNotice, setMapNotice] = useState<string | null>(null);
+
   // 图层可见性：纯视觉开关，不加载任何数据
   const [visibleLayers, setVisibleLayers] = useState<readonly string[]>(() => [
     ...LAYERS,
   ]);
+
+  /**
+   * 执行地图指令：飞到目标区域 + 高亮匹配的电厂。
+   * ⚠️ 筛选值全部走 SQL 参数绑定（见 nlq.ts 的 buildBoundsSql / buildHighlightSql），
+   *    不拼接任何用户输入。
+   */
+  const applyCommand = async (cmd: MapCommand) => {
+    const map = mapRef.current;
+    if (!map) return;
+
+    try {
+      const db = await Database.load(DB_URL);
+
+      // 全球概览：飞回默认视图。全球不做单点高亮 —— 3.5 万个点毫无意义且会卡
+      if (cmd.intent === "global_stats") {
+        clearHighlight(map);
+        setMapNotice("已回到全球视图（全球概览不做单点高亮）");
+        map.flyTo({
+          center: INITIAL_CENTER,
+          zoom: INITIAL_ZOOM,
+          duration: 1200,
+        });
+        return;
+      }
+
+      // 1) 用**数据算出来的** bbox 决定飞到哪里，代码里不硬编码任何国家边界
+      const boundsPlan = buildBoundsSql(cmd);
+      const boundsRows = (await db.select(
+        boundsPlan.sql,
+        boundsPlan.params,
+      )) as Array<{
+        min_lon: number | null;
+        min_lat: number | null;
+        max_lon: number | null;
+        max_lat: number | null;
+      }>;
+
+      const b = boundsRows[0];
+      if (
+        b &&
+        b.min_lon != null &&
+        b.min_lat != null &&
+        b.max_lon != null &&
+        b.max_lat != null
+      ) {
+        map.fitBounds(
+          [
+            [b.min_lon, b.min_lat],
+            [b.max_lon, b.max_lat],
+          ],
+          // fitBounds 会自动算出贴合的范围级别，不用猜 zoom
+          { padding: 90, duration: 1200, maxZoom: 11 },
+        );
+      }
+
+      // 2) 取明细点做高亮（SQL 里多取一个，用于判断是否超限）
+      const hlPlan = buildHighlightSql(cmd);
+      const points = (await db.select(hlPlan.sql, hlPlan.params)) as Array<{
+        name: string;
+        lat: number;
+        lon: number;
+      }>;
+
+      if (points.length > MAX_HIGHLIGHT_POINTS) {
+        clearHighlight(map);
+        setMapNotice(
+          `匹配的电厂超过 ${MAX_HIGHLIGHT_POINTS} 个上限（如「中国全部电厂」有 4235 个），` +
+            `点太多高亮会卡顿，因此只飞行、未高亮，放大后可自行查看。`,
+        );
+        return;
+      }
+
+      renderHighlight(map, points);
+      setMapNotice(
+        points.length > 0
+          ? `已高亮 ${points.length} 个匹配的电厂（金色描边）`
+          : "没有匹配到电厂",
+      );
+    } catch (err) {
+      console.error("[MapPage] 执行地图指令失败", err);
+      setMapNotice("执行地图指令失败，详见控制台。");
+    }
+  };
+
+  /** 只有「地图已就绪 + 确实有待处理命令」时才真正执行 */
+  const tryApplyCommand = () => {
+    const pending = pendingCommandRef.current;
+    if (!pending || !mapReadyRef.current || !mapRef.current) return;
+    if (pending.id === appliedIdRef.current) return;
+
+    appliedIdRef.current = pending.id;
+    pendingCommandRef.current = null;
+    void applyCommand(pending);
+  };
 
   // 地图实例的创建与销毁都在这个 effect 里。
   // ⚠️ main.tsx 开了 React StrictMode，开发模式下 effect 会「执行 → 清理 → 再执行」，
@@ -301,6 +470,8 @@ function MapPage() {
     // 归档现在是异步读进内存的，所以建图必须等它就绪：
     // 否则建图时 MapLibre 的第一批瓦片请求会全部落空。
     let disposed = false;
+    /** 页面用 display:none 切换可见性，容器尺寸会变，需要它来触发 map.resize() */
+    let resizeObserver: ResizeObserver | null = null;
 
     // ---- 聚合数字标记 ----
     // 用 HTML 标记而非 symbol 图层：本项目样式是全离线内联的，没有 `glyphs`
@@ -338,6 +509,16 @@ function MapPage() {
           maxZoom: 12,
         });
         mapRef.current = map;
+
+        // ⚠️ 页面常驻、用 display:none 切换可见性，容器尺寸会从 0 变回正常，
+        //    MapLibre 必须 resize 才能重算画布尺寸与瓦片加载范围。
+        //    ResizeObserver 是浏览器原生能力，零依赖。
+        resizeObserver = new ResizeObserver(() => {
+          mapRef.current?.resize();
+        });
+        if (mapContainerRef.current) {
+          resizeObserver.observe(mapContainerRef.current);
+        }
 
         // 比例尺改用 MapLibre 自带的 ScaleControl（库自带，零新增依赖），
         // 取代原先写死“500 km”的静态占位。
@@ -522,6 +703,11 @@ function MapPage() {
                   map.getCanvas().style.cursor = "";
                 });
               }
+
+              // 地图与数据都就绪了，到这一步才能执行飞行与高亮。
+              // 顺便消费掉可能早于地图到达的那条指令。
+              mapReadyRef.current = true;
+              tryApplyCommand();
             })
             .catch((err: unknown) => {
               // 在 Tauri 之外（例如用 Vite 浏览器预览 UI）必然失败，
@@ -536,6 +722,8 @@ function MapPage() {
 
     return () => {
       disposed = true;
+      mapReadyRef.current = false;
+      resizeObserver?.disconnect();
       // 先摘掉标记与弹窗，再销毁地图
       clearClusterLabels();
       popup.remove();
@@ -543,6 +731,16 @@ function MapPage() {
       mapRef.current = null;
     };
   }, []);
+
+  // 指令变化时尝试执行：地图已就绪就立即执行；否则先暂存，
+  // 等建图完成后的 tryApplyCommand() 来消费。
+  // （tryApplyCommand 不放进依赖：它是每次渲染重建的普通函数，
+  //   靠 ref 读最新状态，无需也不应作为依赖。）
+  useEffect(() => {
+    if (!command || command.id === appliedIdRef.current) return;
+    pendingCommandRef.current = command;
+    tryApplyCommand();
+  }, [command]);
 
   const toggleLayer = (name: string) => {
     setVisibleLayers((prev) =>
@@ -631,6 +829,9 @@ function MapPage() {
 
       {/* 左下角比例尺已改由 MapLibre 的 ScaleControl 渲染（见上面的 addControl），
           它挂在 .maplibregl-ctrl-bottom-left 里，不再需要自定义 DOM。 */}
+
+      {/* 地图指令的执行结果提示（如「已高亮 N 个匹配的电厂」） */}
+      {mapNotice && <p className={styles.mapNotice}>{mapNotice}</p>}
     </div>
   );
 }

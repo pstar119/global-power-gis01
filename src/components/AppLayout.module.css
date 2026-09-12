@@ -150,6 +150,23 @@
   padding: 0;
 }
 
+/* ---------- 页面插槽 ----------
+   ⚠️ 三个页面**同时挂载**，只切换可见性而非卸载组件：
+      这样 MapPage 的 MapLibre 实例、3.5 万个点与聚合索引只创建一次，
+      切页不再重建 —— 既让「在地图上查看」瞬时响应，也避免了反复
+      create/destroy 地图带来的泄漏风险。 */
+
+.pageSlot {
+  height: 100%;
+  min-height: 0;
+}
+
+/* ⚠️ 必须显式声明：作者样式会覆盖浏览器默认的 [hidden]{display:none}，
+   少了这条，隐藏的页面根本隐藏不掉（与 .layerList[hidden] 同一个坑）。 */
+.pageSlot[hidden] {
+  display: none;
+}
+
 /* ---------- 后端自检块（GreetSelfCheck 复用，样式保留在本模块） ---------- */
 
 .selfCheck {

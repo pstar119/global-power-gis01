@@ -269,6 +269,29 @@
   line-height: 1.6;
 }
 
+/* 「在地图上查看」：用描边样式与实心的「查询」按钮区分开 */
+.mapBtn {
+  margin: 10px 0 0;
+  padding: 0.4rem 0.9rem;
+  border: 1px solid var(--gpg-accent);
+  border-radius: 4px;
+  background-color: transparent;
+  color: var(--gpg-accent);
+  font: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+/* App.css 的 button:hover(0,1,1) 会压过单类名规则(0,1,0)，必须显式覆盖 */
+.mapBtn:hover,
+.mapBtn:active {
+  border-color: var(--gpg-accent);
+  background-color: rgba(0, 122, 204, 0.16);
+  box-shadow: none;
+  color: var(--gpg-accent);
+}
+
 /* ---------- 结果表格（原生 table + 纯 CSS） ---------- */
 
 .tableWrap {

@@ -1,6 +1,7 @@
 import AiQueryPanel from "../components/AiQueryPanel";
 import DbSelfCheck from "../components/DbSelfCheck";
 import GreetSelfCheck from "../components/GreetSelfCheck";
+import type { ParsedQuery } from "../lib/nlq";
 import styles from "./SettingsPage.module.css";
 
 interface SettingGroup {
@@ -31,9 +32,11 @@ const SETTING_GROUPS: readonly SettingGroup[] = [
 interface SettingsPageProps {
   /** 页面标题（来自侧边栏菜单定义，保持单一数据源） */
   hint: string;
+  /** 「在地图上查看」：把查询意图交给地图页（带 id 的指令由 AppLayout 生成） */
+  onViewOnMap?: (query: ParsedQuery) => void;
 }
 
-function SettingsPage({ hint }: SettingsPageProps) {
+function SettingsPage({ hint, onViewOnMap }: SettingsPageProps) {
   return (
     <div className={styles.page}>
       <h2 className={styles.pageTitle}>{hint}</h2>
@@ -68,7 +71,7 @@ function SettingsPage({ hint }: SettingsPageProps) {
       <DbSelfCheck />
 
       {/* 阶段17：本地规则引擎的自然语言查询（尚未接入真实大模型 API） */}
-      <AiQueryPanel />
+      <AiQueryPanel onViewOnMap={onViewOnMap} />
     </div>
   );
 }

@@ -9,7 +9,7 @@ import {
   testConnection,
   type Provider,
 } from "../lib/llm";
-import { EXAMPLES, parseNaturalQuery, type ParseResult } from "../lib/nlq";
+import { EXAMPLES, parseNaturalQuery, type ParseResult, type ParsedQuery } from "../lib/nlq";
 import styles from "./AiQueryPanel.module.css";
 
 /** 必须与 src-tauri/src/lib.rs 里的 DB_URL 一致 */
@@ -80,7 +80,12 @@ function formatCell(key: string, value: unknown): string {
  * ⚠️ 只读：这里永远只执行 SELECT（且 SQL 模板在 nlq.ts 里是常量，
  *    用户输入只作为绑定参数），`capabilities` 里也没有 `sql:allow-execute`。
  */
-function AiQueryPanel() {
+interface AiQueryPanelProps {
+  /** 由父级注入：把查询意图交给地图页看（带 id 的指令由 AppLayout 生成） */
+  onViewOnMap?: (query: ParsedQuery) => void;
+}
+
+function AiQueryPanel({ onViewOnMap }: AiQueryPanelProps) {
   const [input, setInput] = useState("");
   const [state, setState] = useState<QueryState>({ status: "idle" });
 
@@ -327,6 +332,16 @@ function AiQueryPanel() {
             识别结果：{state.result.explanation}
             {state.rows.length === 0 && "（没有匹配到任何数据）"}
           </p>
+
+          {onViewOnMap && (
+            <button
+              type="button"
+              className={styles.mapBtn}
+              onClick={() => onViewOnMap(state.result.query)}
+            >
+              在地图上查看 →
+            </button>
+          )}
 
           {state.rows.length > 0 && (
             <div className={styles.tableWrap}>
