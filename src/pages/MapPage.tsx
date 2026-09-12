@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import Database from "@tauri-apps/plugin-sql";
 import type { FeatureCollection } from "geojson";
 // 仅用命名导入：maplibre-gl 的类型声明不提供 default export
@@ -32,35 +31,78 @@ const INITIAL_ZOOM = 1.5;
 /** 必须与 src-tauri/src/lib.rs 里的 DB_URL 一致 */
 const DB_URL = "sqlite:global_power_gis.db";
 
-/** 阶段13 测试点图层的 source / layer id */
-const TEST_POINTS_SOURCE = "test-points";
-const TEST_POINTS_LAYER_ID = "test-points";
+/** 电厂点图层的 source / layer id */
+const PLANTS_SOURCE = "power-plants";
+const PLANTS_LAYER_ID = "power-plants";
 
 /**
- * 【阶段13】从 SQLite 读取播种的测试点，转成 GeoJSON。
+ * 燃料类型 -> 颜色。
  *
- * TODO: 接入真实数据时，删除本函数与它的调用点，
- *       以及 src-tauri/src/lib.rs 里的 seed_test_points 播种命令。
+ * ⚠️ 刻意用**纯对象字面量**实现，绝不引入 d3-scale / chroma.js 等配色库：
+ *    一张颜色映射表不值得增加任何依赖。
  *
- * 顺序有讲究：
- *   1) Database.load() —— 先确保插件的连接池已建立
- *   2) invoke("seed_test_points") —— 播种要复用那个连接池，且本身幂等
- *   3) db.select(...) —— 最后才读取
+ * key 对应 WRI 数据集的 primary_fuel 取值（实测共 15 类）。
  */
-async function loadTestPointsGeoJson(): Promise<FeatureCollection> {
-  const db = await Database.load(DB_URL);
-  await invoke<number>("seed_test_points");
+const FUEL_COLORS: Record<string, string> = {
+  Coal: "#8d8d8d", // 煤：灰
+  Gas: "#ff9b52", // 气：橙
+  Oil: "#b0703f", // 油：棕
+  Nuclear: "#c77dff", // 核：紫
+  Hydro: "#4daafc", // 水：蓝
+  Wind: "#5ee39b", // 风：绿
+  Solar: "#ffd24a", // 光：黄
+  Biomass: "#7fc76f", // 生物质：草绿
+  Geothermal: "#ff6b6b", // 地热：红
+  Waste: "#b0a04a", // 废弃物：土黄
+  Storage: "#4fd1c5", // 储能：青
+  Cogeneration: "#c9a227", // 热电联产：金
+  Petcoke: "#6b6b6b", // 石油焦：深灰
+  "Wave and Tidal": "#2e9bd6", // 潮汐：海蓝
+  Other: "#9aa0a6", // 其他：中性灰
+};
 
+/** 未知 / 缺失燃料类型时的兜底色 */
+const FUEL_FALLBACK_COLOR = "#9aa0a6";
+
+function fuelColor(fuel: string | null): string {
+  if (!fuel) return FUEL_FALLBACK_COLOR;
+  return FUEL_COLORS[fuel] ?? FUEL_FALLBACK_COLOR;
+}
+
+/**
+ * 从 SQLite 读取电厂，转成 GeoJSON 供地图渲染。
+ *
+ * 数据由外部导入脚本写入（见 `scripts/import_wri_plants.py`），
+ * 应用本身不产生任何数据，只负责读取与展示。
+ *
+ * 先 Database.load() 确保插件的连接池已建立，再 db.select(...)。
+ */
+async function loadPlantsGeoJson(): Promise<FeatureCollection> {
+  const db = await Database.load(DB_URL);
+
+  // 只取有坐标的记录：经纬度缺失的行无法在地图上定位
   const rows = (await db.select(
-    "SELECT name, lat, lon FROM power_plants WHERE name LIKE 'Test%' ORDER BY name",
-  )) as Array<{ name: string; lat: number; lon: number }>;
+    "SELECT name, lat, lon, primary_fuel FROM power_plants " +
+      "WHERE lat IS NOT NULL AND lon IS NOT NULL",
+  )) as Array<{
+    name: string;
+    lat: number;
+    lon: number;
+    primary_fuel: string | null;
+  }>;
 
   return {
     type: "FeatureCollection",
     // ⚠️ GeoJSON 的坐标顺序是 [经度, 纬度]，与 SQL 里 lat / lon 的书写顺序相反
     features: rows.map((r) => ({
       type: "Feature",
-      properties: { name: r.name },
+      properties: {
+        name: r.name,
+        fuel: r.primary_fuel,
+        // 颜色在这里算好写进属性，样式里直接用 ["get", "color"] 取。
+        // 比在样式里堆一长串 match 表达式简单，且将来加图例时可复用同一份映射。
+        color: fuelColor(r.primary_fuel),
+      },
       geometry: { type: "Point", coordinates: [r.lon, r.lat] },
     })),
   };
@@ -152,26 +194,30 @@ function buildFixtureStyle(): StyleSpecification {
         type: "background",
         paint: { "background-color": "#101418" },
       },
+      // ⚠️ 以下 4 个是**合成夹具**图层：几何全部是程序生成的格子，
+      //    不对应任何真实地理位置，仅用于证明离线瓦片通道可用。
+      //    阶段14 起真实电厂叠加在其上，所以这里把不透明度压得很低，
+      //    避免干扰对 3.5 万个真实点的观察。
       {
         id: "fixture-substations",
         type: "fill",
         source: "power-fixture",
         "source-layer": "substations",
-        paint: { "fill-color": "#007acc", "fill-opacity": 0.45 },
+        paint: { "fill-color": "#007acc", "fill-opacity": 0.1 },
       },
       {
         id: "fixture-substation-borders",
         type: "line",
         source: "power-fixture",
         "source-layer": "substations",
-        paint: { "line-color": "#4daafc", "line-width": 1 },
+        paint: { "line-color": "#4daafc", "line-width": 1, "line-opacity": 0.18 },
       },
       {
         id: "fixture-power-lines",
         type: "line",
         source: "power-fixture",
         "source-layer": "power-lines",
-        paint: { "line-color": "#7fd4ff", "line-width": 1.5 },
+        paint: { "line-color": "#7fd4ff", "line-width": 1.5, "line-opacity": 0.18 },
       },
       {
         id: "fixture-power-plants",
@@ -181,8 +227,10 @@ function buildFixtureStyle(): StyleSpecification {
         paint: {
           "circle-radius": 5,
           "circle-color": "#ffb300",
+          "circle-opacity": 0.12,
           "circle-stroke-color": "#3a2a00",
           "circle-stroke-width": 1,
+          "circle-stroke-opacity": 0.12,
         },
       },
     ],
@@ -240,31 +288,35 @@ function MapPage() {
           "bottom-left",
         );
 
-        // 阶段13：把 SQLite 里的测试点渲染成圆点图层。
+        // 把 SQLite 里的电厂渲染成圆点图层。
         // 等 style 加载完再 addSource/addLayer —— 未加载完就加会抛错。
         map.once("load", () => {
-          loadTestPointsGeoJson()
+          loadPlantsGeoJson()
             .then((data) => {
               // 等异步查询期间组件可能已卸载，此时不能碰地图
               if (disposed || !mapRef.current) return;
 
-              map.addSource(TEST_POINTS_SOURCE, { type: "geojson", data });
+              map.addSource(PLANTS_SOURCE, { type: "geojson", data });
               map.addLayer({
-                id: TEST_POINTS_LAYER_ID,
+                id: PLANTS_LAYER_ID,
                 type: "circle",
-                source: TEST_POINTS_SOURCE,
+                source: PLANTS_SOURCE,
                 paint: {
-                  "circle-radius": 7,
-                  "circle-color": "#ff3b6b",
+                  // 半径不能太大：全球视图下 3.5 万个点会彼此严重重叠
+                  "circle-radius": 4,
+                  // 颜色由属性携带（见 loadPlantsGeoJson 里的 fuelColor 映射）
+                  "circle-color": ["get", "color"],
+                  "circle-opacity": 0.85,
                   "circle-stroke-color": "#ffffff",
-                  "circle-stroke-width": 1.5,
+                  "circle-stroke-width": 0.5,
+                  "circle-stroke-opacity": 0.6,
                 },
               });
             })
             .catch((err: unknown) => {
               // 在 Tauri 之外（例如用 Vite 浏览器预览 UI）必然失败，
-              // 这里只记日志，绝不能让测试点加载失败影响底图。
-              console.error("[MapPage] 测试点加载失败（底图不受影响）", err);
+              // 这里只记日志，绝不能让电厂数据加载失败影响底图。
+              console.error("[MapPage] 电厂数据加载失败（底图不受影响）", err);
             });
         });
       })

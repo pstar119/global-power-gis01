@@ -12,6 +12,15 @@ dist
 dist-ssr
 *.local
 
+# 阶段14：由 scripts/import_wri_plants.py 生成的导入 SQL。
+# 它是可完整重建的派生产物（原始 CSV + 脚本即可重现），因此不进仓库。
+# ⚠️ 规则必须只作用于 scripts/ 目录：src-tauri/migrations/*.sql 是迁移定义，
+#    必须提交 —— include_str! 在编译期读取它们，缺失会直接导致编译失败。
+/scripts/*.sql
+
+# 阶段14：原始数据缓存（如 WRI 全球电厂 CSV，约 11 MB）
+/data/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
