@@ -1,15 +1,19 @@
 import { useEffect, useRef, useState } from "react";
 import Database from "@tauri-apps/plugin-sql";
-import type { FeatureCollection } from "geojson";
+import type { FeatureCollection, Point } from "geojson";
 // 仅用命名导入：maplibre-gl 的类型声明不提供 default export
 import {
   Map as MapLibreMap,
+  Marker,
+  Popup,
   ScaleControl,
   addProtocol,
+  type GeoJSONSource,
   type StyleSpecification,
 } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { PMTiles, Protocol } from "pmtiles";
+import { FUEL_LEGEND, fuelColor } from "../lib/fuel";
 import styles from "./MapPage.module.css";
 
 /** 图层清单：纯 UI 占位，不含任何真实数据 */
@@ -31,65 +35,69 @@ const INITIAL_ZOOM = 1.5;
 /** 必须与 src-tauri/src/lib.rs 里的 DB_URL 一致 */
 const DB_URL = "sqlite:global_power_gis.db";
 
-/** 电厂点图层的 source / layer id */
+/** 电厂数据源 id（聚合图层与单点图层共用同一个 source） */
 const PLANTS_SOURCE = "power-plants";
-const PLANTS_LAYER_ID = "power-plants";
+/** 聚合圆的图层 id */
+const CLUSTER_LAYER_ID = "power-plant-clusters";
+/** 单个电厂的图层 id */
+const PLANT_LAYER_ID = "power-plant-points";
 
-/**
- * 燃料类型 -> 颜色。
- *
- * ⚠️ 刻意用**纯对象字面量**实现，绝不引入 d3-scale / chroma.js 等配色库：
- *    一张颜色映射表不值得增加任何依赖。
- *
- * key 对应 WRI 数据集的 primary_fuel 取值（实测共 15 类）。
- */
-const FUEL_COLORS: Record<string, string> = {
-  Coal: "#8d8d8d", // 煤：灰
-  Gas: "#ff9b52", // 气：橙
-  Oil: "#b0703f", // 油：棕
-  Nuclear: "#c77dff", // 核：紫
-  Hydro: "#4daafc", // 水：蓝
-  Wind: "#5ee39b", // 风：绿
-  Solar: "#ffd24a", // 光：黄
-  Biomass: "#7fc76f", // 生物质：草绿
-  Geothermal: "#ff6b6b", // 地热：红
-  Waste: "#b0a04a", // 废弃物：土黄
-  Storage: "#4fd1c5", // 储能：青
-  Cogeneration: "#c9a227", // 热电联产：金
-  Petcoke: "#6b6b6b", // 石油焦：深灰
-  "Wave and Tidal": "#2e9bd6", // 潮汐：海蓝
-  Other: "#9aa0a6", // 其他：中性灰
+/** Popup 里展示的字段（来自 GeoJSON properties） */
+type PlantProperties = {
+  name: string;
+  country: string | null;
+  capacity: number | null;
+  fuel: string | null;
+  color: string;
 };
 
-/** 未知 / 缺失燃料类型时的兜底色 */
-const FUEL_FALLBACK_COLOR = "#9aa0a6";
-
-function fuelColor(fuel: string | null): string {
-  if (!fuel) return FUEL_FALLBACK_COLOR;
-  return FUEL_COLORS[fuel] ?? FUEL_FALLBACK_COLOR;
-}
-
 /**
- * 图例条目：燃料英文键 -> 中文标签（顺序即图例展示顺序）。
- * 色块颜色不在这里写死，而是渲染时从 FUEL_COLORS 取 —— 避免颜色定义两处维护。
+ * 用原生 DOM 构建 Popup 内容。
+ *
+ * ⚠️ 刻意**不用 `setHTML()`**：电厂名称来自外部数据集，拼 HTML 字符串会有
+ *    注入风险。这里一律走 `textContent`（由浏览器自动转义）。
+ * ⚠️ 样式用 CSS Modules 的类名（它在运行时就是个字符串），因此 Popup 的
+ *    外观与其它悬浮面板完全一致，不需要为它另写一套全局 CSS。
  */
-const FUEL_LEGEND: ReadonlyArray<readonly [string, string]> = [
-  ["Coal", "煤电"],
-  ["Gas", "燃气"],
-  ["Oil", "燃油"],
-  ["Nuclear", "核电"],
-  ["Hydro", "水电"],
-  ["Wind", "风电"],
-  ["Solar", "光伏"],
-  ["Biomass", "生物质"],
-  ["Geothermal", "地热"],
-  ["Waste", "废弃物"],
-  ["Storage", "储能"],
-  ["Cogeneration", "热电联产"],
-  ["Petcoke", "石油焦"],
-  ["Wave and Tidal", "潮汐"],
-  ["Other", "其他"],
-];
+function buildPlantPopup(props: PlantProperties): HTMLElement {
+  const root = document.createElement("div");
+  root.className = styles.popup;
+
+  const title = document.createElement("h3");
+  title.className = styles.popupTitle;
+  title.textContent = props.name || "未命名电厂";
+  root.appendChild(title);
+
+  const list = document.createElement("dl");
+  list.className = styles.popupList;
+
+  const rows: ReadonlyArray<readonly [string, string]> = [
+    ["国家/地区", props.country || "未知"],
+    ["燃料类型", props.fuel || "未知"],
+    ["装机容量", props.capacity == null ? "未提供" : `${props.capacity} MW`],
+  ];
+
+  for (const [label, value] of rows) {
+    const dt = document.createElement("dt");
+    dt.textContent = label;
+
+    const dd = document.createElement("dd");
+    dd.textContent = value;
+
+    // 燃料那一行在文字前加一个与地图同色的色块，和图例形成呼应
+    if (label === "燃料类型" && props.fuel) {
+      const swatch = document.createElement("span");
+      swatch.className = styles.popupSwatch;
+      swatch.style.backgroundColor = props.color;
+      dd.prepend(swatch);
+    }
+
+    list.append(dt, dd);
+  }
+
+  root.appendChild(list);
+  return root;
+}
 
 /**
  * 从 SQLite 读取电厂，转成 GeoJSON 供地图渲染。
@@ -104,12 +112,14 @@ async function loadPlantsGeoJson(): Promise<FeatureCollection> {
 
   // 只取有坐标的记录：经纬度缺失的行无法在地图上定位
   const rows = (await db.select(
-    "SELECT name, lat, lon, primary_fuel FROM power_plants " +
+    "SELECT name, lat, lon, country, capacity_mw, primary_fuel FROM power_plants " +
       "WHERE lat IS NOT NULL AND lon IS NOT NULL",
   )) as Array<{
     name: string;
     lat: number;
     lon: number;
+    country: string | null;
+    capacity_mw: number | null;
     primary_fuel: string | null;
   }>;
 
@@ -120,9 +130,11 @@ async function loadPlantsGeoJson(): Promise<FeatureCollection> {
       type: "Feature",
       properties: {
         name: r.name,
+        country: r.country,
+        capacity: r.capacity_mw,
         fuel: r.primary_fuel,
         // 颜色在这里算好写进属性，样式里直接用 ["get", "color"] 取。
-        // 比在样式里堆一长串 match 表达式简单，且将来加图例时可复用同一份映射。
+        // 比在样式里堆一长串 match 表达式简单，且图例与 Popup 复用同一份映射。
         color: fuelColor(r.primary_fuel),
       },
       geometry: { type: "Point", coordinates: [r.lon, r.lat] },
@@ -221,13 +233,16 @@ function buildFixtureStyle(): StyleSpecification {
       },
       // ⚠️ 以下 4 个是**合成夹具**图层：几何全部是程序生成的格子，
       //    不对应任何真实地理位置，仅用于证明离线瓦片通道可用。
-      //    阶段14 起真实电厂叠加在其上，所以这里把不透明度压得很低，
-      //    避免干扰对 3.5 万个真实点的观察。
+      //    真实电厂数据叠加在其上，所以这里把不透明度压得很低，
+      //    避免干扰对真实点的观察。
+      //    `maxzoom: 7` 表示 zoom >= 7 时隐藏（MapLibre 的语义是“大于等于即隐藏”）：
+      //    夹具只做到 z4，再放大就会 overzoom 成空白格子，不如直接让位给真实数据。
       {
         id: "fixture-substations",
         type: "fill",
         source: "power-fixture",
         "source-layer": "substations",
+        maxzoom: 7,
         paint: { "fill-color": "#007acc", "fill-opacity": 0.1 },
       },
       {
@@ -235,6 +250,7 @@ function buildFixtureStyle(): StyleSpecification {
         type: "line",
         source: "power-fixture",
         "source-layer": "substations",
+        maxzoom: 7,
         paint: { "line-color": "#4daafc", "line-width": 1, "line-opacity": 0.18 },
       },
       {
@@ -242,6 +258,7 @@ function buildFixtureStyle(): StyleSpecification {
         type: "line",
         source: "power-fixture",
         "source-layer": "power-lines",
+        maxzoom: 7,
         paint: { "line-color": "#7fd4ff", "line-width": 1.5, "line-opacity": 0.18 },
       },
       {
@@ -249,6 +266,7 @@ function buildFixtureStyle(): StyleSpecification {
         type: "circle",
         source: "power-fixture",
         "source-layer": "power-plants",
+        maxzoom: 7,
         paint: {
           "circle-radius": 5,
           "circle-color": "#ffb300",
@@ -284,6 +302,24 @@ function MapPage() {
     // 否则建图时 MapLibre 的第一批瓦片请求会全部落空。
     let disposed = false;
 
+    // ---- 聚合数字标记 ----
+    // 用 HTML 标记而非 symbol 图层：本项目样式是全离线内联的，没有 `glyphs`
+    // 字体服务器，symbol 的 text-field 根本渲染不出来。
+    // 数组与清理函数都在本次 effect 生命周期内，StrictMode 的“建→拆→再建”不会泄漏。
+    const clusterLabels: Marker[] = [];
+    const clearClusterLabels = () => {
+      clusterLabels.forEach((m) => m.remove());
+      clusterLabels.length = 0;
+    };
+
+    // 复用同一个 Popup 实例，避免每次点击都重建 DOM
+    const popup = new Popup({
+      closeButton: true,
+      closeOnClick: true,
+      offset: 12,
+      maxWidth: "260px",
+    });
+
     ensurePmtilesProtocol()
       .then(() => {
         // 等待期间组件可能已卸载（StrictMode 下必然发生一次），此时不能再建图
@@ -296,13 +332,10 @@ function MapPage() {
           zoom: INITIAL_ZOOM,
           // 保留版权信息（合规），右下角紧凑显示，不与我们左下角的比例尺冲突
           attributionControl: { compact: true },
-          // 【仅测试夹具阶段的限制】夹具是周期性合成图案，放大超过一定程度后
-          // 视口会整个落在一个网格内部而变空（看起来像坏了）。
-          // 变空条件 2^(z-Z) > W_px·N/512：Z=4、N=4 时，最窄窗口
-          // （minHeight 700 → 内容区高约 651px）算得临界点为 z≈6.35。
-          // 所以这里封在 6，既保留连续的放大手感又不会出现全空。
-          // ⚠️ 接入真实离线数据后应当调高或移除这个限制。
-          maxZoom: 6,
+          // 阶段15 从 6 提到 12。原来的 6 是为合成夹具设的，但它会把
+          // clusterMaxZoom(8) 卡死 —— 点击聚合点算出的目标级别被截断后，
+          // 永远展不开到单个电厂。夹具现在改由各图层的 maxzoom:7 负责隐藏。
+          maxZoom: 12,
         });
         mapRef.current = map;
 
@@ -321,22 +354,174 @@ function MapPage() {
               // 等异步查询期间组件可能已卸载，此时不能碰地图
               if (disposed || !mapRef.current) return;
 
-              map.addSource(PLANTS_SOURCE, { type: "geojson", data });
+              // 开启 MapLibre **内置**聚合：低缩放级别下把邻近电厂合并成聚合点，
+              // 避免 3.5 万个点重叠成一团糊。算法由库自带，未安装任何聚合库。
+              map.addSource(PLANTS_SOURCE, {
+                type: "geojson",
+                data,
+                cluster: true,
+                clusterRadius: 50,
+                clusterMaxZoom: 8,
+              });
+
+              // 图层一：聚合圆（只渲染带 point_count 的要素）
               map.addLayer({
-                id: PLANTS_LAYER_ID,
+                id: CLUSTER_LAYER_ID,
                 type: "circle",
                 source: PLANTS_SOURCE,
+                filter: ["has", "point_count"],
                 paint: {
-                  // 半径不能太大：全球视图下 3.5 万个点会彼此严重重叠
-                  "circle-radius": 4,
+                  // step 是 MapLibre 内置表达式，不是引入的库。
+                  // 分级：<10 蓝 / 10~99 绿 / 100~499 黄 / >=500 红，
+                  // 半径同步放大，让密集区域一眼可辨。
+                  "circle-color": [
+                    "step",
+                    ["get", "point_count"],
+                    "#4daafc",
+                    10,
+                    "#5ee39b",
+                    100,
+                    "#ffd24a",
+                    500,
+                    "#ff6b6b",
+                  ],
+                  "circle-radius": [
+                    "step",
+                    ["get", "point_count"],
+                    15,
+                    10,
+                    18,
+                    100,
+                    22,
+                    500,
+                    26,
+                  ],
+                  "circle-opacity": 0.85,
+                  "circle-stroke-color": "#ffffff",
+                  "circle-stroke-width": 1,
+                  "circle-stroke-opacity": 0.4,
+                },
+              });
+
+              // 图层二：单个电厂（只渲染没有 point_count 的要素）
+              map.addLayer({
+                id: PLANT_LAYER_ID,
+                type: "circle",
+                source: PLANTS_SOURCE,
+                filter: ["!", ["has", "point_count"]],
+                paint: {
+                  "circle-radius": 5,
                   // 颜色由属性携带（见 loadPlantsGeoJson 里的 fuelColor 映射）
                   "circle-color": ["get", "color"],
-                  "circle-opacity": 0.85,
+                  "circle-opacity": 0.9,
                   "circle-stroke-color": "#ffffff",
                   "circle-stroke-width": 0.5,
                   "circle-stroke-opacity": 0.6,
                 },
               });
+
+              // ---- 聚合数字：用 HTML 标记而非 symbol 图层 ----
+              // ⚠️ 为什么不用 symbol 图层的 text-field？文字渲染需要 `glyphs`
+              //    （SDF 字体 PBF），而本项目样式是全离线内联的，没有字体服务器，
+              //    数字会直接渲染不出来。HTML 标记零外部资源，样式还能走 CSS Modules。
+              // ⚠️ querySourceFeatures 会**跨瓦片边界重复返回同一个聚合要素**，
+              //    必须按 cluster_id 去重，否则数字会叠影。
+              const refreshClusterLabels = () => {
+                clearClusterLabels();
+
+                const seen = new Set<number>();
+                for (const f of map.querySourceFeatures(PLANTS_SOURCE, {
+                  filter: ["has", "point_count"],
+                })) {
+                  const clusterId = f.properties?.cluster_id as number | undefined;
+                  const count = f.properties?.point_count as number | undefined;
+                  if (clusterId == null || count == null) continue;
+                  if (seen.has(clusterId)) continue;
+                  seen.add(clusterId);
+
+                  const el = document.createElement("span");
+                  el.className = styles.clusterLabel;
+                  el.textContent = String(count);
+
+                  clusterLabels.push(
+                    new Marker({ element: el })
+                      .setLngLat(
+                        (f.geometry as Point).coordinates as [number, number],
+                      )
+                      .addTo(map),
+                  );
+                }
+              };
+
+              // 动画期间标记会与圆错位，干脆先清掉、移动结束后再重建
+              map.on("movestart", clearClusterLabels);
+              map.on("moveend", refreshClusterLabels);
+              // ⚠️ 必须监听 sourcedata：addLayer 之后数据仍要在 worker 里构建聚合索引，
+              //    此刻立刻调用 querySourceFeatures 会返回空数组 —— 表现为
+              //    「聚合圆都画出来了，但数字一个都不显示」。所以要等 source
+              //    真正加载完成后再刷新一次。
+              map.on("sourcedata", (e) => {
+                if (e.sourceId === PLANTS_SOURCE && e.isSourceLoaded) {
+                  refreshClusterLabels();
+                }
+              });
+              refreshClusterLabels();
+
+              // ---- 点击聚合点：平滑放大到恰好能展开它的级别 ----
+              map.on("click", CLUSTER_LAYER_ID, (e) => {
+                const feature = e.features?.[0];
+                if (!feature) return;
+                const clusterId = feature.properties?.cluster_id as
+                  | number
+                  | undefined;
+                if (clusterId == null) return;
+
+                const source = map.getSource(PLANTS_SOURCE) as GeoJSONSource;
+                const center = (feature.geometry as Point).coordinates as [
+                  number,
+                  number,
+                ];
+
+                // getClusterExpansionZoom 直接给出「恰好能把这个聚合点拆开」的
+                // 级别，比固定加几级更准（它是 cluster:true 时 source 的内置方法）
+                source
+                  .getClusterExpansionZoom(clusterId)
+                  .then((zoom) => {
+                    if (disposed || !mapRef.current) return;
+                    map.easeTo({ center, zoom, duration: 600 });
+                  })
+                  .catch((err: unknown) => {
+                    console.error("[MapPage] 展开聚合点失败", err);
+                  });
+              });
+
+              // ---- 点击单个电厂：弹出详情卡片 ----
+              map.on("click", PLANT_LAYER_ID, (e) => {
+                const feature = e.features?.[0];
+                if (!feature) return;
+
+                const point = (feature.geometry as Point).coordinates as [
+                  number,
+                  number,
+                ];
+
+                popup
+                  .setLngLat(point.slice() as [number, number])
+                  .setDOMContent(
+                    buildPlantPopup(feature.properties as PlantProperties),
+                  )
+                  .addTo(map);
+              });
+
+              // ---- 光标反馈 ----
+              for (const layerId of [CLUSTER_LAYER_ID, PLANT_LAYER_ID]) {
+                map.on("mouseenter", layerId, () => {
+                  map.getCanvas().style.cursor = "pointer";
+                });
+                map.on("mouseleave", layerId, () => {
+                  map.getCanvas().style.cursor = "";
+                });
+              }
             })
             .catch((err: unknown) => {
               // 在 Tauri 之外（例如用 Vite 浏览器预览 UI）必然失败，
@@ -351,6 +536,9 @@ function MapPage() {
 
     return () => {
       disposed = true;
+      // 先摘掉标记与弹窗，再销毁地图
+      clearClusterLabels();
+      popup.remove();
       mapRef.current?.remove();
       mapRef.current = null;
     };

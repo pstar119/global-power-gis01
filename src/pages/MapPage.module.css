@@ -271,3 +271,124 @@
   font-size: 0.7rem;
   line-height: 1.5;
 }
+
+/* ---------- 聚合数字标记 ----------
+   数字用 HTML Marker 而非 symbol 图层：本项目样式是全离线内联的，
+   没有 `glyphs` 字体服务器，symbol 的 text-field 根本渲染不出来。
+   圆本身由 circle 图层绘制，这里只负责把数字居中盖上去。 */
+
+.clusterLabel {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  color: #101418;
+  font-size: 0.72rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  /* ⚠️ 关键：标记必须不拦截鼠标事件。否则点击会被这个透明方块吃掉，
+     地图收不到 click，聚合点就点不动了。 */
+  pointer-events: none;
+  user-select: none;
+}
+
+/* ---------- 点选弹窗：MapLibre Popup 的深色主题改造 ----------
+   内容由 MapPage.tsx 的 buildPlantPopup 用原生 DOM 构建、类名取自本 module，
+   所以上面几条只写内容样式；下面几条 :global 是覆盖库自带的浅色外观。
+   用 `.viewport :global(...)` 的 (0,2,0) 特异性压过库的单类名 (0,1,0)。 */
+
+.popup {
+  min-width: 168px;
+}
+
+.popupTitle {
+  margin: 0 0 8px;
+  color: var(--gpg-text);
+  font-size: 0.86rem;
+  font-weight: 600;
+  line-height: 1.35;
+  /* 电厂名可能很长，允许换行而不是撑破卡片 */
+  overflow-wrap: anywhere;
+}
+
+.popupList {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 10px;
+  margin: 0;
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
+
+.popupList dt {
+  color: var(--gpg-muted);
+  white-space: nowrap;
+}
+
+.popupList dd {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin: 0;
+  color: var(--gpg-text);
+  overflow-wrap: anywhere;
+}
+
+/* 燃料色块：颜色由 JS 从与地图、图例同一份 FUEL_COLORS 传入 */
+.popupSwatch {
+  flex: 0 0 auto;
+  width: 9px;
+  height: 9px;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: 2px;
+}
+
+.viewport :global(.maplibregl-popup-content) {
+  box-sizing: border-box;
+  padding: 10px 12px;
+  border: 1px solid var(--gpg-border);
+  border-radius: 6px;
+  background-color: rgba(37, 37, 38, 0.96);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+}
+
+/* ⚠️ 小三角的着色边取决于 Popup 落在锚点的哪一侧，四个方向必须分别覆盖。
+   （CSS 三角的规律：朝上的三角由 border-bottom 着色，其余类推）
+   只改其中一个方向，其余方向会露出默认的白色三角。 */
+.viewport :global(.maplibregl-popup-anchor-top .maplibregl-popup-tip),
+.viewport :global(.maplibregl-popup-anchor-top-left .maplibregl-popup-tip),
+.viewport :global(.maplibregl-popup-anchor-top-right .maplibregl-popup-tip) {
+  border-bottom-color: rgba(37, 37, 38, 0.96);
+}
+
+.viewport :global(.maplibregl-popup-anchor-bottom .maplibregl-popup-tip),
+.viewport :global(.maplibregl-popup-anchor-bottom-left .maplibregl-popup-tip),
+.viewport :global(.maplibregl-popup-anchor-bottom-right .maplibregl-popup-tip) {
+  border-top-color: rgba(37, 37, 38, 0.96);
+}
+
+.viewport :global(.maplibregl-popup-anchor-left .maplibregl-popup-tip) {
+  border-right-color: rgba(37, 37, 38, 0.96);
+}
+
+.viewport :global(.maplibregl-popup-anchor-right .maplibregl-popup-tip) {
+  border-left-color: rgba(37, 37, 38, 0.96);
+}
+
+.viewport :global(.maplibregl-popup-close-button) {
+  padding: 0 6px;
+  border: none;
+  background-color: transparent;
+  color: var(--gpg-muted);
+  font-size: 1rem;
+  line-height: 1.2;
+  cursor: pointer;
+}
+
+.viewport :global(.maplibregl-popup-close-button:hover) {
+  background-color: transparent;
+  color: var(--gpg-text);
+}
