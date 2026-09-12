@@ -1,0 +1,78 @@
+/* ==========================================================
+   本地数据库连通性自检：外观与设置页的卡片保持一致
+   ========================================================== */
+
+.panel {
+  margin-top: 2rem;
+  padding: 1rem 1.25rem;
+  border: 1px solid var(--gpg-border);
+  border-radius: 8px;
+  background-color: var(--gpg-panel-bg);
+}
+
+.title {
+  margin: 0 0 0.5rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.hint {
+  margin: 0 0 0.75rem;
+  color: var(--gpg-muted);
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
+.hint code {
+  padding: 0.1em 0.35em;
+  border-radius: 3px;
+  background-color: rgba(255, 255, 255, 0.06);
+  font-size: 0.95em;
+}
+
+.button {
+  padding: 0.45rem 0.9rem;
+  border: 1px solid var(--gpg-border);
+  border-radius: 6px;
+  background-color: #3c3c3c;
+  color: var(--gpg-text);
+  font: inherit;
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+
+/* ⚠️ App.css 的 `button:hover`(0,1,1) 会压过单类名规则(0,1,0)，必须显式覆盖。
+   同理 disabled 按钮仍会命中 :hover，所以禁用态要在下面单独压回来。 */
+.button:hover,
+.button:active {
+  border-color: var(--gpg-accent);
+  background-color: #4a4a4d;
+}
+
+.button:disabled {
+  border-color: var(--gpg-border);
+  background-color: #333336;
+  color: var(--gpg-muted);
+  cursor: progress;
+}
+
+.result {
+  min-height: 1.25rem;
+  margin: 0.75rem 0 0;
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
+/* 深色主题下自检结果的三种状态色 */
+.result[data-state="idle"] {
+  color: var(--gpg-muted);
+}
+
+.result[data-state="ok"] {
+  color: #6fcf72;
+}
+
+.result[data-state="error"] {
+  color: #f0a35e;
+}

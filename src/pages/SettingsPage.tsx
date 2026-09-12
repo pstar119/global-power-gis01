@@ -1,3 +1,4 @@
+import DbSelfCheck from "../components/DbSelfCheck";
 import GreetSelfCheck from "../components/GreetSelfCheck";
 import styles from "./SettingsPage.module.css";
 
@@ -62,6 +63,8 @@ function SettingsPage({ hint }: SettingsPageProps) {
       </div>
 
       <GreetSelfCheck />
+
+      <DbSelfCheck />
     </div>
   );
 }
