@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import Database from "@tauri-apps/plugin-sql";
-import type { FeatureCollection, Point } from "geojson";
+import type { FeatureCollection, LineString, Point } from "geojson";
 // 仅用命名导入：maplibre-gl 的类型声明不提供 default export
 import {
   Map as MapLibreMap,
@@ -80,6 +80,19 @@ const SUBSTATIONS_LAYER_ID = "substation-points";
 const LINES_SOURCE = "transmission-lines-data";
 const LINES_LAYER_ID = "transmission-lines";
 
+/**
+ * 输电线路的「点击热区」图层。
+ *
+ * 视觉线宽只有 1~2.6px，鼠标几乎点不中。这里在同一条线之上再叠一层
+ * **完全透明**的粗线（14px）专门用来接事件 —— 把「视觉表现」与「命中区域」
+ * 解耦，既不用为了可点击而把线画粗（会破坏按电压分级的视觉设计）。
+ *
+ * MapLibre 的命中测试只看图层是否 visible、要素是否在视口内，**不看透明度**，
+ * 所以 line-opacity: 0 依然能收到 click。
+ */
+const LINES_HIT_LAYER_ID = "transmission-lines-hit";
+const LINES_HIT_WIDTH = 14;
+
 /** 变电站统一用青蓝色（不按电压上色：燃料配色盘已被 15 种燃料占满，再加一套会和图例打架） */
 const SUBSTATION_COLOR = "#3fd0c9";
 /** 输电线路用中性灰，在 #101418 深底上可见但不抢眼 */
@@ -94,6 +107,19 @@ type PlantProperties = {
   color: string;
 };
 
+/** 变电站要素的属性。voltage 参与半径分级，缺失时为 0（落在 step 第一档）。 */
+type SubstationProperties = {
+  name: string;
+  country: string | null;
+  voltage: number;
+};
+
+/** 输电线路要素的属性 */
+type LineProperties = {
+  name: string;
+  voltage: number;
+};
+
 /**
  * 用原生 DOM 构建 Popup 内容。
  *
@@ -103,35 +129,82 @@ type PlantProperties = {
  *    外观与其它悬浮面板完全一致，不需要为它另写一套全局 CSS。
  */
 function buildPlantPopup(props: PlantProperties): HTMLElement {
+  return buildPopupFrame(props.name, "未命名电厂", [
+    { label: "国家/地区", value: props.country || "未知" },
+    {
+      label: "燃料类型",
+      value: props.fuel || "未知",
+      // 燃料那一行在文字前加一个与地图同色的色块，和图例形成呼应
+      swatch: props.fuel ? props.color : undefined,
+    },
+    {
+      label: "装机容量",
+      value: props.capacity == null ? "未提供" : `${props.capacity} MW`,
+    },
+  ]);
+}
+
+/** 变电站 Popup：名称 / 国家 / 电压等级 */
+function buildSubstationPopup(props: SubstationProperties): HTMLElement {
+  return buildPopupFrame(props.name, "未命名变电站", [
+    { label: "国家/地区", value: props.country || "未知" },
+    { label: "电压等级", value: formatVoltage(props.voltage), swatch: SUBSTATION_COLOR },
+  ]);
+}
+
+/**
+ * 输电线路 Popup：名称 / 电压等级 / 起止点。
+ * 起止点从 geometry 的 LineString 坐标读取，不需要额外查询数据库。
+ */
+function buildLinePopup(
+  props: LineProperties,
+  coords: ReadonlyArray<[number, number]>,
+): HTMLElement {
+  const [start, end] = coords;
+  return buildPopupFrame(props.name, "未命名线路", [
+    { label: "电压等级", value: formatVoltage(props.voltage), swatch: LINE_COLOR },
+    { label: "起点", value: start ? formatLngLat(start) : "未提供" },
+    { label: "终点", value: end ? formatLngLat(end) : "未提供" },
+  ]);
+}
+/** Popup 的一行：标签 + 值，可选的色块用于与图例呼应 */
+type PopupRow = { label: string; value: string; swatch?: string };
+
+/**
+ * 三种要素（电厂 / 变电站 / 输电线路）共用的 Popup 骨架。
+ *
+ * ⚠️ 一律走 `textContent`，**绝不用 `setHTML()`**。电厂名称来自外部数据集，
+ *    拼 HTML 字符串会有注入风险；`textContent` 由浏览器自动转义。
+ * ⚠️ 样式用 CSS Modules 的类名（运行时就是个字符串），所以 Popup 的外观
+ *    与其它悬浮面板完全一致，不需要另写一套全局 CSS。
+ */
+function buildPopupFrame(
+  title: string,
+  fallbackTitle: string,
+  rows: readonly PopupRow[],
+): HTMLElement {
   const root = document.createElement("div");
   root.className = styles.popup;
 
-  const title = document.createElement("h3");
-  title.className = styles.popupTitle;
-  title.textContent = props.name || "未命名电厂";
-  root.appendChild(title);
+  const heading = document.createElement("h3");
+  heading.className = styles.popupTitle;
+  heading.textContent = title || fallbackTitle;
+  root.appendChild(heading);
 
   const list = document.createElement("dl");
   list.className = styles.popupList;
 
-  const rows: ReadonlyArray<readonly [string, string]> = [
-    ["国家/地区", props.country || "未知"],
-    ["燃料类型", props.fuel || "未知"],
-    ["装机容量", props.capacity == null ? "未提供" : `${props.capacity} MW`],
-  ];
-
-  for (const [label, value] of rows) {
+  for (const row of rows) {
     const dt = document.createElement("dt");
-    dt.textContent = label;
+    dt.textContent = row.label;
 
     const dd = document.createElement("dd");
-    dd.textContent = value;
+    dd.textContent = row.value;
 
-    // 燃料那一行在文字前加一个与地图同色的色块，和图例形成呼应
-    if (label === "燃料类型" && props.fuel) {
+    if (row.swatch) {
       const swatch = document.createElement("span");
       swatch.className = styles.popupSwatch;
-      swatch.style.backgroundColor = props.color;
+      swatch.style.backgroundColor = row.swatch;
       dd.prepend(swatch);
     }
 
@@ -140,6 +213,18 @@ function buildPlantPopup(props: PlantProperties): HTMLElement {
 
   root.appendChild(list);
   return root;
+}
+
+/** 电压等级文本。0 / null 表示数据缺失，不能显示成 "0 kV"。 */
+function formatVoltage(kv: number): string {
+  return kv ? `${kv} kV` : "未知";
+}
+
+/** 经纬度文本：[经度, 纬度] → "116.4000°E, 39.9000°N"。按半球标注而非直接带负号。 */
+function formatLngLat([lon, lat]: [number, number]): string {
+  const ew = lon >= 0 ? "E" : "W";
+  const ns = lat >= 0 ? "N" : "S";
+  return `${Math.abs(lon).toFixed(4)}°${ew}, ${Math.abs(lat).toFixed(4)}°${ns}`;
 }
 
 /**
@@ -716,19 +801,53 @@ function MapPage({ command = null }: MapPageProps) {
                 source: SUBSTATIONS_SOURCE,
                 paint: {
                   "circle-color": SUBSTATION_COLOR,
-                  // 半径按电压分级，直观体现站点的重要性层级
+                  // 半径与描边都按电压分级。
+                  // 阶段22 把间距从 4/5.5/7 拉大到 3.5/6/9 —— 原来差距太小，
+                  // 实测在小比例尺下几乎分不出等级。1000kV 档为将来接
+                  // 真实特高压数据预留（当前演示数据里没有，写了也不会出错）。
                   "circle-radius": [
                     "step",
                     ["get", "voltage"],
-                    4,
+                    3.5,
                     220,
-                    5.5,
+                    6,
                     500,
-                    7,
+                    9,
+                    1000,
+                    12,
                   ],
                   "circle-opacity": 0.9,
                   "circle-stroke-color": "#06333a",
-                  "circle-stroke-width": 1.2,
+                  "circle-stroke-width": [
+                    "step",
+                    ["get", "voltage"],
+                    1,
+                    220,
+                    1.2,
+                    500,
+                    1.6,
+                    1000,
+                    2,
+                  ],
+                },
+              });
+
+              // ---- 阶段22：输电线路的透明点击热区 ----
+              // 放在视觉线之后添加，保证它在同一位置上「压得住」细线，
+              // 但因为它完全透明，视觉上完全看不出多了一层。
+              map.addLayer({
+                id: LINES_HIT_LAYER_ID,
+                type: "line",
+                source: LINES_SOURCE,
+                layout: {
+                  "line-cap": "round",
+                  "line-join": "round",
+                },
+                paint: {
+                  // 颜色无所谓（opacity 为 0），给个黑色只是为了让属性完整
+                  "line-color": "#000000",
+                  "line-width": LINES_HIT_WIDTH,
+                  "line-opacity": 0,
                 },
               });
 
@@ -901,8 +1020,70 @@ function MapPage({ command = null }: MapPageProps) {
                   .addTo(map);
               });
 
+              // ---- 阶段22：点击变电站：弹出详情卡片 ----
+              map.on("click", SUBSTATIONS_LAYER_ID, (e) => {
+                // 「点优先」：该位置若有电厂，交给电厂自己的 handler。
+                // 两层共用一个 popup 实例，不判定的话后执行的会覆盖先执行的。
+                const onPlant = map.queryRenderedFeatures(e.point, {
+                  layers: [PLANT_LAYER_ID],
+                });
+                if (onPlant.length > 0) return;
+
+                const feature = e.features?.[0];
+                if (!feature) return;
+
+                const point = (feature.geometry as Point).coordinates as [
+                  number,
+                  number,
+                ];
+
+                popup
+                  .setLngLat(point.slice() as [number, number])
+                  .setDOMContent(
+                    buildSubstationPopup(
+                      feature.properties as SubstationProperties,
+                    ),
+                  )
+                  .addTo(map);
+              });
+
+              // ---- 阶段22：点击输电线路（绑在透明热区层上）----
+              map.on("click", LINES_HIT_LAYER_ID, (e) => {
+                // 「点优先」：热区宽 14px，而变电站半径只有 3.5~9px，
+                // 线穿过站点时热区必然会盖住它。不判定的话，用户想点变电站
+                // 却会弹出线路信息 —— 这是本项目里最容易忽略的一处。
+                const onPoint = map.queryRenderedFeatures(e.point, {
+                  layers: [SUBSTATIONS_LAYER_ID, PLANT_LAYER_ID],
+                });
+                if (onPoint.length > 0) return;
+
+                const feature = e.features?.[0];
+                if (!feature) return;
+
+                const coords = (feature.geometry as LineString).coordinates as [
+                  number,
+                  number,
+                ][];
+                // 弹窗挂在线的中点而不是鼠标处：否则点在线段末端时，
+                // 弹窗会贴到视窗边缘甚至被裁掉。
+                const anchor = coords[Math.floor(coords.length / 2)];
+                if (!anchor) return;
+
+                popup
+                  .setLngLat(anchor.slice() as [number, number])
+                  .setDOMContent(
+                    buildLinePopup(feature.properties as LineProperties, coords),
+                  )
+                  .addTo(map);
+              });
+
               // ---- 光标反馈 ----
-              for (const layerId of [CLUSTER_LAYER_ID, PLANT_LAYER_ID]) {
+              for (const layerId of [
+                CLUSTER_LAYER_ID,
+                PLANT_LAYER_ID,
+                SUBSTATIONS_LAYER_ID,
+                LINES_HIT_LAYER_ID,
+              ]) {
                 map.on("mouseenter", layerId, () => {
                   map.getCanvas().style.cursor = "pointer";
                 });
@@ -975,10 +1156,12 @@ function MapPage({ command = null }: MapPageProps) {
 
     // 前三个图层都由「电厂」开关统一控制：高亮层是查询结果的叠加，
     // 若单独留着，会出现「电厂关掉了但还飘着一圈金环」的怪状。
+    // ⚠️ 输电线路的热区层必须跟着视觉线一起开关，否则会出现
+    //    「线看不见了、却还能点到它的弹窗」的幽灵交互。
     const groups: ReadonlyArray<readonly [string, readonly string[]]> = [
       ["电厂", [CLUSTER_LAYER_ID, PLANT_LAYER_ID, HIGHLIGHT_LAYER_ID]],
       ["变电站", [SUBSTATIONS_LAYER_ID]],
-      ["输电线路", [LINES_LAYER_ID]],
+      ["输电线路", [LINES_LAYER_ID, LINES_HIT_LAYER_ID]],
     ];
 
     for (const [name, ids] of groups) {
