@@ -11,8 +11,10 @@
  * 视口就整个落在格子内部 → 地图全空（看起来像坏了）。
  * 判定条件：2^(z_view - Z) > W_px·N/512 时变空。
  * 第一版 Z=2、N=3，实测放大 3 级就全空，就是这个原因。
- * 现在取 Z=3、N=4：在窄视口(~471px)下可撑到约 z4.9，
- * 在 Tauri 真实的宽视口(~1080px)下可撑到约 z6。
+ * 现在取 Z=4、N=4，并在前端把地图 maxZoom 限制为 6（见 MapPage.tsx）。
+ * 变空条件：2^(z_view - Z) > W_px·N/512。代入最窄窗口
+ * （minHeight 700 → 内容区高约 651px）：2^(z-4) > 5.09 → z > 6.35，
+ * 所以 z6 仍在安全区内。
  *
  * === 为什么用 Node 而不是 Python ===
  * `pmtiles` 包（项目已装）导出了官方的 `zxyToTileId`（Hilbert 排序）与 `bytesToHeader`。
@@ -402,7 +404,7 @@ function buildArchive({ tiles, metadata, minZoom, maxZoom, bounds, center }) {
 // ============================================================
 
 const MIN_ZOOM = 0;
-const MAX_ZOOM = 3;
+const MAX_ZOOM = 4;
 
 /** 让 Node 侧也能用 pmtiles 的 PMTiles 类读取内存里的归档 */
 class BufferSource {
