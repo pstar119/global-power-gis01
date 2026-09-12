@@ -126,6 +126,18 @@
   cursor: not-allowed;
 }
 
+/* 本地 Ollama 模式：强调数据不出本机，与云端「明文 Key」警告形成对比 */
+.localNote {
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  border-left: 3px solid #3fd0c9;
+  border-radius: 4px;
+  background-color: rgba(63, 208, 201, 0.1);
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: #8fe3dd;
+}
+
 .testResult {
   margin: 0;
   font-size: 0.75rem;

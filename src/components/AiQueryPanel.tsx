@@ -3,10 +3,15 @@ import Database from "@tauri-apps/plugin-sql";
 import { countryLabel } from "../lib/country";
 import { fuelLabel } from "../lib/fuel";
 import {
+  DEFAULT_OLLAMA_BASE_URL,
+  DEFAULT_OLLAMA_MODEL,
   PROVIDERS,
+  PROVIDER_LABELS,
   PROVIDER_ORDER,
+  isConfigComplete,
   parseQuery,
   testConnection,
+  type AiConfig,
   type Provider,
 } from "../lib/llm";
 import { EXAMPLES, parseNaturalQuery, type ParseResult, type ParsedQuery } from "../lib/nlq";
@@ -25,6 +30,10 @@ const LS_KEYS = {
   enabled: "gpg.ai.enabled",
   provider: "gpg.ai.provider",
   apiKey: "gpg.ai.apiKey",
+  // 本地 Ollama 的配置用**独立** key，与云端互不干扰：
+  // 从 Ollama 切回 DeepSeek 时 API Key 依然在，反之亦然。
+  ollamaUrl: "gpg.ai.ollamaUrl",
+  ollamaModel: "gpg.ai.ollamaModel",
 } as const;
 
 /** 结果列名 -> 中文表头 */
@@ -95,10 +104,16 @@ function AiQueryPanel({ onViewOnMap }: AiQueryPanelProps) {
   );
   const [provider, setProvider] = useState<Provider>(() => {
     const saved = localStorage.getItem(LS_KEYS.provider);
-    return saved && saved in PROVIDERS ? (saved as Provider) : "deepseek";
+    return saved && saved in PROVIDER_LABELS ? (saved as Provider) : "deepseek";
   });
   const [apiKey, setApiKey] = useState(
     () => localStorage.getItem(LS_KEYS.apiKey) ?? "",
+  );
+  const [ollamaUrl, setOllamaUrl] = useState(
+    () => localStorage.getItem(LS_KEYS.ollamaUrl) ?? DEFAULT_OLLAMA_BASE_URL,
+  );
+  const [ollamaModel, setOllamaModel] = useState(
+    () => localStorage.getItem(LS_KEYS.ollamaModel) ?? DEFAULT_OLLAMA_MODEL,
   );
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{
@@ -115,14 +130,30 @@ function AiQueryPanel({ onViewOnMap }: AiQueryPanelProps) {
   useEffect(() => {
     localStorage.setItem(LS_KEYS.apiKey, apiKey);
   }, [apiKey]);
+  useEffect(() => {
+    localStorage.setItem(LS_KEYS.ollamaUrl, ollamaUrl);
+  }, [ollamaUrl]);
+  useEffect(() => {
+    localStorage.setItem(LS_KEYS.ollamaModel, ollamaModel);
+  }, [ollamaModel]);
 
-  /** 开关开启且 Key 非空，才走真实大模型 */
-  const aiReady = useAi && apiKey.trim().length > 0;
+  const isLocal = provider === "ollama";
+
+  /**
+   * 统一的 AI 配置。用可辨识联合表达，所以不可能出现
+   * 「本地模式却把 apiKey 当作必需项」这类逻辑错误。
+   */
+  const aiConfig: AiConfig = isLocal
+    ? { provider: "ollama", ollama: { baseUrl: ollamaUrl, model: ollamaModel } }
+    : { provider, apiKey };
+
+  /** 开关开启、且当前 provider 所需的配置已填齐，才走大模型 */
+  const aiReady = useAi && isConfigComplete(aiConfig);
 
   const runTest = async () => {
     setTesting(true);
     setTestResult(null);
-    setTestResult(await testConnection({ provider, apiKey }));
+    setTestResult(await testConnection(aiConfig));
     setTesting(false);
   };
 
@@ -131,9 +162,9 @@ function AiQueryPanel({ onViewOnMap }: AiQueryPanelProps) {
 
     setState({ status: "running" });
 
-    // 唯一的分叉点：开关开启且填了 Key 就走真实大模型，否则回退到本地规则引擎
+    // 唯一的分叉点：开关开启且配置齐备就走大模型，否则回退到本地规则引擎
     const parsed = aiReady
-      ? await parseQuery(question, { provider, apiKey })
+      ? await parseQuery(question, aiConfig)
       : parseNaturalQuery(question);
 
     if (!parsed.ok) {
@@ -184,7 +215,7 @@ function AiQueryPanel({ onViewOnMap }: AiQueryPanelProps) {
             checked={useAi}
             onChange={(event) => setUseAi(event.target.checked)}
           />
-          <span>使用真实 AI 解析（需自备 API Key）</span>
+          <span>使用大模型解析（云端需自备 API Key；本地 Ollama 无需 Key）</span>
         </label>
 
         {useAi && (
@@ -203,47 +234,110 @@ function AiQueryPanel({ onViewOnMap }: AiQueryPanelProps) {
               >
                 {PROVIDER_ORDER.map((key) => (
                   <option key={key} value={key}>
-                    {PROVIDERS[key].label} · {PROVIDERS[key].model}
+                    {key === "ollama"
+                      ? PROVIDER_LABELS.ollama
+                      : `${PROVIDERS[key].label} · ${PROVIDERS[key].model}`}
                   </option>
                 ))}
               </select>
             </div>
 
-            <div className={styles.configRow}>
-              <label className={styles.configLabel} htmlFor="ai-key">
-                API Key
-              </label>
-              <input
-                id="ai-key"
-                className={styles.configInput}
-                type="password"
-                value={apiKey}
-                onChange={(event) => setApiKey(event.target.value)}
-                placeholder="sk-..."
-                autoComplete="off"
-                aria-label="API Key"
-              />
-              <button
-                type="button"
-                className={styles.configBtn}
-                onClick={() => {
-                  setApiKey("");
-                  setTestResult(null);
-                }}
-                disabled={!apiKey}
-              >
-                清除
-              </button>
-              <button
-                type="button"
-                className={styles.configBtn}
-                onClick={() => void runTest()}
-                disabled={testing || !apiKey.trim()}
-              >
-                {testing ? "测试中…" : "测试连接"}
-              </button>
-            </div>
+            {isLocal ? (
+              <>
+                <div className={styles.configRow}>
+                  <label className={styles.configLabel} htmlFor="ollama-url">
+                    服务地址
+                  </label>
+                  <input
+                    id="ollama-url"
+                    className={styles.configInput}
+                    value={ollamaUrl}
+                    onChange={(event) => setOllamaUrl(event.target.value)}
+                    placeholder={DEFAULT_OLLAMA_BASE_URL}
+                    autoComplete="off"
+                    aria-label="Ollama 服务地址"
+                  />
+                </div>
 
+                <div className={styles.configRow}>
+                  <label className={styles.configLabel} htmlFor="ollama-model">
+                    模型名称
+                  </label>
+                  <input
+                    id="ollama-model"
+                    className={styles.configInput}
+                    value={ollamaModel}
+                    onChange={(event) => setOllamaModel(event.target.value)}
+                    placeholder={DEFAULT_OLLAMA_MODEL}
+                    autoComplete="off"
+                    aria-label="Ollama 模型名称"
+                  />
+                  <button
+                    type="button"
+                    className={styles.configBtn}
+                    onClick={() => void runTest()}
+                    disabled={testing || !ollamaUrl.trim()}
+                  >
+                    {testing ? "测试中…" : "测试连接"}
+                  </button>
+                </div>
+
+                <p className={styles.localNote}>
+                  🔒 本地推理全程离线，数据不会离开本机，也不需要 API Key。
+                </p>
+
+                <p className={styles.warn}>
+                  ⚠️ 使用前需先在本机运行 Ollama 并拉取模型：
+                  终端执行 <code>ollama serve</code> 与{" "}
+                  <code>ollama pull {ollamaModel.trim() || DEFAULT_OLLAMA_MODEL}</code>。
+                  「测试连接」会列出本机已有模型并校验填写的模型是否存在。
+                </p>
+              </>
+            ) : (
+              <>
+                <div className={styles.configRow}>
+                  <label className={styles.configLabel} htmlFor="ai-key">
+                    API Key
+                  </label>
+                  <input
+                    id="ai-key"
+                    className={styles.configInput}
+                    type="password"
+                    value={apiKey}
+                    onChange={(event) => setApiKey(event.target.value)}
+                    placeholder="sk-..."
+                    autoComplete="off"
+                    aria-label="API Key"
+                  />
+                  <button
+                    type="button"
+                    className={styles.configBtn}
+                    onClick={() => {
+                      setApiKey("");
+                      setTestResult(null);
+                    }}
+                    disabled={!apiKey}
+                  >
+                    清除
+                  </button>
+                  <button
+                    type="button"
+                    className={styles.configBtn}
+                    onClick={() => void runTest()}
+                    disabled={testing || !apiKey.trim()}
+                  >
+                    {testing ? "测试中…" : "测试连接"}
+                  </button>
+                </div>
+
+                <p className={styles.warn}>
+                  ⚠️ API Key 以**明文**形式存储在本地（localStorage），
+                  请勿在公用电脑上使用。
+                </p>
+              </>
+            )}
+
+            {/* 测试结果两种模式共用：放在条件分支之外，切换 provider 也不会丢 */}
             {testResult && (
               <p
                 className={styles.testResult}
@@ -253,11 +347,6 @@ function AiQueryPanel({ onViewOnMap }: AiQueryPanelProps) {
                 {testResult.message}
               </p>
             )}
-
-            <p className={styles.warn}>
-              ⚠️ API Key 以**明文**形式存储在本地（localStorage），
-              请勿在公用电脑上使用。
-            </p>
           </div>
         )}
       </div>
