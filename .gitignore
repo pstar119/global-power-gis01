@@ -33,6 +33,12 @@ dist-ssr
 # 这样缺字体时应用仍能编译，MapLibre 只会告警并回退到系统字体。
 /public/fonts/
 
+# 阶段28：OSM 电网数据（scripts/fetch_osm_power.py 抓取 + prepare_osm_geojson.mjs 合并）。
+# OSM 原始数据属 ODbL，且体积会随范围增长（长三角预计 10 MB 量级），绝不进仓库。
+# 代价：全新克隆没有它，前端会优雅降级并提示先跑 prepare_osm_geojson.mjs。
+/data/
+/public/osm/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

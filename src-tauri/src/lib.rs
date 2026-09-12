@@ -26,18 +26,49 @@ fn greet(name: &str) -> String {
 
 /// 数据库迁移定义。
 ///
-/// 迁移由 tauri-plugin-sql 在事务里执行，可安全重复运行；
-/// sqlx 会记录已应用过的版本号，所以新增迁移不会重跑旧脚本。
+/// 迁移由 tauri-plugin-sql 在事务里执行；sqlx 会记录已应用过的版本号，
+/// 所以新增迁移不会重跑旧脚本。
 ///
 /// - v1：只建三张空表，不插入任何数据
 /// - v2：为接入真实数据源补充 gppd_idnr（唯一）与 primary_fuel 两列
-/// - v3：灌入阶段21 的电力网络演示数据（200 变电站 / 100 线路）
+/// - v3：灌入阶段21 的电力网络**演示数据**（200 变电站 / 100 线路）—— 已冻结，见下
+/// - v4：清空 v3 遗留的演示行（阶段28 起改用真实 OSM 数据）
 ///
-/// 为什么演示数据走 migration 而不是前端导入：
-///   前端 capabilities 只有 sql:allow-select，没有 sql:allow-execute，
-///   运行时写库会被 Tauri 直接拒绝（实测 "sql.execute not allowed"）。
-///   放进 migration 则对「已有库」和「全新库」都会自动执行，两条路径统一，
-///   且无需为写入功能开放前端权限、也无需把 sqlx 加回 Cargo.toml。
+/// 🔴 为什么 v3 **不能删**（这是实测 + 读源码换来的结论，别再试一次）：
+///
+/// 阶段28 的本意是「把演示数据整体移除」，最直觉的做法是把 v3 从下面的列表里删掉、
+/// 连 `003_seed_demo_grid.sql` 一起删。**这条路会把整个数据库加载搞挂，而且不报明显错误**：
+///
+/// 1. sqlx 的 `migrate/migrator.rs::validate_applied_migrations` 有这么一段：
+///    ```rust
+///    if migrator.ignore_missing { return Ok(()); }
+///    let migrations: HashSet<_> = migrator.iter().map(|m| m.version).collect();
+///    ... return Err(MigrateError::VersionMissing(applied.version));
+///    ```
+///    而 `ignore_missing` **默认为 false**（`tauri-plugin-sql` 也没有暴露这个开关）。
+///    于是「数据库里有 v3、列表里没有 v3」= `pool.migrate()` 直接返回 Err。
+/// 2. 插件的 `commands.rs::load` 是：
+///    ```rust
+///    if let Some(m) = migrations.0.lock().await.remove(&db) {
+///        let migrator = Migrator::new(m).await?;
+///        pool.migrate(&migrator).await?;   // ← 这里报错就直接 return
+///    }
+///    db_instances.0.write().await.insert(db.clone(), pool);  // ← 根本执行不到
+///    ```
+///    所以连接池**不会**被注册，前端 `Database.load()` 抛出。
+/// 3. 更坑的是：那次失败的 `remove()` 已经**把迁移条目从 map 里拿走了**，
+///    所以*再*调一次 `Database.load()` 反而会成功（没有迁移要跑，自然不会报错），
+///    于是现象变成「第一次加载报错、手动重试却正常、数据库一行没改」—— 极难定位。
+///
+/// 实测现象（2026-09-12，长三角阶段）：`_sqlx_migrations` 停在 [1,2,3]，
+/// `substations` / `transmission_lines` 仍是 200 / 100 行，而数据库文件 mtime 纹丝不动。
+///
+/// ⚠️ 同理，`003_seed_demo_grid.sql` 的内容**一个字都不能改**：
+///    已应用过 v3 的库会比对 checksum，内容变了会报 `VersionMismatch`。
+///    （所以它里面那句「由 scripts/make_demo_grid.py 生成」虽然脚本已删，也只能留在原地。）
+///
+/// 结论：**已应用的迁移只能新增、不能删除或修改**。清理由新迁移负责 —— 这就是 v4 的由来。
+/// 对新库的副作用是「v3 先插、v4 立刻删」，用户完全看不到，可以接受。
 fn migrations() -> Vec<Migration> {
     vec![
         Migration {
@@ -55,8 +86,14 @@ fn migrations() -> Vec<Migration> {
         Migration {
             version: 3,
             description: "seed_demo_power_grid",
-            // 由 scripts/make_demo_grid.py 生成，勿手改
+            // ⚠️ 阶段28 起这批数据已被 v4 清空，但本迁移必须原样保留 —— 原因见上面的说明。
             sql: include_str!("../migrations/003_seed_demo_grid.sql"),
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 4,
+            description: "clear_demo_power_grid",
+            sql: include_str!("../migrations/004_clear_demo_power_grid.sql"),
             kind: MigrationKind::Up,
         },
     ]

@@ -1,0 +1,35 @@
+# 换行符策略 —— 只钉死「字节内容会被当作校验和」的文件。
+#
+# 🔴 为什么必须有这一条（阶段28 实测踩到的坑）：
+# sqlx 计算迁移校验和的方式是 `SHA384(SQL 原文的字节)`，并把结果存进
+# `_sqlx_migrations.checksum`。而 tauri-plugin-sql 在加载数据库时会做校验：
+#     Some(applied) if applied.checksum != migration.checksum
+#         => Err(MigrateError::VersionMismatch(version))
+#
+# Windows 上 Git 默认 `core.autocrlf=true`，会在 **checkout 时把 LF 转成 CRLF**。
+# 于是一旦工作区里的迁移文件被重新 checkout 过一次，它的字节就变了 ——
+# 对**已经应用过该迁移的数据库**，校验和立刻不匹配，`pool.migrate()` 报
+# VersionMismatch，而插件的 `commands.rs::load` 是
+#     if let Some(m) = migrations.remove(&db) { ...; pool.migrate(&m).await?; }
+#     db_instances.insert(...);          // ← 报错就执行不到
+# 结果：连接池不注册、那个组件的数据加载失败。
+#
+# 最容易误判的地方：迁移条目 `remove()` 已经被消耗掉了，所以**另一个**组件
+# 并发的 `Database.load()` 反而会成功（没有迁移要跑自然不会报错），
+# 现象变成「地图上数据都正常，但演示数据就是删不掉、数据库文件纹丝不动」。
+#
+# 实测数据（2026-09-12）：
+#   旧库记录的 v3 校验和  = ea9bde02fb0f8cb6c8c29720ddf660f624054e31cc204093551b8559741e4f44bbd0f39985eaee0f1eefd07676eca4c3
+#   工作区文件(CRLF)的 SHA384 = 97d4c1315d90b033900d5e62c8ee423a748af64023aa154faba44aa459075bc5052510dc30a48d46813ead41e90dd1bd  ← 不匹配
+#   工作区文件(LF)的 SHA384   = ea9bde02…76eca4c3  ← 一致
+#
+# ⚠️ 结论不是「统一成 LF」，而是「**维持已应用时的原始字节，禁止任何换行转换**」。
+# 2026-09-12 逐文件实测（磁盘 CRLF 数量 / 库内校验和依据）：
+#   001_init.sql                   CRLF×37   → 校验和基于 CRLF
+#   002_add_plant_source_and_fuel  CRLF×21   → 校验和基于 CRLF
+#   003_seed_demo_grid.sql         LF×0      → 校验和基于 LF
+#   004_clear_demo_power_grid.sql  CRLF×19   → 校验和基于 CRLF
+# 所以**不能**写 `text eol=lf`：那会把 001/002/004 转成 LF，等于把它们的
+# 校验和改掉，会让所有已安装用户的库在下次加载时直接报 VersionMismatch。
+# `-text` = 不做任何换行转换，存什么字节就检出什么字节。
+src-tauri/migrations/*.sql -text

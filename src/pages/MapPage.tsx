@@ -110,7 +110,7 @@ const HIGHLIGHT_LAYER_ID = "highlight-points";
  * ⚠️ 图层堆叠顺序很关键：输电线路必须加在**点图层之下**，
  *    否则灰色线条会横穿彩色电厂点与变电站点，视觉噪声极大。
  *    实际顺序由 addLayer 的调用次序决定（后加的在上面），
- *    即：底图 → 输电线路 → 变电站 → 电厂 → 聚合 → 高亮。
+ *    即：底图 → OSM 输电线路 → OSM 变电站 → 演练数据（现为空）→ 电厂 → 聚合 → 高亮 → 地名标签。
  */
 const SUBSTATIONS_SOURCE = "substations-data";
 const SUBSTATIONS_LAYER_ID = "substation-points";
@@ -134,6 +134,52 @@ const LINES_HIT_WIDTH = 14;
 const SUBSTATION_COLOR = "#3fd0c9";
 /** 输电线路用中性灰，在 #101418 深底上可见但不抢眼 */
 const LINE_COLOR = "#8b96a8";
+
+/**
+ * 阶段28：真实 OSM 电网数据（上海小样本）。
+ *
+ * ⚠️ 与底图不同，这里是 **GeoJSON source**，不是 PMTiles：
+ *   - 1469 个要素 / 0.53 MB，全量载入内存毫无压力；
+ *   - 文件放在 `public/osm/` 下 → Vite 打进 `dist/` → 运行时由 `tauri.localhost` 提供，
+ *     **普通相对路径即可**。不需要 asset 协议、不需要 convertFileSrc、也不用改 CSP：
+ *     GeoJSON source 走的是 fetch，`connect-src 'self'` 已经覆盖。
+ *     （`asset` 协议管的是「前端包之外的本地文件」，比如 `resources/maps/basemap.pmtiles`，
+ *      两条路别混。）
+ *   - 数据文件已 gitignore，缺失时优雅降级（见 loadOsmGridData）。
+ */
+const OSM_SOURCE = "osm-grid";
+const OSM_DATA_URL = "/osm/smoketest_power.geojson";
+const OSM_ATTRIBUTION = "电网数据 © OpenStreetMap contributors (ODbL)";
+
+/**
+ * 线路按电压分档：**一个 source、每个档位一个图层**。
+ *
+ * 为什么不是「一个图层 + match 表达式上色」：下一阶段要加「电压等级复选框列表」，
+ * 分档独立成层时开关只需 setLayoutProperty，而用 match 的话得改 filter 表达式，
+ * 复杂度高且容易写错。层级多一点换来开关实现简单，这笔买卖划算。
+ *
+ * 线宽按 zoom 插值（z11 起达到标称值），否则低级别 3px 的线会把整片区域糊死。
+ * `unknown` 单独一层且**默认隐藏** —— 实测 22% 的线路根本没有 voltage 标签，
+ * 把它们归进任何一档都是误导；留给用户主动勾选。
+ */
+const OSM_LINE_TIERS: ReadonlyArray<{
+  id: string;
+  vclass: string;
+  color: string;
+  width: number;
+}> = [
+  { id: "osm-line-735", vclass: "735+", color: "#e879f9", width: 3 },
+  { id: "osm-line-500", vclass: "500-734", color: "#f59e0b", width: 2 },
+  { id: "osm-line-220", vclass: "220-499", color: "#4daafc", width: 1.5 },
+  { id: "osm-line-lt220", vclass: "<220", color: "#6b7280", width: 0.8 },
+  { id: "osm-line-unknown", vclass: "unknown", color: "#8b96a8", width: 1 },
+];
+const OSM_SUBSTATION_LAYER_ID = "osm-substations";
+const OSM_PLANT_LAYER_ID = "osm-plants";
+
+/** OSM 数据缺失时给用户的提示 */
+const OSM_MISSING_NOTICE =
+  "未找到 OSM 电网数据，真实输电线路与变电站图层为空。请先运行 node scripts/prepare_osm_geojson.mjs。";
 
 /**
  * 执行查询后的最低缩放级别。
@@ -805,6 +851,119 @@ function renderHighlight(
   );
 }
 
+/**
+ * 阶段28：加载 OSM 电网静态数据。
+ *
+ * 拿不到就返回 null（**不抛异常**）—— 底图和电厂数据不能被一个可选的图层拖垮。
+ * 用 fetch 拿回对象再交给 MapLibre（而不是把 URL 丢给 source），好处：
+ *   1) 只请求一次；（若把 URL 给 source，要先探测再加载就是两次）
+ *   2) 能校验 FeatureCollection 结构，坏文件会当场报出来而不是变成空白图层；
+ *   3) 能把要素数打进控制台 —— 一句话就能判断数据到底加载上没有。
+ */
+async function loadOsmGridData(): Promise<FeatureCollection | null> {
+  try {
+    const res = await fetch(OSM_DATA_URL);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const fc = (await res.json()) as FeatureCollection;
+    if (fc?.type !== "FeatureCollection" || !Array.isArray(fc.features)) {
+      throw new Error("不是合法的 FeatureCollection");
+    }
+    if (fc.features.length === 0) throw new Error("要素数为 0");
+    console.info(
+      `[MapPage] OSM 电网数据就绪：${fc.features.length} 个要素（${OSM_DATA_URL}）`,
+    );
+    return fc;
+  } catch (err) {
+    console.error(
+      `[MapPage] 未能加载 ${OSM_DATA_URL}，OSM 电网图层将不可见。` +
+        "请先运行 `node scripts/prepare_osm_geojson.mjs`。",
+      err,
+    );
+    return null;
+  }
+}
+
+/**
+ * 把 OSM 电网图层加到地图上。
+ *
+ * 调用位置很关键：必须在所有「点」图层**之前**调用，
+ * 否则线会横穿彩色的电厂点与变电站点。图层次序由 addLayer 的调用次序决定。
+ */
+function addOsmGridLayers(map: MapLibreMap, fc: FeatureCollection | null): void {
+  if (!fc || map.getSource(OSM_SOURCE)) return;
+
+  map.addSource(OSM_SOURCE, {
+    type: "geojson",
+    data: fc,
+    attribution: OSM_ATTRIBUTION,
+  });
+
+  for (const tier of OSM_LINE_TIERS) {
+    map.addLayer({
+      id: tier.id,
+      type: "line",
+      source: OSM_SOURCE,
+      // ftype 判别字段不能少：同一个 source 里装着点、线两类几何
+      filter: [
+        "all",
+        ["==", ["get", "ftype"], "line"],
+        ["==", ["get", "vclass"], tier.vclass],
+      ],
+      layout: {
+        "line-cap": "round",
+        "line-join": "round",
+        // 电压未知档默认隐藏，避免用乱线干扰视线
+        visibility: tier.vclass === "unknown" ? "none" : "visible",
+      },
+      paint: {
+        "line-color": tier.color,
+        "line-opacity": 0.85,
+        // 标称线宽在 z11 达到，低级别收细 —— 否则 z8 以下会被粗线糊满
+        "line-width": [
+          "interpolate",
+          ["linear"],
+          ["zoom"],
+          4,
+          tier.width * 0.3,
+          8,
+          tier.width * 0.55,
+          11,
+          tier.width,
+        ],
+      },
+    });
+  }
+
+  map.addLayer({
+    id: OSM_SUBSTATION_LAYER_ID,
+    type: "circle",
+    source: OSM_SOURCE,
+    filter: ["==", ["get", "ftype"], "substation"],
+    paint: {
+      "circle-color": SUBSTATION_COLOR,
+      "circle-opacity": 0.9,
+      "circle-stroke-color": "#06333a",
+      "circle-stroke-width": 0.8,
+      "circle-radius": ["interpolate", ["linear"], ["zoom"], 5, 2.5, 10, 5, 14, 8],
+    },
+  });
+
+  // OSM 里的电厂：只是想证明这些要素被抽出来了，所以刻意画成**白描空心圈**，
+  // 与 WRI 电厂（按燃料上色的实心圆）一眼可分，不会混淆两套数据来源。
+  map.addLayer({
+    id: OSM_PLANT_LAYER_ID,
+    type: "circle",
+    source: OSM_SOURCE,
+    filter: ["==", ["get", "ftype"], "plant"],
+    paint: {
+      "circle-color": "transparent",
+      "circle-stroke-color": "#e8eef6",
+      "circle-stroke-width": 1.2,
+      "circle-radius": ["interpolate", ["linear"], ["zoom"], 6, 3, 12, 7],
+    },
+  });
+}
+
 /** 清空高亮（保留图层，避免反复增删） */
 function clearHighlight(map: MapLibreMap) {
   const src = map.getSource(HIGHLIGHT_SOURCE) as GeoJSONSource | undefined;
@@ -1059,17 +1218,24 @@ function MapPage({ command = null }: MapPageProps) {
           // 结果是**竞态**：只有首次 load 会触发 migration v3（灌入演示电网数据），
           // 另外两个的 SELECT 可能在迁移提交之前就执行完，拿到空结果。
           // 实测表现极具迷惑性 —— 统计页能查到 200 个变电站，地图上却一个点都没有。
-          Database.load(DB_URL)
-            .then(() =>
+          // 阶段28：OSM 电网数据与数据库查询并行发出。
+          // 两者互不依赖，用 Promise.all 一起等；OSM 失败只会返回 null，不影响其它。
+          Promise.all([
+            loadOsmGridData(),
+            Database.load(DB_URL).then(() =>
               Promise.all([
                 loadSubstationsGeoJson(),
                 loadLinesGeoJson(),
                 loadPlantsGeoJson(),
               ]),
-            )
-            .then(([substationData, lineData, data]) => {
-              // 等异步查询期间组件可能已卸载，此时不能碰地图
-              if (disposed || !mapRef.current) return;
+            ),
+          ]).then(([osmData, [substationData, lineData, data]]) => {
+            // 等异步查询期间组件可能已卸载，此时不能碰地图
+            if (disposed || !mapRef.current) return;
+
+            // ---- 阶段28：真实 OSM 电网（最先加，压在所有点图层之下）----
+            addOsmGridLayers(map, osmData);
+            if (!osmData) setMapNotice(OSM_MISSING_NOTICE);
 
               // ---- 阶段21 图层一：输电线路（最底层）----
               map.addSource(LINES_SOURCE, { type: "geojson", data: lineData });
@@ -1495,10 +1661,17 @@ function MapPage({ command = null }: MapPageProps) {
     // 若单独留着，会出现「电厂关掉了但还飘着一圈金环」的怪状。
     // ⚠️ 输电线路的热区层必须跟着视觉线一起开关，否则会出现
     //    「线看不见了、却还能点到它的弹窗」的幽灵交互。
+    // ‼️ 阶段28：旧的两个开关现在接的是 **OSM 真实数据**。
+    //    上一阶段删掉了仿真数据，这里的 SQL 查询已返回空集，
+    //    正好把开关接到新图层上，不必重写 UI。
+    //    ⚠️ `osm-line-unknown` 故意不放进任何组：
+    //    控制它的名字不在 visibleLayers 里，于是始终是 none，
+    //    直到下一阶段加上「电压等级复选框列表」时它会自动生效。
     const groups: ReadonlyArray<readonly [string, readonly string[]]> = [
-      ["电厂", [CLUSTER_LAYER_ID, PLANT_LAYER_ID, HIGHLIGHT_LAYER_ID]],
-      ["变电站", [SUBSTATIONS_LAYER_ID]],
-      ["输电线路", [LINES_LAYER_ID, LINES_HIT_LAYER_ID]],
+      ["电厂", [CLUSTER_LAYER_ID, PLANT_LAYER_ID, HIGHLIGHT_LAYER_ID, OSM_PLANT_LAYER_ID]],
+      ["变电站", [SUBSTATIONS_LAYER_ID, OSM_SUBSTATION_LAYER_ID]],
+      ["输电线路", [LINES_LAYER_ID, LINES_HIT_LAYER_ID, ...OSM_LINE_TIERS.filter((t) => t.vclass !== "unknown").map((t) => t.id)]],
+      ["电压未知", ["osm-line-unknown"]],
     ];
 
     for (const [name, ids] of groups) {

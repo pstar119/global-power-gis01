@@ -1,0 +1,215 @@
+#!/usr/bin/env node
+/**
+ * 阶段28：把 OSM 提取出来的三个 GeoJSON 合并、裁剪成一个**前端直接可用的静态文件**。
+ *
+ * 用法：
+ *   node scripts/prepare_osm_geojson.mjs                    # 默认处理 smoketest
+ *   node scripts/prepare_osm_geojson.mjs --name yrd          # 处理长三角
+ *   node scripts/prepare_osm_geojson.mjs --name yrd --out-name yrd_power
+ *
+ * 输入：data/osm/<name>_power_{lines,substations,plants}.geojson   （由 fetch_osm_power.py 产出）
+ * 输出：public/osm/<out-name>.geojson + <out-name>_meta.json
+ *
+ * ============================================================
+ * 为什么不是「直接复制」
+ * ============================================================
+ * 1. **合并成一个 FeatureCollection**：MapLibre 的一个 GeoJSON source 就能装下点 + 线，
+ *    前端用 `filter` 分成若干图层渲染即可 —— 不必建三个 source，图层面板和显隐逻辑也简单得多。
+ *    代价是必须给每个要素加一个判别字段 `ftype`（line / substation / plant），
+ *    否则前端没法区分线该用 line 图层还是 circle 图层。
+ * 2. **裁属性**：只留渲染与点选真正要用的字段。属性是 GeoJSON 体积的大头之一，
+ *    裁完能省下可观体积（尤其长三角那个量级）。
+ * 3. **坐标降精度到 6 位小数**（约 0.11 m）：远高于任何缩放级别的可视精度，
+ *    但能显著减少文本体积。
+ * 4. **自校验**：坐标越界、几何为空、缺 vclass 的要素在这里就剔掉并计数，
+ *    而不是等地图上出现「一条横穿地球的直线」再去查。
+ *
+ * ⚠️ 输出目录 `public/osm/` 已加入 .gitignore —— OSM 数据不进 Git。
+ *    代价是全新克隆没有它，所以前端做了优雅降级（加载失败只提示，不影响底图）。
+ */
+
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+
+const DEFAULTS = {
+  name: "smoketest",
+  inDir: "data/osm",
+  outDir: "public/osm",
+  outName: null, // 默认 <name>_power
+};
+
+function parseArgs(argv) {
+  const cfg = { ...DEFAULTS };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    const next = () => argv[++i];
+    if (a === "--name") cfg.name = next();
+    else if (a === "--in-dir") cfg.inDir = next();
+    else if (a === "--out-dir") cfg.outDir = next();
+    else if (a === "--out-name") cfg.outName = next();
+    else if (a === "--help" || a === "-h") {
+      console.log(
+        [
+          "用法: node scripts/prepare_osm_geojson.mjs [选项]",
+          "",
+          "  --name <n>      输入文件前缀（默认 smoketest），读取 <in-dir>/<n>_power_*.geojson",
+          "  --in-dir <p>    输入目录（默认 data/osm）",
+          "  --out-dir <p>   输出目录（默认 public/osm）",
+          "  --out-name <n>  输出文件前缀（默认 <name>_power）",
+        ].join("\n"),
+      );
+      return null;
+    } else throw new Error(`未知参数：${a}`);
+  }
+  cfg.outName ??= `${cfg.name}_power`;
+  return cfg;
+}
+
+const cfg = parseArgs(process.argv.slice(2));
+
+/** 每个 ftype 保留的属性白名单。`vclass` 必须保留 —— 前端的分档 filter 全靠它。 */
+const KEEP_PROPS = {
+  line: ["osm_id", "name", "vclass", "voltage_kv", "line_kind"],
+  substation: ["osm_id", "name", "vclass", "voltage_kv", "substation_kind"],
+  plant: ["osm_id", "name", "vclass", "voltage_kv", "plant_source"],
+};
+
+const FILES = [
+  { ftype: "line", suffix: "lines" },
+  { ftype: "substation", suffix: "substations" },
+  { ftype: "plant", suffix: "plants" },
+];
+
+const round6 = (n) => Math.round(n * 1e6) / 1e6;
+
+/** 坐标合法性：经纬度都要在范围内、且是有限数 */
+function coordsValid(geometry) {
+  const check = (c) => Array.isArray(c) && c.length >= 2 && Number.isFinite(c[0]) && Number.isFinite(c[1]) && c[0] >= -180 && c[0] <= 180 && c[1] >= -90 && c[1] <= 90;
+  if (geometry.type === "Point") return check(geometry.coordinates);
+  if (geometry.type === "LineString") return geometry.coordinates.length >= 2 && geometry.coordinates.every(check);
+  if (geometry.type === "MultiLineString") return geometry.coordinates.length > 0 && geometry.coordinates.every((ls) => ls.length >= 2 && ls.every(check));
+  if (geometry.type === "Polygon") return geometry.coordinates.length > 0 && geometry.coordinates.every((r) => r.length >= 3 && r.every(check));
+  return false;
+}
+
+function roundCoords(geometry) {
+  const r = (c) => [round6(c[0]), round6(c[1])];
+  if (geometry.type === "Point") return { type: "Point", coordinates: r(geometry.coordinates) };
+  if (geometry.type === "LineString") return { type: "LineString", coordinates: geometry.coordinates.map(r) };
+  if (geometry.type === "MultiLineString") return { type: "MultiLineString", coordinates: geometry.coordinates.map((ls) => ls.map(r)) };
+  if (geometry.type === "Polygon") return { type: "Polygon", coordinates: geometry.coordinates.map((ring) => ring.map(r)) };
+  return geometry;
+}
+
+function main() {
+  console.log("=== 阶段28：准备前端可用的 OSM 静态 GeoJSON ===");
+  console.log(`输入前缀 : ${cfg.name}`);
+  console.log(`输出     : ${cfg.outDir}/${cfg.outName}.geojson`);
+  console.log();
+
+  const features = [];
+  const perType = {};
+  const perClass = {};
+  let dropped = 0;
+  let droppedNoVclass = 0;
+
+  for (const { ftype, suffix } of FILES) {
+    const src = resolve(ROOT, cfg.inDir, `${cfg.name}_power_${suffix}.geojson`);
+    if (!existsSync(src)) {
+      console.warn(`⚠️  跳过（不存在）：${src}`);
+      continue;
+    }
+    const fc = JSON.parse(readFileSync(src, "utf8"));
+    if (fc?.type !== "FeatureCollection" || !Array.isArray(fc.features)) {
+      throw new Error(`${src} 不是合法的 FeatureCollection`);
+    }
+
+    const keep = KEEP_PROPS[ftype];
+    let kept = 0;
+    for (const f of fc.features) {
+      const g = f?.geometry;
+      if (!g || !coordsValid(g)) {
+        dropped++;
+        continue;
+      }
+      const props = f.properties ?? {};
+      if (props.vclass == null) {
+        // 没有 vclass 就没法分档，前端只能当「未知」——这里补上而不是丢弃
+        droppedNoVclass++;
+        props.vclass = "unknown";
+      }
+      const slim = { ftype, vclass: props.vclass };
+      for (const k of keep) {
+        if (k === "vclass") continue;
+        const v = props[k];
+        if (v !== undefined && v !== null && v !== "") slim[k] = v;
+      }
+      features.push({ type: "Feature", properties: slim, geometry: roundCoords(g) });
+      kept++;
+      perClass[props.vclass] = (perClass[props.vclass] ?? 0) + 1;
+    }
+    perType[ftype] = kept;
+    const size = (statSync(src).size / 1048576).toFixed(2);
+    console.log(`  ${ftype.padEnd(11)} 读入 ${String(fc.features.length).padStart(6)}  保留 ${String(kept).padStart(6)}  （源文件 ${size} MB）`);
+  }
+
+  if (features.length === 0) {
+    throw new Error(
+      `没有任何要素可写。请先运行：python scripts/fetch_osm_power.py --bbox 121.0,31.0,121.6,31.5 --grid 2x2 --name ${cfg.name}`,
+    );
+  }
+
+  const outDir = resolve(ROOT, cfg.outDir);
+  mkdirSync(outDir, { recursive: true });
+  const outPath = join(outDir, `${cfg.outName}.geojson`);
+  writeFileSync(
+    outPath,
+    JSON.stringify({ type: "FeatureCollection", features }),
+  );
+
+  const outMb = statSync(outPath).size / 1048576;
+  console.log();
+  console.log("=== 结果 ===");
+  console.log(`要素总数 : ${features.length}`);
+  for (const [k, v] of Object.entries(perType)) console.log(`  ${k.padEnd(11)} ${v}`);
+  console.log("电压分档 :");
+  for (const cls of ["735+", "500-734", "220-499", "<220", "unknown"]) {
+    if (perClass[cls]) console.log(`  ${cls.padEnd(11)} ${perClass[cls]}`);
+  }
+  if (dropped) console.log(`剔除非法几何 : ${dropped} 个`);
+  if (droppedNoVclass) console.log(`补 vclass=unknown : ${droppedNoVclass} 个（源里缺 voltage 标签）`);
+  console.log(`输出体积 : ${outMb.toFixed(2)} MB`);
+
+  const meta = {
+    generated_at: new Date().toISOString(),
+    sourcePrefix: cfg.name,
+    featureCount: features.length,
+    byType: perType,
+    byVoltageClass: perClass,
+    dropped,
+    droppedNoVclass,
+    outputFile: `${cfg.outDir}/${cfg.outName}.geojson`,
+    outputSizeMb: Number(outMb.toFixed(2)),
+    attribution: "© OpenStreetMap contributors (ODbL)",
+  };
+  const metaPath = join(outDir, `${cfg.outName}_meta.json`);
+  writeFileSync(metaPath, JSON.stringify(meta, null, 2));
+  console.log(`meta     : ${cfg.outDir}/${cfg.outName}_meta.json`);
+  console.log();
+  console.log("✅ 完成。前端会从 /osm/ 下按同路径读取（Vite 会把 public/ 复制到 dist/）。");
+  return 0;
+}
+
+if (!cfg) {
+  // --help
+} else {
+  try {
+    process.exitCode = main();
+  } catch (err) {
+    console.error(`\n❌ ${err.message}\n`);
+    process.exitCode = 1;
+  }
+}
