@@ -612,6 +612,14 @@ function MapPage({ command = null }: MapPageProps) {
     const map = mapRef.current;
     if (!map) return;
 
+    // 阶段25：只清空高亮、不动视角。
+    // 新查询发起时会先发这条指令，让地图与表格同时进入「空白待刷新」状态。
+    if (cmd.clearOnly) {
+      clearHighlight(map);
+      setMapNotice(null);
+      return;
+    }
+
     try {
       const db = await Database.load(DB_URL);
 

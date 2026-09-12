@@ -219,6 +219,70 @@
   cursor: not-allowed;
 }
 
+/* ---------- 加载中：纯 CSS 旋转圈 ----------
+   用 border-top-color 制造「缺口」，比 SVG 轻、零外部资源；
+   currentColor 让它在按钮内外都自动跟随文字颜色，不必写两套。 */
+.spinner {
+  display: inline-block;
+  flex: 0 0 auto;
+  width: 12px;
+  height: 12px;
+  margin-right: 6px;
+  border: 2px solid rgba(255, 255, 255, 0.25);
+  border-top-color: currentColor;
+  border-radius: 50%;
+  vertical-align: -2px;
+  animation: gpg-spin 0.8s linear infinite;
+}
+
+@keyframes gpg-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* 尊重系统的「减少动态效果」设置：放慢而不是完全停掉 ——
+   停掉会让用户看不出「还在忙」 */
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation-duration: 2s;
+  }
+}
+
+/* ---------- 结果表头行：行数 + 导出按钮 ---------- */
+
+.tableHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 10px 0 6px;
+}
+
+.tableCaption {
+  color: var(--gpg-muted);
+  font-size: 0.78rem;
+}
+
+.exportBtn {
+  flex: 0 0 auto;
+  padding: 5px 12px;
+  border: 1px solid var(--gpg-border);
+  border-radius: 6px;
+  background-color: transparent;
+  color: var(--gpg-text);
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+/* ⚠️ 同样要显式覆盖 App.css 的 button:hover(0,1,1) */
+.exportBtn:hover,
+.exportBtn:active {
+  border-color: var(--gpg-accent);
+  color: var(--gpg-accent);
+  box-shadow: none;
+}
+
 /* ---------- 示例问法 ---------- */
 
 .examples {

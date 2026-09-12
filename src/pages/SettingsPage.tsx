@@ -34,9 +34,11 @@ interface SettingsPageProps {
   hint: string;
   /** 「在地图上查看」：把查询意图交给地图页（带 id 的指令由 AppLayout 生成） */
   onViewOnMap?: (query: ParsedQuery) => void;
+  /** 发起新查询时，先把地图上的旧高亮清掉 */
+  onClearMap?: () => void;
 }
 
-function SettingsPage({ hint, onViewOnMap }: SettingsPageProps) {
+function SettingsPage({ hint, onViewOnMap, onClearMap }: SettingsPageProps) {
   return (
     <div className={styles.page}>
       <h2 className={styles.pageTitle}>{hint}</h2>
@@ -71,7 +73,7 @@ function SettingsPage({ hint, onViewOnMap }: SettingsPageProps) {
       <DbSelfCheck />
 
       {/* 阶段17：本地规则引擎的自然语言查询（尚未接入真实大模型 API） */}
-      <AiQueryPanel onViewOnMap={onViewOnMap} />
+      <AiQueryPanel onViewOnMap={onViewOnMap} onClearMap={onClearMap} />
     </div>
   );
 }

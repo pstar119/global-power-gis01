@@ -32,6 +32,21 @@ function AppLayout() {
     setActiveKey("map");
   };
 
+  /**
+   * 只清空地图高亮，不切页、不动视角。
+   *
+   * ⚠️ intent 在这里是必填字段但**不会被使用** —— MapPage 的 applyCommand
+   *    看到 clearOnly 就会提前 return。填 global_stats 只是为满足类型。
+   */
+  const handleClearMap = () => {
+    commandSeq.current += 1;
+    setMapCommand({
+      intent: "global_stats",
+      id: commandSeq.current,
+      clearOnly: true,
+    });
+  };
+
   const activeItem =
     MENU_ITEMS.find((item) => item.key === activeKey) ?? MENU_ITEMS[0];
 
@@ -64,6 +79,7 @@ function AppLayout() {
             <SettingsPage
               hint={hintOf("settings")}
               onViewOnMap={handleViewOnMap}
+              onClearMap={handleClearMap}
             />
           </div>
         </section>

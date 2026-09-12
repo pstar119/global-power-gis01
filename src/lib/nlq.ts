@@ -76,6 +76,12 @@ export interface SqlPlan {
 export interface MapCommand extends ParsedQuery {
   /** 自增 id：MapPage 用它去重，避免同一个命令被重复执行 */
   id: number;
+  /**
+   * 为 true 时**只清空高亮**，不飞行、不改视角。
+   * 用途：用户发起新查询的瞬间，把上一次的金色圈先抹掉 ——
+   * 否则在解析的几秒里，表格已经空了而地图还挂着旧结果，比表格残留更误导。
+   */
+  clearOnly?: boolean;
 }
 
 /**
