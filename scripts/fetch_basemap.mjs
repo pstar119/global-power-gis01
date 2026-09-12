@@ -58,6 +58,7 @@ import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { bytesToHeader, findTile, readVarint, tileIdToZxy, zxyToTileId } from "pmtiles";
+import { HEADER_LEN, buildArchive, tileX, tileY, verifyArchive } from "./lib/pmtiles-writer.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -292,11 +293,7 @@ function findIndex(entries, tileId) {
 // 3. 目标瓦片枚举
 // ============================================================
 
-const tileX = (lon, z) => Math.floor(((lon + 180) / 360) * 2 ** z);
-function tileY(lat, z) {
-  const r = (lat * Math.PI) / 180;
-  return Math.floor(((1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2) * 2 ** z);
-}
+// tileX / tileY 来自 scripts/lib/pmtiles-writer.mjs
 
 /**
  * 全球前 `globalMaxZoom` 级取**全世界**（低级别瓦片本来就覆盖全球，
@@ -336,168 +333,18 @@ function enumerateTiles() {
 // ============================================================
 // 4. 组装输出归档
 // ============================================================
-
-function uvarint(value) {
-  let v = BigInt(value);
-  const out = [];
-  while (v >= 0x80n) {
-    out.push(Number(v & 0x7fn) | 0x80);
-    v >>= 7n;
-  }
-  out.push(Number(v));
-  return out;
-}
-
-function serializeDirectory(entries) {
-  const out = [...uvarint(entries.length)];
-  let lastId = 0;
-  for (const e of entries) {
-    out.push(...uvarint(e.tileId - lastId));
-    lastId = e.tileId;
-  }
-  for (const e of entries) out.push(...uvarint(e.runLength));
-  for (const e of entries) out.push(...uvarint(e.length));
-  let prev = null;
-  for (const e of entries) {
-    const contiguous = prev && e.offset === prev.offset + prev.length;
-    out.push(...uvarint(contiguous ? 0 : e.offset + 1));
-    prev = e;
-  }
-  return Buffer.from(out);
-}
-
-const HEADER_LEN = 127;
-const MAX_ROOT_DIR = 16384;
-
-function buildArchive({ tiles, metadataBuf, srcHeader, bounds, center, minZoom, maxZoom }) {
-  const sorted = [...tiles.entries()].sort((a, b) => a[0] - b[0]);
-
-  const chunks = [];
-  const tileEntries = [];
-  let offset = 0;
-  for (const [tileId, buf] of sorted) {
-    tileEntries.push({ tileId, offset, length: buf.length, runLength: 1 });
-    chunks.push(buf);
-    offset += buf.length;
-  }
-  const tileData = Buffer.concat(chunks);
-  const meta = gzipSync(metadataBuf);
-
-  // ---- 目录：先试单层根目录，超过 16 KB 就切叶子 ----
-  let rootEntries = tileEntries;
-  let leafBlobs = [];
-  let rootDir = gzipSync(serializeDirectory(tileEntries));
-
-  if (rootDir.length > MAX_ROOT_DIR) {
-    const LEAF_ENTRIES = 4096;
-    leafBlobs = [];
-    rootEntries = [];
-    let leafOffset = 0;
-    for (let i = 0; i < tileEntries.length; i += LEAF_ENTRIES) {
-      const group = tileEntries.slice(i, i + LEAF_ENTRIES);
-      const blob = gzipSync(serializeDirectory(group));
-      // runLength = 0 即「这是一条叶子目录指针」，offset 相对 leafDirectoryOffset
-      rootEntries.push({
-        tileId: group[0].tileId,
-        offset: leafOffset,
-        length: blob.length,
-        runLength: 0,
-      });
-      leafOffset += blob.length;
-      leafBlobs.push(blob);
-    }
-    rootDir = gzipSync(serializeDirectory(rootEntries));
-    if (rootDir.length > MAX_ROOT_DIR) {
-      throw new Error(
-        `根目录压缩后仍有 ${rootDir.length} 字节（上限 ${MAX_ROOT_DIR}），叶子目录切分不够细`,
-      );
-    }
-  }
-
-  const leafData = Buffer.concat(leafBlobs);
-  const rootOffset = HEADER_LEN;
-  const metaOffset = rootOffset + rootDir.length;
-  const leafOffset = metaOffset + meta.length;
-  const tileDataOffset = leafOffset + leafData.length;
-
-  const h = Buffer.alloc(HEADER_LEN);
-  h.write("PMTiles", 0, "latin1");
-  h.writeUInt8(3, 7);
-  const u64 = (v, o) => h.writeBigUInt64LE(BigInt(v), o);
-  u64(rootOffset, 8);
-  u64(rootDir.length, 16);
-  u64(metaOffset, 24);
-  u64(meta.length, 32);
-  u64(leafOffset, 40);
-  u64(leafData.length, 48);
-  u64(tileDataOffset, 56);
-  u64(tileData.length, 64);
-  u64(tileEntries.length, 72); // numAddressedTiles
-  u64(tileEntries.length + rootEntries.length, 80); // numTileEntries（含叶子指针）
-  u64(tileEntries.length, 88); // numTileContents
-  h.writeUInt8(1, 96); // clustered
-  h.writeUInt8(2, 97); // internalCompression = gzip
-  h.writeUInt8(srcHeader.tileCompression, 98); // 原样保留（Protomaps 是 gzip）
-  h.writeUInt8(srcHeader.tileType, 99); // 1 = mvt
-  h.writeUInt8(minZoom, 100);
-  h.writeUInt8(maxZoom, 101);
-  h.writeInt32LE(Math.round(bounds[0] * 1e7), 102);
-  h.writeInt32LE(Math.round(bounds[1] * 1e7), 106);
-  h.writeInt32LE(Math.round(bounds[2] * 1e7), 110);
-  h.writeInt32LE(Math.round(bounds[3] * 1e7), 114);
-  h.writeUInt8(center[0], 118);
-  h.writeInt32LE(Math.round(center[1] * 1e7), 119);
-  h.writeInt32LE(Math.round(center[2] * 1e7), 123);
-
-  return { buf: Buffer.concat([h, rootDir, meta, leafData, tileData]), leafCount: leafBlobs.length };
-}
+//
+// uvarint / serializeDirectory / buildArchive 已抽到
+// `scripts/lib/pmtiles-writer.mjs`（阶段29 起两份切片脚本共用同一份格式代码）。
+// 这里不再保留副本 —— 二进制格式代码有两份拷贝迟早会分叉。
 
 // ============================================================
 // 5. 输出归档的自校验
 // ============================================================
 
-/**
- * 用**官方 `pmtiles` 包**把刚写出来的文件读回来。
- * 如果格式写错了（比如根目录/叶子目录算错），这里一定抛错 ——
- * 比「去浏览器里看一眼」可靠得多。
- */
-class MemorySource {
-  #buf;
-  constructor(buf) {
-    this.#buf = buf;
-  }
-  async getBytes(offset, length) {
-    return { data: this.#buf.buffer.slice(this.#buf.byteOffset + offset, this.#buf.byteOffset + offset + length) };
-  }
-  getKey() {
-    return "verify";
-  }
-}
-
-async function verifyArchive(path, sampleIds) {
-  const { PMTiles } = await import("pmtiles");
-  const raw = readFileSync(path);
-  const pm = new PMTiles(new MemorySource(raw));
-  const header = await pm.getHeader();
-  const checked = [];
-  let ok = 0;
-  for (const id of sampleIds) {
-    const [z, x, y] = tileIdToZxy(id);
-    // ⚠️ getZxy 返回的已经是**解压后**的瓦片正文（内部按 header.tileCompression 解压过），
-    //    所以这里不能去校验 gzip 魔数，要校验它确实是一张 MVT。
-    const r = await pm.getZxy(z, x, y);
-    if (!r) continue;
-    const bytes = Buffer.from(r.data);
-    // MVT 没有魔数，但 layer 名是明文长度前缀字符串，拿真实图层名探测最可靠
-    const text = bytes.toString("latin1");
-    const layers = ["earth", "water", "roads", "landuse", "places", "boundaries", "buildings"].filter((n) =>
-      text.includes(n),
-    );
-    checked.push({ z, x, y, size: bytes.length, layers });
-    ok++;
-  }
-  return { header, checked, ok };
-}
+// MemorySource / verifyArchive 已抽到 `scripts/lib/pmtiles-writer.mjs`。
+// 调用时需要额外告知期望的图层名（底图是 Protomaps 的图层集）。
+const BASEMAP_LAYERS = ["earth", "water", "roads", "landuse", "places", "boundaries", "buildings"];
 
 // ============================================================
 // 主流程
@@ -632,7 +479,9 @@ async function main() {
   const out = buildArchive({
     tiles: payload,
     metadataBuf,
-    srcHeader: header,
+    // 原样保留源归档的瓦片类型与压缩方式（Protomaps：tileType=1 mvt / tileCompression=2 gzip）
+    tileType: header.tileType,
+    tileCompression: header.tileCompression,
     bounds: cfg.bbox,
     center: [(Math.min(...zs) + Math.max(...zs)) >> 1, (cfg.bbox[0] + cfg.bbox[2]) / 2, (cfg.bbox[1] + cfg.bbox[3]) / 2],
     minZoom: Math.min(...zs),
@@ -660,7 +509,7 @@ async function main() {
       }
     }
   }
-  const v = await verifyArchive(outPath, sample);
+  const v = await verifyArchive(outPath, { sampleIds: sample, layerNames: BASEMAP_LAYERS });
   console.log(
     `回读 header : z${v.header.minZoom}-${v.header.maxZoom}，tileType=${v.header.tileType}，` +
       `tileCompression=${v.header.tileCompression}，addressed=${v.header.numAddressedTiles.toLocaleString()}`,

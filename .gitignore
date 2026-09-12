@@ -39,6 +39,17 @@ dist-ssr
 /data/
 /public/osm/
 
+# 阶段29：切片工具链的独立依赖。
+# 上面那条 `node_modules` 规则其实已经覆盖它，这里显式写一条是为了让人一眼看懂：
+# geojson-vt / vt-pbf 只服务**构建期的切片脚本**（scripts/package.json），
+# 不进前端生产依赖、不进 src-tauri、也不会被打进安装包。
+# scripts/package.json 与 package-lock.json 要提交（便于复现）。
+/scripts/node_modules/
+
+# Python 字节码缓存（`python -m py_compile` 会生成）
+__pycache__/
+*.pyc
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

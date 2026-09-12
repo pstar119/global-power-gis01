@@ -75,18 +75,30 @@ PRESETS: dict[str, tuple[float, float, float, float]] = {
     "bth": (115.4, 38.4, 118.4, 40.6),
 }
 
-# Overpass 端点：主用第一个，失败按顺序回退。
-# ⚠️ 实测 overpass.kumi.systems 与 overpass.osm.jp 在本机不可达，不要加回来。
+# Overpass 端点：按顺序尝试，失败自动切换。
+#
+# ⚠️ 2026-09-12 用 scripts/probe_overpass.py 实测（真实查询：苏州 31.1,120.4,31.5,120.9）：
+#   ✅ maps.mail.ru         24.1s  返回 362 条  ← 数据正确且稳定，所以放在**第一位**
+#   ⚠️ overpass-api.de      12.6s  但密集返回 504，退避重试会把每块拖到 4-5 分钟，只做备选
+#   ❌ overpass.private.coffee  93s 读超时，基本不可用
+#   ❌ overpass.osm.ch       1.4s 但返回 0 条 —— 它是**瑞士专用**实例，对中国数据无效，
+#                              别被它的速度骗了（这正是「快 ≠ 可用」的例子）
+#   ❌ overpass.openstreetmap.ru / kumi.systems / osm.jp  本机不可达，不要再加回来
 OVERPASS_ENDPOINTS = [
+    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
     "https://overpass-api.de/api/interpreter",
     "https://overpass.private.coffee/api/interpreter",
 ]
 
 DEFAULT_OUT_DIR = os.path.join("data", "osm")
 
-# 每个查询的重试次数与块间延迟（对公共 API 客气一点）
-MAX_RETRY = 3
-RETRY_WAIT = 8.0
+# 重试与礼貌间隔。
+# ⚠️ 实测教训（2026-09-12）：原来同一块内的 3 个查询是**背靠背发出**的，
+#    几乎立刻就被 overpass-api.de 回 429 Too Many Requests；而 429 又触发退避重试，
+#    8s+16s 耗掉之后换备用端点，速度反而更慢。所以块内查询之间必须也留间隔。
+MAX_RETRY = 4
+RETRY_WAIT = 10.0
+QUERY_WAIT = 6.0
 CHUNK_WAIT = 2.0
 
 
@@ -177,7 +189,9 @@ def overpass_query(query: str, verbose: bool = True) -> dict[str, Any]:
                         "Content-Type": "application/x-www-form-urlencoded",
                     },
                 )
-                with urllib.request.urlopen(req, timeout=300) as resp:
+                # timeout 原来给 300s：一旦对端卡住，一个请求就能把整轮拖死。
+                # 宁可快速失败再重试，也不要挂在一次连接上。
+                with urllib.request.urlopen(req, timeout=120) as resp:
                     body = resp.read()
                 payload = json.loads(body.decode("utf-8"))
 
@@ -195,7 +209,11 @@ def overpass_query(query: str, verbose: bool = True) -> dict[str, Any]:
                         file=sys.stderr,
                     )
                 if attempt < MAX_RETRY:
-                    time.sleep(RETRY_WAIT * attempt)
+                    wait = RETRY_WAIT * attempt
+                    # 429 是限流，短退避根本没有意义，要等够；504 是服务端过载，普通退避即可
+                    if "429" in str(exc):
+                        wait = max(wait, 30.0)
+                    time.sleep(wait)
         if verbose:
             print(f"    ↪ 换下一个端点（{endpoint.split('/')[2]} 放弃）", file=sys.stderr)
 
@@ -336,6 +354,85 @@ def queries_for(b: tuple[float, float, float, float]) -> dict[str, str]:
 # ------------------------------------------------------------------
 # 主流程
 # ------------------------------------------------------------------
+def progress_path(out_dir: str, name: str) -> str:
+    return os.path.join(out_dir, f"{name}_progress.json")
+
+
+def load_done_chunks(path: str) -> set[tuple[float, ...]]:
+    """读取断点记录：已抓完的分块 bbox 集合。"""
+    if not os.path.exists(path):
+        return set()
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        return {tuple(round(float(v), 6) for v in b) for b in data.get("done", [])}
+    except Exception:  # noqa: BLE001 - 断点文件坏了就当没有，重新抓
+        return set()
+
+
+def save_done_chunks(path: str, done: set[tuple[float, ...]]) -> None:
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(
+            {
+                "done": [list(b) for b in sorted(done)],
+                "count": len(done),
+                "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            },
+            fh,
+            ensure_ascii=False,
+            indent=2,
+        )
+
+
+def load_checkpoints(out_dir: str, name: str, buckets: dict, seen: dict) -> int:
+    """把已有检查点读回内存，保证续抓时新旧数据累加而不是被覆盖。"""
+    crs = {"type": "name", "properties": {"name": "urn:ogc:def:crs:OGC:1.3:CRS84"}}
+    del crs
+    total = 0
+    for kind in buckets:
+        path = os.path.join(out_dir, f"{name}_power_{kind}.geojson")
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path, encoding="utf-8") as fh:
+                fc = json.load(fh)
+        except Exception:  # noqa: BLE001
+            continue
+        for feat in fc.get("features", []):
+            oid = (feat.get("properties") or {}).get("osm_id")
+            if not oid or oid in seen[kind]:
+                continue
+            seen[kind].add(oid)
+            buckets[kind].append(feat)
+            total += 1
+    return total
+
+
+def print_status(out_dir: str, name: str, chunks: list, done: set) -> int:
+    """--status：只读本地文件，不发任何网络请求。"""
+    print(f"=== 抓取进度：{name} ===")
+    print(f"分块    : {len(done)}/{len(chunks)} 已完成")
+    for kind in ("lines", "substations", "plants"):
+        path = os.path.join(out_dir, f"{name}_power_{kind}.geojson")
+        if os.path.exists(path):
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    n = len(json.load(fh).get("features", []))
+                print(f"  {kind:12s} {n:7d} 个要素  ({os.path.getsize(path) / 1024:.0f} KB)")
+            except Exception as exc:  # noqa: BLE001
+                print(f"  {kind:12s} 读取失败：{exc}")
+        else:
+            print(f"  {kind:12s} （还没有文件）")
+    missing = [b for b in chunks if tuple(round(v, 6) for v in b) not in done]
+    if missing:
+        print(f"\n还剩 {len(missing)} 块未抓。重新运行同一条命令即可**续抓**（不会重头再来）：")
+        for b in missing[:20]:
+            print(f"  未抓 bbox = {b[0]:.4f},{b[1]:.4f},{b[2]:.4f},{b[3]:.4f}")
+    else:
+        print("\n全部块已完成 ✅")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="从 OSM 提取真实电力设施数据（GeoJSON）")
     ap.add_argument(
@@ -347,6 +444,8 @@ def main() -> int:
     ap.add_argument("--grid", default="4x4", help="把 bbox 切成几块抓，格式 NxM（默认 4x4）")
     ap.add_argument("--out-dir", default=DEFAULT_OUT_DIR)
     ap.add_argument("--estimate-only", action="store_true", help="只统计数量与电压分布，不写 GeoJSON")
+    ap.add_argument("--restart", action="store_true", help="忽略断点记录，从头重抓")
+    ap.add_argument("--status", action="store_true", help="只读本地文件报告进度，不发任何网络请求")
     args = ap.parse_args()
 
     if args.bbox:
@@ -375,6 +474,8 @@ def main() -> int:
         return 2
 
     chunks = chunk_bbox(bbox, nx, ny)
+    if args.status:
+        return print_status(args.out_dir, name, chunks, load_done_chunks(progress_path(args.out_dir, name)))
     print("=== 阶段28：从 OSM 提取电力设施 ===")
     print(f"范围   : {w},{s},{e},{n}（{'自定义' if args.bbox else args.preset}）")
     print(f"分块   : {nx}x{ny} = {len(chunks)} 块")
@@ -388,28 +489,77 @@ def main() -> int:
     seen: dict[str, set[str]] = {"lines": set(), "substations": set(), "plants": set()}
     dup = 0
 
+    def checkpoint() -> None:
+        """
+        每块结束后就落盘一次。
+
+        ⚠️ 为什么必须这么做：公共 Overpass 在抓长三角这种大范围时，
+        很可能在第 15/16 块上超时。原来只在全部块跑完后才写文件，
+        一次超时就让前面几十分钟的抓取全部作废。检查点让"失败也要留下已抓到的部分"，
+        再由 failed_chunks 明确标出缺口 —— **缺口必须响亮，绝不能变成静默的覆盖空洞**。
+        """
+        os.makedirs(args.out_dir, exist_ok=True)
+        crs = {"type": "name", "properties": {"name": "urn:ogc:def:crs:OGC:1.3:CRS84"}}
+        for kind, feats in buckets.items():
+            path = os.path.join(args.out_dir, f"{name}_power_{kind}.geojson")
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump({"type": "FeatureCollection", "crs": crs, "features": feats}, fh, ensure_ascii=False)
+
     t0 = time.time()
+    failed_chunks: list[list[float]] = []
+
+    # ---- 断点续抓：已抓完的块跳过，已有检查点回读累加 ----
+    # 这样随时可以关机，明天重跑同一条命令即可接着抓，而不是从头再来。
+    ppath = progress_path(args.out_dir, name)
+    done_chunks: set[tuple[float, ...]] = set() if args.restart else load_done_chunks(ppath)
+    if done_chunks:
+        os.makedirs(args.out_dir, exist_ok=True)
+        restored = load_checkpoints(args.out_dir, name, buckets, seen)
+        for kind in buckets:
+            for f in buckets[kind]:
+                cls = f["properties"]["vclass"]
+                kv_hist[cls] = kv_hist.get(cls, 0) + 1
+        print(f"断点续抓：已完成 {len(done_chunks)}/{len(chunks)} 块，回读已有 {restored} 个要素\n")
+
     for idx, chunk in enumerate(chunks, 1):
         cw, cs, ce, cn = chunk
+        key = tuple(round(v, 6) for v in chunk)
+        if key in done_chunks:
+            print(f"[{idx}/{len(chunks)}] 已完成，跳过")
+            continue
         print(f"[{idx}/{len(chunks)}] 块 {cw:.3f},{cs:.3f},{ce:.3f},{cn:.3f}")
-        for kind, query in queries_for(chunk).items():
-            payload = overpass_query(query)
-            elements = payload.get("elements", [])
-            added = 0
-            for el in elements:
-                feat = build_feature(el, "line" if kind == "lines" else ("substation" if kind == "substations" else "plant"))
-                if not feat:
-                    continue
-                oid = feat["properties"]["osm_id"]
-                if oid in seen[kind]:
-                    dup += 1
-                    continue
-                seen[kind].add(oid)
-                buckets[kind].append(feat)
-                added += 1
-                cls = feat["properties"]["vclass"]
-                kv_hist[cls] = kv_hist.get(cls, 0) + 1
-            print(f"    {kind:12s} 返回 {len(elements):6d} 条，新增 {added:6d} 条")
+        chunk_failed = False
+        try:
+            for kind, query in queries_for(chunk).items():
+                payload = overpass_query(query)
+                elements = payload.get("elements", [])
+                added = 0
+                for el in elements:
+                    feat = build_feature(el, "line" if kind == "lines" else ("substation" if kind == "substations" else "plant"))
+                    if not feat:
+                        continue
+                    oid = feat["properties"]["osm_id"]
+                    if oid in seen[kind]:
+                        dup += 1
+                        continue
+                    seen[kind].add(oid)
+                    buckets[kind].append(feat)
+                    added += 1
+                    cls = feat["properties"]["vclass"]
+                    kv_hist[cls] = kv_hist.get(cls, 0) + 1
+                print(f"    {kind:12s} 返回 {len(elements):6d} 条，新增 {added:6d} 条")
+                # 块内也要歇 —— 连发是 429 的直接原因
+                time.sleep(QUERY_WAIT)
+        except Exception as exc:  # noqa: BLE001
+            print(f"    ⚠️ 该块失败，跳过并继续：{exc}")
+            failed_chunks.append(list(chunk))
+            chunk_failed = True
+        # 只有整块成功才记断点：失败的块下次会自动重抓
+        if not chunk_failed:
+            done_chunks.add(key)
+            os.makedirs(args.out_dir, exist_ok=True)
+            save_done_chunks(ppath, done_chunks)
+        checkpoint()
         time.sleep(CHUNK_WAIT)
 
     elapsed = time.time() - t0
@@ -417,6 +567,16 @@ def main() -> int:
     print("=== 抓取完成 ===")
     print(f"耗时        : {elapsed:.1f} 秒")
     print(f"去重丢弃    : {dup} 条（跨块重复）")
+    if failed_chunks:
+        print()
+        print("⚠️" * 30)
+        print(f"⚠️ 有 {len(failed_chunks)}/{len(chunks)} 个分块抓取失败，数据存在**覆盖空洞**！")
+        for c in failed_chunks:
+            print(f"     失败块 bbox = {c[0]:.4f},{c[1]:.4f},{c[2]:.4f},{c[3]:.4f}")
+        print("   修补方式：用上面的 bbox 单独重跑 --bbox，再把结果与已有文件合并：")
+        print("     python scripts/fetch_osm_power.py --bbox W,S,E,N --name <name> --grid 1x1")
+        print("   在缺口补齐前，不要把这批数据当成完整的覆盖范围。")
+        print("⚠️" * 30)
     for kind, feats in buckets.items():
         print(f"  {kind:12s} {len(feats):7d} 个要素")
     print("电压分档分布:")
@@ -445,6 +605,8 @@ def main() -> int:
         "grid": f"{nx}x{ny}",
         "elapsed_sec": round(elapsed, 1),
         "duplicates_dropped": dup,
+        "complete": not failed_chunks,
+        "failed_chunks": failed_chunks,
         "voltage_class_histogram": kv_hist,
         "outputs": written,
         # 署名要求：OSM 数据是 ODbL，前端必须显示来源
@@ -455,8 +617,9 @@ def main() -> int:
     with open(meta_path, "w", encoding="utf-8") as fh:
         json.dump(meta, fh, ensure_ascii=False, indent=2)
     print(f"  → {meta_path}")
-    print("\n下一步：按 README_OSM.md 用 tippecanoe 切片。")
-    return 0
+    print("\n下一步：node scripts/prepare_osm_geojson.mjs --name <name>，再 node scripts/build_pmtiles.mjs")
+    # 有空缺就返回非 0，避免调用方（或 CI）把残缺数据当成成功
+    return 1 if failed_chunks else 0
 
 
 if __name__ == "__main__":

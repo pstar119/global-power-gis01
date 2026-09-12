@@ -138,16 +138,23 @@ const LINE_COLOR = "#8b96a8";
 /**
  * 阶段28：真实 OSM 电网数据（上海小样本）。
  *
- * ⚠️ 与底图不同，这里是 **GeoJSON source**，不是 PMTiles：
- *   - 1469 个要素 / 0.53 MB，全量载入内存毫无压力；
- *   - 文件放在 `public/osm/` 下 → Vite 打进 `dist/` → 运行时由 `tauri.localhost` 提供，
- *     **普通相对路径即可**。不需要 asset 协议、不需要 convertFileSrc、也不用改 CSP：
- *     GeoJSON source 走的是 fetch，`connect-src 'self'` 已经覆盖。
- *     （`asset` 协议管的是「前端包之外的本地文件」，比如 `resources/maps/basemap.pmtiles`，
- *      两条路别混。）
- *   - 数据文件已 gitignore，缺失时优雅降级（见 loadOsmGridData）。
+ * 数据来源分两级（阶段29 起）：
+ *   1. **首选：本地 PMTiles 归档**（`resources/maps/osm_grid.pmtiles`）。
+ *      长三角量级的要素（上万条线路、几十万个坐标点）如果全量驻留内存，
+ *      首帧和每次 relayout 都会卡；切成矢量瓦片后交给 MapLibre 按需 Range 读取，
+ *      与底图走同一条通路。
+ *   2. **回退：小样本 GeoJSON**（`public/osm/smoketest_power.geojson`）。
+ *      归档缺失时（新克隆还没跑切片脚本）退回它，前端不至于一片空白。
+ *      GeoJSON 走 fetch，`connect-src 'self'` 已覆盖，不需要 asset 协议；
+ *      （`asset` 协议管的是「前端包之外的本地文件」，两条路别混。）
+ * 两种来源用**完全相同的图层 ID 与 filter 语义**，切换对上层开关无感。
  */
 const OSM_SOURCE = "osm-grid";
+/** 首选来源：本地 PMTiles 归档（scripts/build_pmtiles.mjs 生成） */
+const OSM_GRID_RESOURCE = "maps/osm_grid.pmtiles";
+/** 归档里的 MVT 图层名，必须与 build_pmtiles.mjs 的 --layer 一致 */
+const OSM_GRID_SOURCE_LAYER = "grid";
+/** 回退来源：上海小样本 */
 const OSM_DATA_URL = "/osm/smoketest_power.geojson";
 const OSM_ATTRIBUTION = "电网数据 © OpenStreetMap contributors (ODbL)";
 
@@ -177,9 +184,15 @@ const OSM_LINE_TIERS: ReadonlyArray<{
 const OSM_SUBSTATION_LAYER_ID = "osm-substations";
 const OSM_PLANT_LAYER_ID = "osm-plants";
 
-/** OSM 数据缺失时给用户的提示 */
+/** 归档与小样本都拿不到时的提示 */
 const OSM_MISSING_NOTICE =
-  "未找到 OSM 电网数据，真实输电线路与变电站图层为空。请先运行 node scripts/prepare_osm_geojson.mjs。";
+  "未找到 OSM 电网数据。生成顺序：python scripts/fetch_osm_power.py --preset yrd → " +
+  "node scripts/prepare_osm_geojson.mjs --name yrd → node scripts/build_pmtiles.mjs --name yrd";
+
+/** 只拿到了小样本时的提示（不是错误，但要说清楚数据范围） */
+const OSM_FALLBACK_NOTICE =
+  "未找到离线电网瓦片（osm_grid.pmtiles），当前只显示上海小样本。" +
+  "运行 node scripts/build_pmtiles.mjs 可切出长三角全量瓦片。";
 
 /**
  * 执行查询后的最低缩放级别。
@@ -464,10 +477,12 @@ class MemorySource {
   }
 }
 
-/** 底图归档的定位结果 */
-type BasemapHandle = {
+/** 本地 PMTiles 归档的定位结果（底图与电网瓦片共用同一套逻辑） */
+type ArchiveHandle = {
   /** 协议表里的键：Range 模式是 asset URL，内存模式是资源路径 */
   key: string;
+  /** 资源相对路径，便于日志与排错 */
+  resource: string;
   minZoom: number;
   maxZoom: number;
   /** range = 按需 Range 读取（首选）；memory = 整包读入内存（退化路径） */
@@ -681,16 +696,39 @@ const BASEMAP_LAYERS: LayerSpecification[] = [
  * 3. 用 127 字节（正好是 PMTiles 头部长度）的**探针**确认底层协议真的支持 Range。
  *    不支持时立刻退化并给出明确提示，而不是让用户对着一张近黑的空地图发懵。
  */
-let basemapReady: Promise<BasemapHandle | null> | null = null;
+let pmtilesProtocol: Protocol | null = null;
+/** 同一份归档只解析一次（StrictMode 下 effect 会跑两遍） */
+const archivePromises = new Map<string, Promise<ArchiveHandle | null>>();
 
-function ensurePmtilesProtocol(): Promise<BasemapHandle | null> {
-  basemapReady ??= (async () => {
+/** 协议注册表是全局的，而且只能注册一次 —— 这里做幂等 */
+function ensurePmtilesProtocol(): Protocol {
+  if (!pmtilesProtocol) {
     const protocol = new Protocol();
     // pmtiles v4 的处理器叫 tilev4（不是 tile）
     addProtocol("pmtiles", protocol.tilev4);
+    pmtilesProtocol = protocol;
+  }
+  return pmtilesProtocol;
+}
 
+/**
+ * 打开一份本地 PMTiles 归档（底图与电网瓦片共用同一套逻辑）。
+ *
+ * @param resource    资源相对路径，例如 "maps/osm_grid.pmtiles"
+ * @param label       日志用的中文名
+ * @param missingHint 拿不到时的补救提示
+ */
+function ensurePmtilesArchive(
+  resource: string,
+  { label, missingHint }: { label: string; missingHint: string },
+): Promise<ArchiveHandle | null> {
+  const cached = archivePromises.get(resource);
+  if (cached) return cached;
+
+  const task = (async (): Promise<ArchiveHandle | null> => {
+    const protocol = ensurePmtilesProtocol();
     try {
-      const absPath = await resolveResource(BASEMAP_RESOURCE);
+      const absPath = await resolveResource(resource);
       const url = convertFileSrc(absPath);
 
       // ---- 首选：让 pmtiles 自己按需发 Range 请求 ----
@@ -701,11 +739,12 @@ function ensurePmtilesProtocol(): Promise<BasemapHandle | null> {
         protocol.add(archive);
         const header = await archive.getHeader();
         console.info(
-          `[MapPage] 离线底图就绪（Range 读取）：${absPath}，z${header.minZoom}-${header.maxZoom}，` +
+          `[MapPage] ${label}就绪（Range 读取）：${absPath}，z${header.minZoom}-${header.maxZoom}，` +
             `${header.numAddressedTiles} 个瓦片，Content-Range=${probe.headers.get("content-range") ?? "-"}`,
         );
         return {
           key: url,
+          resource,
           minZoom: header.minZoom,
           maxZoom: header.maxZoom,
           mode: "range",
@@ -714,37 +753,51 @@ function ensurePmtilesProtocol(): Promise<BasemapHandle | null> {
 
       // ---- 退化：协议不支持 Range，只能整包读进内存 ----
       console.warn(
-        `[MapPage] 底图协议未按 Range 返回（HTTP ${probe.status}，期望 206），` +
-          `退回整包读取。当前归档 33 MB 尚可，但这说明 asset 协议没有生效。`,
+        `[MapPage] ${label}未按 Range 返回（HTTP ${probe.status}，期望 206），退回整包读取。` +
+          "这不会出错，但说明 asset 协议没生效，大文件会白占内存。",
       );
       const res = await fetch(url);
-      if (!res.ok) throw new Error(`读取底图失败：HTTP ${res.status}`);
+      if (!res.ok) throw new Error(`读取归档失败：HTTP ${res.status}`);
       const buffer = await res.arrayBuffer();
       assertPmtilesMagic(new Uint8Array(buffer, 0, 7));
-      const archive = new PMTiles(new MemorySource(buffer, BASEMAP_RESOURCE));
+      const archive = new PMTiles(new MemorySource(buffer, resource));
       protocol.add(archive);
       const header = await archive.getHeader();
       return {
-        key: BASEMAP_RESOURCE,
+        key: resource,
+        resource,
         minZoom: header.minZoom,
         maxZoom: header.maxZoom,
         mode: "memory",
       };
     } catch (err) {
-      console.error(
-        "[MapPage] 离线底图不可用，将只显示纯色背景。" +
-          "请先运行 `node scripts/fetch_basemap.mjs` 生成底图。",
-        err,
-      );
+      console.warn(`[MapPage] ${label}不可用。${missingHint}`, err);
       return null;
     }
   })();
 
-  return basemapReady;
+  archivePromises.set(resource, task);
+  return task;
+}
+
+/** 底图归档（阶段26 起） */
+function ensureBasemapArchive(): Promise<ArchiveHandle | null> {
+  return ensurePmtilesArchive(BASEMAP_RESOURCE, {
+    label: "离线底图",
+    missingHint: "将只显示纯色背景。请先运行 `node scripts/fetch_basemap.mjs` 生成底图。",
+  });
+}
+
+/** 电网瓦片归档（阶段29 起） */
+function ensureOsmGridArchive(): Promise<ArchiveHandle | null> {
+  return ensurePmtilesArchive(OSM_GRID_RESOURCE, {
+    label: "离线电网瓦片",
+    missingHint: "将退回上海小样本 GeoJSON。请先运行 `node scripts/build_pmtiles.mjs`。",
+  });
 }
 
 /** 用真实离线底图拼一个内联样式，彻底摆脱在线演示瓦片 */
-function buildBasemapStyle(basemap: BasemapHandle | null): StyleSpecification {
+function buildBasemapStyle(basemap: ArchiveHandle | null): StyleSpecification {
   if (!basemap) {
     return { version: 8, sources: {}, layers: [BACKGROUND_LAYER] };
   }
@@ -889,20 +942,44 @@ async function loadOsmGridData(): Promise<FeatureCollection | null> {
  * 调用位置很关键：必须在所有「点」图层**之前**调用，
  * 否则线会横穿彩色的电厂点与变电站点。图层次序由 addLayer 的调用次序决定。
  */
-function addOsmGridLayers(map: MapLibreMap, fc: FeatureCollection | null): void {
-  if (!fc || map.getSource(OSM_SOURCE)) return;
+function addOsmGridLayers(
+  map: MapLibreMap,
+  archive: ArchiveHandle | null,
+  fallback: FeatureCollection | null,
+): void {
+  if (map.getSource(OSM_SOURCE)) return;
 
-  map.addSource(OSM_SOURCE, {
-    type: "geojson",
-    data: fc,
-    attribution: OSM_ATTRIBUTION,
-  });
+  if (archive) {
+    map.addSource(OSM_SOURCE, {
+      type: "vector",
+      // ⚠️ 与底图同理：用 `tiles` 而不是 `url`。用 `url` 时 MapLibre 会去问协议的
+      //    TileJSON，而协议会把归档 header 里的 bbox 当 bounds 返回，缩到全球视野时
+      //    电网瓦片会被裁掉。自己写 tiles + 全球 bounds 就避开这个陷阱。
+      tiles: [`pmtiles://${archive.key}/{z}/{x}/{y}`],
+      minzoom: archive.minZoom,
+      maxzoom: archive.maxZoom,
+      bounds: [-180, -85.0511, 180, 85.0511],
+      attribution: OSM_ATTRIBUTION,
+    });
+  } else if (fallback) {
+    map.addSource(OSM_SOURCE, {
+      type: "geojson",
+      data: fallback,
+      attribution: OSM_ATTRIBUTION,
+    });
+  } else {
+    return;
+  }
+
+  // 矢量瓦片必须额外指定 source-layer；GeoJSON 不能设（设了反而报错）
+  const layerRef = archive ? { "source-layer": OSM_GRID_SOURCE_LAYER } : {};
 
   for (const tier of OSM_LINE_TIERS) {
     map.addLayer({
       id: tier.id,
       type: "line",
       source: OSM_SOURCE,
+      ...layerRef,
       // ftype 判别字段不能少：同一个 source 里装着点、线两类几何
       filter: [
         "all",
@@ -938,6 +1015,7 @@ function addOsmGridLayers(map: MapLibreMap, fc: FeatureCollection | null): void 
     id: OSM_SUBSTATION_LAYER_ID,
     type: "circle",
     source: OSM_SOURCE,
+    ...layerRef,
     filter: ["==", ["get", "ftype"], "substation"],
     paint: {
       "circle-color": SUBSTATION_COLOR,
@@ -954,6 +1032,7 @@ function addOsmGridLayers(map: MapLibreMap, fc: FeatureCollection | null): void 
     id: OSM_PLANT_LAYER_ID,
     type: "circle",
     source: OSM_SOURCE,
+    ...layerRef,
     filter: ["==", ["get", "ftype"], "plant"],
     paint: {
       "circle-color": "transparent",
@@ -1166,7 +1245,7 @@ function MapPage({ command = null }: MapPageProps) {
       maxWidth: "260px",
     });
 
-    ensurePmtilesProtocol()
+    ensureBasemapArchive()
       .then((basemap) => {
         // 等待期间组件可能已卸载（StrictMode 下必然发生一次），此时不能再建图
         if (disposed || !mapContainerRef.current) return;
@@ -1221,7 +1300,12 @@ function MapPage({ command = null }: MapPageProps) {
           // 阶段28：OSM 电网数据与数据库查询并行发出。
           // 两者互不依赖，用 Promise.all 一起等；OSM 失败只会返回 null，不影响其它。
           Promise.all([
-            loadOsmGridData(),
+            // 阶段29：优先用本地 PMTiles 瓦片；缺归档才退回小样本 GeoJSON。
+            // 顺序很重要 —— 有归档时**不该**再去下载那份 GeoJSON。
+            ensureOsmGridArchive().then(async (grid) => ({
+              grid,
+              fallback: grid ? null : await loadOsmGridData(),
+            })),
             Database.load(DB_URL).then(() =>
               Promise.all([
                 loadSubstationsGeoJson(),
@@ -1229,13 +1313,19 @@ function MapPage({ command = null }: MapPageProps) {
                 loadPlantsGeoJson(),
               ]),
             ),
-          ]).then(([osmData, [substationData, lineData, data]]) => {
+          ]).then(([{ grid, fallback }, [substationData, lineData, data]]) => {
             // 等异步查询期间组件可能已卸载，此时不能碰地图
             if (disposed || !mapRef.current) return;
 
-            // ---- 阶段28：真实 OSM 电网（最先加，压在所有点图层之下）----
-            addOsmGridLayers(map, osmData);
-            if (!osmData) setMapNotice(OSM_MISSING_NOTICE);
+            // ---- 阶段28/29：真实 OSM 电网（最先加，压在所有点图层之下）----
+            addOsmGridLayers(map, grid, fallback);
+            if (grid) {
+              // 走瓦片，正常情况，不提示
+            } else if (fallback) {
+              setMapNotice(OSM_FALLBACK_NOTICE);
+            } else {
+              setMapNotice(OSM_MISSING_NOTICE);
+            }
 
               // ---- 阶段21 图层一：输电线路（最底层）----
               map.addSource(LINES_SOURCE, { type: "geojson", data: lineData });

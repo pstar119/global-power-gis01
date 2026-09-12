@@ -43,7 +43,8 @@
     "longDescription": "Global Power GIS：在离线地图上浏览全球电厂分布，按燃料类型与装机容量筛选，支持自然语言查询与结果高亮定位。内置 WRI Global Power Plant Database 全量数据与 Protomaps 离线底图，装完即可使用。",
     "resources": {
       "resources/seed/global_power_gis.db": "seed/global_power_gis.db",
-      "resources/maps/basemap.pmtiles": "maps/basemap.pmtiles"
+      "resources/maps/basemap.pmtiles": "maps/basemap.pmtiles",
+      "resources/maps/osm_grid.pmtiles": "maps/osm_grid.pmtiles"
     },
     "windows": {
       "nsis": {

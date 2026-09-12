@@ -1,10 +1,18 @@
-# 阶段28：接入真实 OSM 电网数据（数据准备与切片手册）
+# OSM 电网数据：取数 → 合并 → 切片手册（阶段28–29）
 
-本文件只讲**数据怎么来、怎么切片**。前端图层的加载与样式改造是下一步，
-等数据切出来之后再动 `MapPage.tsx`。
+本文件讲**数据怎么来、怎么切片、产物怎么被前端读**。
 
-范围：**长三角试点**（`118,29,123,33`）—— 实测该范围内有 **15,524 条** `power=line` way。
-跑通链路后再用 `--bbox` 扩到别的区域，**不需要改任何代码逻辑**。
+范围：**长三角**（`118,29,123,33`）—— 实测该范围内有 **15,524 条** `power=line` way。
+跑通链路后可以用 `--bbox` 扩到别的区域，**不需要改任何代码逻辑**。
+
+🔴 **阶段29 起彻底放弃 tippecanoe / WSL，改为纯 Node.js 切片**。
+现在的完整链路（三条命令，无 Linux、无编译、无 Docker）：
+
+```powershell
+python scripts/fetch_osm_power.py --preset yrd --name yrd   # 取数（纯标准库）
+node   scripts/prepare_osm_geojson.mjs --name yrd            # 合并三份 GeoJSON 并裁属性
+node   scripts/build_pmtiles.mjs --name yrd                  # 切瓦片 → resources/maps/osm_grid.pmtiles
+```
 
 ---
 
@@ -16,9 +24,11 @@
 |---|---|
 | `download.geofabrik.de`（常规 OSM 抽取） | ❌ 8s 超时 |
 | `download.bbbike.org` / `download.openstreetmap.fr` | ✅ 可达，但只给 `.osm.pbf`（需 libosmium 解析） |
-| `overpass-api.de` | ✅ **可用**，`out geom;` 直接带坐标 → **本方案用它** |
-| `overpass.kumi.systems` / `overpass.osm.jp` | ❌ 超时 |
-| `overpass.private.coffee` | ⚠️ 可达但慢（7.5s），已作为脚本内的备用端点 |
+| `maps.mail.ru`（公共 Overpass 镜像） | ✅ **24.1s 返回 362 条真实数据 → 现在用它作为首选端点** |
+| `overpass-api.de` | ⚠️ 能返回数据，但**密集 504**；每次失败要退避 10/20/30s，实测把每块拖到 4–5 分钟。已降为备选 |
+| `overpass.private.coffee` | ❌ 93s 读超时，基本不可用 |
+| `overpass.osm.ch` | ⚠️ 1.4s 极快，但**返回 0 条** —— 它是瑞士专用实例，对中国数据无效。**「快 ≠ 可用」的典型** |
+| `overpass.kumi.systems` / `overpass.osm.jp` / `overpass.openstreetmap.ru` | ❌ 超时/不可达，别再试 |
 | `github.com` release 附件下载 | ❌ 20s+ 超时（`codeload.github.com` 源码包 **✅ 通，但很慢 ~27 KB/s**） |
 | `tippecanoe` / `conda` / `mamba` / `scoop` / `osmium` CLI | ❌ 本机**全部不存在** |
 | Docker | ❌ 未安装；且 `hub.docker.com` **不可达**，即使装了也拉不到镜像 |
@@ -27,7 +37,9 @@
 | npm 的 `tippecanoe` 包 | ❌ 只是个壳（README 明说 "You must install Tippecanoe separately"） |
 | 清华镜像 `ubuntu` / `msys2` / `anaconda` / `pypi` | ✅ 全部可达 |
 
-**结论：Windows 原生拿不到 tippecanoe，只有 Linux 环境里有现成构建。所以走 WSL（路径 A）。**
+**结论：Windows 原生拿不到 tippecanoe，而 WSL 在本机已彻底损坏（阶段29 实测 DISM 0x800f081f 无法修复）。
+所以改走纯 Node.js 切片**：`geojson-vt` 建瓦片索引 + `vt-pbf` 编码 MVT + 复用阶段26 已验证的
+PMTiles 容器写入器。不需要 Linux、不需要编译、不需要 Docker。
 
 ---
 
@@ -68,148 +80,162 @@ data/osm/yrd_power_meta.json            数量、电压分布、耗时
 
 ---
 
-## 三、第二步：装 tippecanoe（WSL，路径 A｜推荐）
+## 三、第二步：装切片依赖（局部，不污染主项目）
 
-> 需要你在**管理员 PowerShell** 里执行前两条 —— 装 WSL 发行版要 UAC 提权 + 重启，
-> 这一步我代劳不了，装完后面的都能跑。
+依赖只装在 `scripts/` 下，**根 `package.json` 与 `src-tauri` 一个字节都不动**：
 
 ```powershell
-# 1) 装 WSL 与 Ubuntu（管理员 PowerShell；完成后按要求重启）
-wsl --install -d Ubuntu
-
-# 2) 重启后进入 Ubuntu，设置用户名密码
-wsl
+cd scripts
+npm install --save-exact geojson-vt@5.0.2 vt-pbf@3.1.3
 ```
 
-Ubuntu 里换清华源并装依赖：
+- `geojson-vt`：**零运行时依赖**，把 GeoJSON 建成瓦片索引（v5 是 class，必须 `new`）；
+- `vt-pbf`：把索引切片编码成 MVT，3 个极小传递依赖（`pbf` / `@mapbox/vector-tile` /
+  `@mapbox/point-geometry`）；
+- Node 从**脚本所在目录**向上找模块，所以 `node scripts/build_pmtiles.mjs` 会自动命中
+  `scripts/node_modules`，不需要任何配置；
+- `scripts/node_modules/` 已 gitignore；`scripts/package.json` 与 `package-lock.json` 进 Git 便于复现。
 
-```bash
-# 换 apt 源（清华镜像，本机实测可达）
-sudo sed -i 's|http://archive.ubuntu.com|https://mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list
-sudo apt update
-sudo apt install -y curl bzip2
+### 为什么不自己手写、也不引别的库
 
-# 装 miniconda（从清华镜像，本机实测 200）
-curl -L -o /tmp/miniconda.sh https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh
-bash /tmp/miniconda.sh -b -p $HOME/miniconda
-eval "$($HOME/miniconda/bin/conda shell.bash hook)"
-
-# 把 conda 也指向清华镜像
-conda config --add channels https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/conda-forge
-conda config --add channels https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/main
-conda config --set show_channel_urls yes
-
-# 直接从 conda-forge 装 tippecanoe（linux-64 有官方构建，免编译）
-conda create -y -n tiles -c https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/conda-forge tippecanoe
-conda activate tiles
-tippecanoe --version     # 应输出版本号
-```
-
-> ⚠️ 别在 Windows 上 `conda install tippecanoe`：conda-forge **没有 win-64 构建**（已实测确认）。
-
-### 路径 B（不想装 WSL 时的备选：MSYS2 源码编译）
-
-清华有 MSYS2 镜像，且 `codeload.github.com` 实测可达（只是慢）：
-
-```bash
-# MSYS2 从清华镜像装好后，在 MSYS2 MINGW64 终端里：
-pacman -S --needed base-devel mingw-w64-x86_64-toolchain mingw-w64-x86_64-sqlite3 mingw-w64-x86_64-zlib
-
-curl -L -o /tmp/tip.tar.gz https://codeload.github.com/felt/tippecanoe/tar.gz/refs/tags/2.79.0
-tar -xzf /tmp/tip.tar.gz -C /tmp
-cd /tmp/tippecanoe-2.79.0 && make -j4 && make install
-```
-
-这条路会真的编译源码，遇到 MSYS2 的 POSIX 差异时需要自己趟；**能用 WSL 就别走这条**。
+- **MVT 编码**交给 `vt-pbf`，绝不自写 protobuf；
+- **PMTiles 容器**复用阶段26 已经验证过的写入器（`scripts/lib/pmtiles-writer.mjs`）。
+  它产出的 1107 瓦片底图被官方 `pmtiles` 包读回校验通过，也真的被 MapLibre 用 Range 读过。
+  官方 JS 包 `pmtiles` **只有解码器、没有 writer**（已核对其 `index.d.ts` 的导出清单，
+  里面只有 `PMTiles` / `Protocol` / `Source` 这些读侧类型）；
+- **不引入** `turf.js` / `d3` / 任何重型地理计算库。
 
 ### 明确排除的路径（省得你再试）
 
-- **Docker**：`hub.docker.com` 不可达，拉不到任何镜像。
-- **Windows 原生 conda**：conda-forge 无 `win-64` 构建。
-- **npm 的 `tippecanoe`**：只是 PATH 上已有二进制的壳。
-- **GitHub Releases 二进制**：本机超时。
-- **自己用 Python 写 PMTiles/MVT 写入器**：明确否决 —— 二进制格式 + Hilbert 排序手写
-  风险太高，隐蔽 bug 会让地图直接不正常。
+- **tippecanoe 的一切安装方式**：conda-forge 无 `win-64`；npm 包只是壳；
+  GitHub Releases 下载在本机 20s+ 超时；
+- **WSL**：本机 DISM 报 `0x800f081f`，修不动，不再浪费时间；
+- **Docker**：未安装，且 `hub.docker.com` 不可达。
+
 
 ---
 
-## 四、第三步：切片（在 WSL 里执行）
+---
 
-把抓好的 GeoJSON 拷进 WSL（或直接在 WSL 里访问 `/mnt/d/Projects/global-power-gis/data/osm/`）。
+## 四、第三步：切片（一条命令）
 
-```bash
-cd /mnt/d/Projects/global-power-gis
-conda activate tiles
+```powershell
+# 先试算：只统计各 zoom 的瓦片数与体积，不写文件
+node scripts/build_pmtiles.mjs --name yrd --estimate-only
 
-tippecanoe \
-  --output=data/osm/osm_grid.pmtiles \
-  --force \
-  -L'{"file":"data/osm/yrd_power_lines.geojson","layer":"power_lines","minzoom":4,"maxzoom":14}' \
-  -L'{"file":"data/osm/yrd_power_substations.geojson","layer":"power_substations","minzoom":6,"maxzoom":14}' \
-  -L'{"file":"data/osm/yrd_power_plants.geojson","layer":"power_plants","minzoom":6,"maxzoom":14}' \
-  -y vclass -y voltage_kv -y name -y power -y line_kind -y substation_kind -y plant_source -y osm_id \
-  --drop-densest-as-needed \
-  --extend-zooms-if-still-dropping \
-  --simplification=10 \
-  --attribution='© OpenStreetMap contributors (ODbL)'
+# 真切片（产物：src-tauri/resources/maps/osm_grid.pmtiles）
+node scripts/build_pmtiles.mjs --name yrd
 ```
 
-逐参数说明（每个都有理由，不是抄来的）：
+脚本做的事：
 
-| 参数 | 为什么 |
+1. `geojson-vt` 建索引；
+2. 按数据 bbox 枚举 z0..maxZoom 的候选瓦片，**空瓦片直接跳过**（电网很稀疏，这一步能省掉一大半体积）；
+3. `vt-pbf` 编码成 MVT → gzip；
+4. `buildArchive()` 组装 PMTiles v3（header + 元数据 + root/leaf 目录 + 瓦片正文）；
+5. **自校验**：用官方 `pmtiles` 包读回，再用 `@mapbox/vector-tile` 真正解码，
+   确认图层名与要素数对得上 —— 比「去浏览器里看一眼」可靠得多。
+
+参数取舍（每个都有理由）：
+
+| 参数 | 默认 | 为什么 |
+|---|---|---|
+| `--maxzoom` | 12 | 再深一级体积翻 3~4 倍；z12 之后交给 MapLibre 过缩放，矢量线过缩放仍然清晰 |
+| `--tolerance` | 3 | 折线简化容差，越大越小越糊 |
+| `--extent` | 4096 | MVT 网格精度，标准值 |
+| `--min-features` | 1 | 默认只丢空瓦片，**不做抽稀** —— 电网是线要素，抽稀会把线路断开 |
+| `--no-names` | 关 | 低级别瓦片里 `name` 会撑大字符串表，体积超标时再开 |
+| `--layer` | `grid` | MVT 图层名，必须与前端 `OSM_GRID_SOURCE_LAYER` 一致 |
+
+一个 MVT 图层装线 + 点两类几何，靠 `ftype` 区分 —— 这样前端的 `filter` 与阶段28 的
+GeoJSON 版本**逐字相同**，换数据源不需要动任何图层样式。
+
+---
+
+## 五、产物放哪里（已定：`resources/maps/`，进安装包）
+
+| 位置 | dev 可用 | 安装后可用 | 进 Git |
+|---|---|---|---|
+| `src-tauri/resources/maps/osm_grid.pmtiles` ✅ 当前方案 | ✅ | ✅ | ❌（gitignore） |
+
+- `tauri.conf.json` 的 `bundle.resources` 已加入该文件 → 会被拷进安装包；
+- `assetProtocol.scope` 已经是 `["$RESOURCE/maps/**"]`，**无需改动**；
+- CSP 的 `connect-src` 已含 `asset:`，**无需改动**；
+- 代价：全新克隆必须先跑一次切片脚本（与底图 `basemap.pmtiles` 同样的约定）。
+
+---
+
+## 六、前端怎么读（阶段29 已实现）
+
+1. `addProtocol("pmtiles", protocol.tilev4)` —— **全局只能注册一次**，底图与电网瓦片共用；
+2. `protocol.add(new PMTiles(url))` 为每份归档注册实例，样式里写 `pmtiles://<key>/{z}/{x}/{y}`；
+3. 127 字节 Range 探针确认 `206`；不支持时退回整包读内存，并明确告警；
+4. ⚠️ **必须写 `tiles:` 而不是 `url:`** —— 用 `url:` 会去取 TileJSON，而它的 `bounds` 是归档 bbox，
+   缩到全球视野时瓦片会被裁掉（阶段26 踩过）；
+5. 图层用 `"source-layer": "grid"`，`filter` 与阶段28 的 GeoJSON 版本**逐字相同**，
+   所以「变电站 / 输电线路」两个开关不需要任何改动就自动生效；
+6. 归档缺失时**优雅退回**上海小样本 GeoJSON 并弹出提示，开发者体验不至于崩掉。
+
+---
+
+## 七、阶段29 实测数据（2026-09-13）
+
+### 输入（长三角 `118,29,123,33`）
+
+| | 要素数 | 文件 |
+|---|---|---|
+| 输电线路 | 18,682 | 11.62 MB |
+| 变电站 | 3,078 | 0.79 MB |
+| 电厂 | 620 | 0.17 MB |
+| **合计** | **22,380** | **12.58 MB** |
+
+抓取：20 个分块，首选端点 `maps.mail.ru`；`complete=true`、`failed_chunks=0`。
+
+⚠️ **数据实际范围是 `109.9–122.7°E / 28.6–36.1°N`，比指定 bbox 大不少。**
+原因：Overpass 返回与 bbox **相交**的整条 way 及其完整几何，所以几条跨省特高压直流线路
+（实测含 `昌吉—古泉±1100千伏特高压直流输电线路`）被完整带进来。
+**这是有意保留的**——真实电网不顺着行政区划走，为了 bbox 整齐去截断线路反而是错的。
+
+### 切片（`node scripts/build_pmtiles.mjs --name yrd`）
+
+| 指标 | 实测 |
 |---|---|
-| `-L'{...}'` × 3 | **一次产出、三个图层**：前端只需要一个 source，靠 `source-layer` 区分。JSON 形式可以给每层单独的 zoom 区间 —— 变电站/电厂在低级别太密，从 z6 起才画 |
-| `-y …` | 只保留前端真正要用的属性。不裁剪属性会让瓦片大不少（`osm_id` 保留着方便点选时回溯 OSM） |
-| `--drop-densest-as-needed` | 低级别要素过密时自动抽稀，保证单个瓦片不超尺寸上限。**这是防止「地图白屏」的关键参数** |
-| `--extend-zooms-if-still-dropping` | 抽稀还压不下去时自动再深入一级，而不是硬塞 |
-| `--simplification=10` | 折线抽稀力度（默认 1 太保守）。10 在 z4 视觉上没问题，能显著减小体积 |
-| `--attribution` | OSM 数据是 **ODbL**，署名是法律要求，写进归档元数据里 |
-| `--force` | 允许覆盖已有产物，方便反复调参 |
+| 坐标点 | 260,084 |
+| 建索引 + 生成瓦片 | **0.1 s + 1.2 s**（无内存问题，不需要 Docker） |
+| 瓦片数 | 3,757（自动跳过 **16,371** 张空瓦片） |
+| 归档体积 | **4.68 MB**（MVT 原始 8.96 MB → gzip 4.67 MB，压缩比 1.9x） |
+| 最大单瓦片 | **233 KB 原始 / 91 KB gzip**（z6，11,318 要素） |
 
-### 校验产物
+**低级别精简属性（`--full-props-from 8`）的效果——这一步是必需的，不是锦上添花：**
 
-```bash
-ls -lh data/osm/osm_grid.pmtiles
+| | 优化前 | 优化后 |
+|---|---|---|
+| 最大单瓦片（原始） | 522.8 KB ❌ 超 500 KB 经验上限 | **233.1 KB** ✅ |
+| MVT 原始总量 | 11.08 MB | 8.96 MB |
+| 归档体积 | 5.37 MB | **4.68 MB** |
 
-# 用官方 pmtiles 工具看头部（若 conda 里没带，可用 npx —— 本机 npm 镜像可达）
-pmtiles show data/osm/osm_grid.pmtiles
-```
+根因：低级别单张瓦片会把**上万条**要素装进去，而 `osm_id` 几乎每条都不同
+→ MVT 字符串表被撑到上万条唯一值。而前端 `filter` **只用 `ftype` 与 `vclass`**，
+所以 z<8 丢掉 `name`/`osm_id`/`voltage_kv` 是**纯收益、零渲染损失**；
+z≥8 完整保留（放大后点选弹窗要用）。
 
-期望看到：`tile type: mvt`、`min zoom: 4`、`max zoom: 14`、`bounds` 覆盖长三角。
+### 前端渲染验收（应用内，每次截图前都校验视野已对齐）
 
----
+| 检查项 | 结果 |
+|---|---|
+| 归档加载 | `离线电网瓦片就绪（Range 读取）… z0-12，3,757 个瓦片` |
+| z10.5 `queryRenderedFeatures` | 735kV 0 / 500-734 55 / 220-499 204 / <220 21；变电站 67；电厂 11 |
+| z8.5 `queryRenderedFeatures` | 67 / 615 / 1669 / 611；变电站 858；电厂 145 |
+| 关「输电线路」 | 橙 4423→**1235**、蓝 15151→**6375**；画面差异 **18,743 px** |
+| 关「变电站」 | 青 110→**21**；画面差异 5,402 px |
+| 恢复后重拍 | 合计完全相同，**噪声基线 0 px** |
+| 地图交互帧间隔 | 中位数 **16.7 ms（≈60 fps）**，p95 17.0 ms |
+| 控制台 | 零错误零告警 |
 
-## 五、产物放哪里（本阶段：**不打包**）
+**验收方法学（踩过坑，值得记）**：CDP 合成的**拖拽**在本机 WebView2 里不可靠
+（缩放按钮的合成点击有效、mousedown+move+up 无效），所以导航改用 `map.jumpTo()`；
+而「图层到底画出来没有」用 **`map.queryRenderedFeatures({layers:[id]})`** 按图层统计要素数，
+比肉眼看截图硬得多。曾因为验收脚本**截图前没重新对齐视野**，得到「请求 zoom 10.5 却停在 7.32」
+且噪声基线高达 49 万像素的假结论 —— 现在每次截图前都会校验视野（连续两次读数一致）
+并打印真实视野，对不上就照实报告，绝不用「我以为的视野」写结论。
 
-按约定，本阶段**不把 OSM 切片打进安装包**，先本地验证样式与性能。两个可选位置：
-
-| 方案 | 位置 | dev 可用 | 安装后可用 | 是否进安装包 |
-|---|---|---|---|---|
-| **甲（推荐）** | `%APPDATA%\com.pstar119.globalpowergis\maps\osm_grid.pmtiles` | ✅ | ✅（用户手动放一次） | ❌ |
-| 乙 | `src-tauri/resources/maps/osm_grid.pmtiles` | ✅ | ✅ | ❌（除非加进 `bundle.resources`） |
-
-方案甲的好处是**完全不动 `bundle.resources`**，只需要把 `tauri.conf.json` 里
-`assetProtocol.scope` 再加一条 `"$APPDATA/maps/**"` 即可（当前是 `["$RESOURCE/maps/**"]`）。
-
-方案乙更省事（scope 已经覆盖 `$RESOURCE/maps/**`），但 Tauri 只会把
-`bundle.resources` 里列出的文件拷到 `target/debug/`，所以 dev 下要么临时列进去、
-要么手动拷一份到 `target/debug/maps/`。
-
-**两种都不进 Git**：`/data/` 与 `/src-tauri/resources/maps/*.pmtiles` 都已在 `.gitignore` 里。
-
----
-
-## 六、切完之后轮到我做什么
-
-数据一就绪，下一步（阶段28 后半）我会：
-
-1. `MapPage.tsx` 新增 `osm-grid` 源（复用现有的 asset 协议 + Range 机制，不再读内存）；
-2. 线路按 `vclass` 分级样式：`735+` 粉紫 3px / `500-734` 橙 2px / `220-499` 蓝 1.5px /
-   `<220` 灰 1px（默认关闭，否则低等级线会糊满屏）；
-3. 变电站青蓝圆点，半径随电压分级；
-4. 图层顺序：底图 → OSM 线路 → OSM 变电站 → 电厂 → 聚合 → 高亮 → 地名标签；
-5. UI 改造：新增「输电线路电压等级」复选框列表（用 `setFilter` 切换，不重建图层），
-   以及「当前视野统计」面板（电厂走 SQL bbox 查询，线路/变电站走 `querySourceFeatures` ——
-   这个只能统计已加载瓦片内的要素，是「本区域」的近似，性能我会实测后回报）。
-
-在数据落地之前，**我不会先改前端**（否则没有数据可验证，也没法判断样式是否合理）。
