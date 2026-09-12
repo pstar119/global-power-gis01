@@ -8,11 +8,24 @@ const DB_URL = "sqlite:global_power_gis.db";
 const TABLES = ["power_plants", "substations", "transmission_lines"] as const;
 type TableName = (typeof TABLES)[number];
 
-/** 一次往返拿回三张表的记录数（只读，不做任何写入） */
+/** 查询返回的一行：三张表各自的记录数 + 非测试数据计数 */
+type CountRow = Record<TableName, number> & { non_test: number };
+
+/**
+ * 一次往返拿回三张表的记录数，外加一个 `non_test` 计数。
+ *
+ * `non_test` 是**红线守卫**：统计所有名字不以 `Test` 开头的记录。
+ * 本阶段允许存在阶段13 播种的 Test 测试数据，但绝不允许出现真实电力数据，
+ * 所以判定标准从"表必须为空"升级为"记录必须全部带 Test 标记"。
+ * TODO: 接入真实数据后，本守卫要连同播种逻辑一起改造。
+ */
 const COUNT_SQL = `SELECT
   (SELECT COUNT(*) FROM power_plants)       AS power_plants,
   (SELECT COUNT(*) FROM substations)        AS substations,
-  (SELECT COUNT(*) FROM transmission_lines) AS transmission_lines`;
+  (SELECT COUNT(*) FROM transmission_lines) AS transmission_lines,
+  (SELECT COUNT(*) FROM power_plants       WHERE name NOT LIKE 'Test%')
++ (SELECT COUNT(*) FROM substations        WHERE name NOT LIKE 'Test%')
++ (SELECT COUNT(*) FROM transmission_lines WHERE name NOT LIKE 'Test%') AS non_test`;
 
 const IDLE_MESSAGE = "点击按钮连接本地 SQLite 数据库，统计三张表的记录数。";
 
@@ -35,21 +48,27 @@ function DbSelfCheck() {
 
     try {
       const db = await Database.load(DB_URL);
-      const rows = (await db.select(COUNT_SQL)) as Array<
-        Record<TableName, number>
-      >;
+      const rows = (await db.select(COUNT_SQL)) as CountRow[];
       const counts = rows[0];
       const total = TABLES.reduce((sum, t) => sum + Number(counts?.[t] ?? 0), 0);
+      const nonTest = Number(counts?.non_test ?? 0);
 
-      if (total === 0) {
+      if (nonTest > 0) {
+        // 红线守卫：出现了不带 Test 标记的记录，说明混入了非测试数据
+        setOk(false);
+        setMessage(
+          `⚠️ 检测到 ${nonTest} 条非测试数据 —— 违反「不得写入真实电力数据」的红线`,
+        );
+      } else if (total === 0) {
         setOk(true);
         setMessage(
           `数据库已就绪，当前有 0 条记录（${TABLES.map((t) => `${t} 0`).join(" / ")}）`,
         );
       } else {
-        // 红线：本阶段三张表必须全为空，一旦出现记录要显式告警
-        setOk(false);
-        setMessage(`⚠️ 数据库已就绪，但检测到 ${total} 条记录 —— 本阶段要求所有表为空`);
+        setOk(true);
+        setMessage(
+          `数据库已就绪，当前有 ${total} 条记录（全部为 Test 标记的测试数据）`,
+        );
       }
     } catch (err) {
       setOk(false);
@@ -66,7 +85,7 @@ function DbSelfCheck() {
       <h2 className={styles.title}>本地数据库连通性自检</h2>
       <p className={styles.hint}>
         通过 <code>@tauri-apps/plugin-sql</code> 连接 <code>global_power_gis.db</code>
-        ，统计三张表的记录数。本阶段所有表均应为空。
+        ，统计三张表的记录数，并校验记录是否全部带 Test 标记。
       </p>
 
       <button

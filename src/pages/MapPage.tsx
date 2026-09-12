@@ -1,4 +1,7 @@
 import { useEffect, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import Database from "@tauri-apps/plugin-sql";
+import type { FeatureCollection } from "geojson";
 // 仅用命名导入：maplibre-gl 的类型声明不提供 default export
 import {
   Map as MapLibreMap,
@@ -25,6 +28,43 @@ const FIXTURE_KEY = "power-fixture.pmtiles";
 
 const INITIAL_CENTER: [number, number] = [0, 20];
 const INITIAL_ZOOM = 1.5;
+
+/** 必须与 src-tauri/src/lib.rs 里的 DB_URL 一致 */
+const DB_URL = "sqlite:global_power_gis.db";
+
+/** 阶段13 测试点图层的 source / layer id */
+const TEST_POINTS_SOURCE = "test-points";
+const TEST_POINTS_LAYER_ID = "test-points";
+
+/**
+ * 【阶段13】从 SQLite 读取播种的测试点，转成 GeoJSON。
+ *
+ * TODO: 接入真实数据时，删除本函数与它的调用点，
+ *       以及 src-tauri/src/lib.rs 里的 seed_test_points 播种命令。
+ *
+ * 顺序有讲究：
+ *   1) Database.load() —— 先确保插件的连接池已建立
+ *   2) invoke("seed_test_points") —— 播种要复用那个连接池，且本身幂等
+ *   3) db.select(...) —— 最后才读取
+ */
+async function loadTestPointsGeoJson(): Promise<FeatureCollection> {
+  const db = await Database.load(DB_URL);
+  await invoke<number>("seed_test_points");
+
+  const rows = (await db.select(
+    "SELECT name, lat, lon FROM power_plants WHERE name LIKE 'Test%' ORDER BY name",
+  )) as Array<{ name: string; lat: number; lon: number }>;
+
+  return {
+    type: "FeatureCollection",
+    // ⚠️ GeoJSON 的坐标顺序是 [经度, 纬度]，与 SQL 里 lat / lon 的书写顺序相反
+    features: rows.map((r) => ({
+      type: "Feature",
+      properties: { name: r.name },
+      geometry: { type: "Point", coordinates: [r.lon, r.lat] },
+    })),
+  };
+}
 
 /**
  * 把整个归档读进内存后自建的 PMTiles Source。
@@ -199,6 +239,34 @@ function MapPage() {
           new ScaleControl({ maxWidth: 100, unit: "metric" }),
           "bottom-left",
         );
+
+        // 阶段13：把 SQLite 里的测试点渲染成圆点图层。
+        // 等 style 加载完再 addSource/addLayer —— 未加载完就加会抛错。
+        map.once("load", () => {
+          loadTestPointsGeoJson()
+            .then((data) => {
+              // 等异步查询期间组件可能已卸载，此时不能碰地图
+              if (disposed || !mapRef.current) return;
+
+              map.addSource(TEST_POINTS_SOURCE, { type: "geojson", data });
+              map.addLayer({
+                id: TEST_POINTS_LAYER_ID,
+                type: "circle",
+                source: TEST_POINTS_SOURCE,
+                paint: {
+                  "circle-radius": 7,
+                  "circle-color": "#ff3b6b",
+                  "circle-stroke-color": "#ffffff",
+                  "circle-stroke-width": 1.5,
+                },
+              });
+            })
+            .catch((err: unknown) => {
+              // 在 Tauri 之外（例如用 Vite 浏览器预览 UI）必然失败，
+              // 这里只记日志，绝不能让测试点加载失败影响底图。
+              console.error("[MapPage] 测试点加载失败（底图不受影响）", err);
+            });
+        });
       })
       .catch((err: unknown) => {
         console.error("[MapPage] 离线瓦片归档加载失败，地图未创建", err);

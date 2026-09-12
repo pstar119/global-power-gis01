@@ -22,6 +22,10 @@ tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 # 阶段12：本地 SQLite（仅启用 sqlite 驱动，mysql/postgres 关闭）
 tauri-plugin-sql = { version = "2", features = ["sqlite"] }
+# 阶段13：播种测试数据需要直接从 Rust 执行 SQL。
+# 注意 sqlx 本来就在依赖树里（tauri-plugin-sql 的传递依赖），
+# 这里只是把它提升为直接依赖以便在代码里命名，**不增加任何编译量**。
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
