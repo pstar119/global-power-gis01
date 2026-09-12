@@ -26,6 +26,16 @@ import styles from "./MapPage.module.css";
 const LAYERS = ["电厂", "变电站", "输电线路"] as const;
 
 /**
+ * 图层开关左侧色块的颜色 —— 让开关本身充当图例，不必再单独解释一遍。
+ * 电厂用渐变表示「按燃料多色」，而不是给一个会误导人的单色。
+ */
+const LAYER_SWATCH: Record<string, string> = {
+  电厂: "conic-gradient(#9aa0a6, #f5a524, #4daafc, #5ee39b, #b07cf5, #9aa0a6)",
+  变电站: "#3fd0c9",
+  输电线路: "#8b96a8",
+};
+
+/**
  * 本地离线瓦片夹具，由 `node scripts/make_test_pmtiles.mjs` 生成。
  * 几何全部是程序合成的图形，**不含任何真实电力数据**。
  * 文件放在 `public/` 下，开发与打包后都用相对路径读取。
@@ -56,6 +66,24 @@ const PLANT_LAYER_ID = "power-plant-points";
  */
 const HIGHLIGHT_SOURCE = "highlight-points";
 const HIGHLIGHT_LAYER_ID = "highlight-points";
+
+/**
+ * 阶段21：变电站与输电线路。
+ *
+ * ⚠️ 图层堆叠顺序很关键：输电线路必须加在**点图层之下**，
+ *    否则灰色线条会横穿彩色电厂点与变电站点，视觉噪声极大。
+ *    实际顺序由 addLayer 的调用次序决定（后加的在上面），
+ *    即：fixture → 输电线路 → 变电站 → 电厂 → 聚合 → 高亮。
+ */
+const SUBSTATIONS_SOURCE = "substations-data";
+const SUBSTATIONS_LAYER_ID = "substation-points";
+const LINES_SOURCE = "transmission-lines-data";
+const LINES_LAYER_ID = "transmission-lines";
+
+/** 变电站统一用青蓝色（不按电压上色：燃料配色盘已被 15 种燃料占满，再加一套会和图例打架） */
+const SUBSTATION_COLOR = "#3fd0c9";
+/** 输电线路用中性灰，在 #101418 深底上可见但不抢眼 */
+const LINE_COLOR = "#8b96a8";
 
 /** Popup 里展示的字段（来自 GeoJSON properties） */
 type PlantProperties = {
@@ -153,6 +181,81 @@ async function loadPlantsGeoJson(): Promise<FeatureCollection> {
         color: fuelColor(r.primary_fuel),
       },
       geometry: { type: "Point", coordinates: [r.lon, r.lat] },
+    })),
+  };
+}
+
+/**
+ * 阶段21：读取变电站，转 GeoJSON。
+ * 数据来自设置页的「导入演示电网数据」按钮（见 src/lib/demoGrid.ts）。
+ */
+async function loadSubstationsGeoJson(): Promise<FeatureCollection> {
+  const db = await Database.load(DB_URL);
+
+  const rows = (await db.select(
+    "SELECT name, country, voltage_kv, lat, lon FROM substations " +
+      "WHERE lat IS NOT NULL AND lon IS NOT NULL",
+  )) as Array<{
+    name: string;
+    country: string | null;
+    voltage_kv: number | null;
+    lat: number;
+    lon: number;
+  }>;
+
+  return {
+    type: "FeatureCollection",
+    features: rows.map((r) => ({
+      type: "Feature",
+      properties: {
+        name: r.name,
+        country: r.country,
+        // 电压参与半径分级；缺失时给 0，落在 step 表达式的第一档
+        voltage: r.voltage_kv ?? 0,
+      },
+      geometry: { type: "Point", coordinates: [r.lon, r.lat] },
+    })),
+  };
+}
+
+/**
+ * 阶段21：读取输电线路，转 GeoJSON。
+ *
+ * ⚠️ 每条线路必须以「两点 LineString」表示，而不是把多条线塞进一个
+ *    MultiLineString —— 后者会让 MapLibre 无法按单条线做属性分级。
+ */
+async function loadLinesGeoJson(): Promise<FeatureCollection> {
+  const db = await Database.load(DB_URL);
+
+  const rows = (await db.select(
+    "SELECT name, voltage_kv, start_lat, start_lon, end_lat, end_lon " +
+      "FROM transmission_lines " +
+      "WHERE start_lat IS NOT NULL AND start_lon IS NOT NULL " +
+      "AND end_lat IS NOT NULL AND end_lon IS NOT NULL",
+  )) as Array<{
+    name: string;
+    voltage_kv: number | null;
+    start_lat: number;
+    start_lon: number;
+    end_lat: number;
+    end_lon: number;
+  }>;
+
+  return {
+    type: "FeatureCollection",
+    features: rows.map((r) => ({
+      type: "Feature",
+      properties: {
+        name: r.name,
+        voltage: r.voltage_kv ?? 0,
+      },
+      geometry: {
+        type: "LineString",
+        coordinates: [
+          [r.start_lon, r.start_lat],
+          [r.end_lon, r.end_lat],
+        ],
+      },
     })),
   };
 }
@@ -368,6 +471,23 @@ function MapPage({ command = null }: MapPageProps) {
   ]);
 
   /**
+   * visibleLayers 的 ref 镜像。
+   * ⚠️ 为什么必须要：refreshClusterLabels 定义在建图的 useEffect 里，
+   *    那里的闭包永远只能看到 visibleLayers 的初始值；而它同时被
+   *    moveend / sourcedata 回调调用。不靠 ref 镜像的话，
+   *    「关掉电厂图层后再平移地图」会把聚合数字又画回来。
+   */
+  const visibleLayersRef = useRef<readonly string[]>(visibleLayers);
+
+  /**
+   * 聚合数字用的是 HTML Marker，**不受 MapLibre 的 visibility 管辖**，
+   * 必须由外面拿到建图时的这两个函数手动刷新 / 清空。
+   */
+  const labelApiRef = useRef<{ refresh: () => void; clear: () => void } | null>(
+    null,
+  );
+
+  /**
    * 执行地图指令：飞到目标区域 + 高亮匹配的电厂。
    * ⚠️ 筛选值全部走 SQL 参数绑定（见 nlq.ts 的 buildBoundsSql / buildHighlightSql），
    *    不拼接任何用户输入。
@@ -439,6 +559,15 @@ function MapPage({ command = null }: MapPageProps) {
       }
 
       renderHighlight(map, points);
+      // 高亮层是首次高亮时才建的，此刻才存在 —— 补一次可见性设置，
+      // 否则「先关掉电厂图层、再执行查询」会出现光有金环没有底点的状态。
+      if (map.getLayer(HIGHLIGHT_LAYER_ID)) {
+        map.setLayoutProperty(
+          HIGHLIGHT_LAYER_ID,
+          "visibility",
+          visibleLayersRef.current.includes("电厂") ? "visible" : "none",
+        );
+      }
       setMapNotice(
         points.length > 0
           ? `已高亮 ${points.length} 个匹配的电厂（金色描边）`
@@ -530,10 +659,78 @@ function MapPage({ command = null }: MapPageProps) {
         // 把 SQLite 里的电厂渲染成圆点图层。
         // 等 style 加载完再 addSource/addLayer —— 未加载完就加会抛错。
         map.once("load", () => {
-          loadPlantsGeoJson()
-            .then((data) => {
+          // ⚠️ 必须先把连接池建起来（这一步才会执行 migration），再并发查三张表。
+          //
+          // 曾经的写法是三个 loadXxxGeoJson() 各自 await Database.load() 后 Promise.all，
+          // 结果是**竞态**：只有首次 load 会触发 migration v3（灌入演示电网数据），
+          // 另外两个的 SELECT 可能在迁移提交之前就执行完，拿到空结果。
+          // 实测表现极具迷惑性 —— 统计页能查到 200 个变电站，地图上却一个点都没有。
+          Database.load(DB_URL)
+            .then(() =>
+              Promise.all([
+                loadSubstationsGeoJson(),
+                loadLinesGeoJson(),
+                loadPlantsGeoJson(),
+              ]),
+            )
+            .then(([substationData, lineData, data]) => {
               // 等异步查询期间组件可能已卸载，此时不能碰地图
               if (disposed || !mapRef.current) return;
+
+              // ---- 阶段21 图层一：输电线路（最底层）----
+              map.addSource(LINES_SOURCE, { type: "geojson", data: lineData });
+              map.addLayer({
+                id: LINES_LAYER_ID,
+                type: "line",
+                source: LINES_SOURCE,
+                layout: {
+                  // 圆角收尾，避免折角处出现尖刺毛边
+                  "line-cap": "round",
+                  "line-join": "round",
+                },
+                paint: {
+                  "line-color": LINE_COLOR,
+                  // 轻微透明：既要看得见电网骨架，又不能压过上面的点
+                  "line-opacity": 0.55,
+                  // 按电压分级线宽，一眼分出主干与支线
+                  "line-width": [
+                    "step",
+                    ["get", "voltage"],
+                    1,
+                    220,
+                    1.6,
+                    500,
+                    2.6,
+                  ],
+                },
+              });
+
+              // ---- 阶段21 图层二：变电站 ----
+              map.addSource(SUBSTATIONS_SOURCE, {
+                type: "geojson",
+                data: substationData,
+              });
+              map.addLayer({
+                id: SUBSTATIONS_LAYER_ID,
+                type: "circle",
+                source: SUBSTATIONS_SOURCE,
+                paint: {
+                  "circle-color": SUBSTATION_COLOR,
+                  // 半径按电压分级，直观体现站点的重要性层级
+                  "circle-radius": [
+                    "step",
+                    ["get", "voltage"],
+                    4,
+                    220,
+                    5.5,
+                    500,
+                    7,
+                  ],
+                  "circle-opacity": 0.9,
+                  "circle-stroke-color": "#06333a",
+                  "circle-stroke-width": 1.2,
+                },
+              });
 
               // 开启 MapLibre **内置**聚合：低缩放级别下把邻近电厂合并成聚合点，
               // 避免 3.5 万个点重叠成一团糊。算法由库自带，未安装任何聚合库。
@@ -610,6 +807,10 @@ function MapPage({ command = null }: MapPageProps) {
               const refreshClusterLabels = () => {
                 clearClusterLabels();
 
+                // ⚠️ 电厂图层被关掉时不重建数字：Marker 不在 MapLibre 的
+                //    visibility 管辖范围内，不管就会在空地图上飘一堆数字。
+                if (!visibleLayersRef.current.includes("电厂")) return;
+
                 const seen = new Set<number>();
                 for (const f of map.querySourceFeatures(PLANTS_SOURCE, {
                   filter: ["has", "point_count"],
@@ -637,6 +838,12 @@ function MapPage({ command = null }: MapPageProps) {
               // 动画期间标记会与圆错位，干脆先清掉、移动结束后再重建
               map.on("movestart", clearClusterLabels);
               map.on("moveend", refreshClusterLabels);
+
+              // 把两个函数交给外部：图层开关需要能在不开图的情况下主动清空 / 重建数字
+              labelApiRef.current = {
+                refresh: refreshClusterLabels,
+                clear: clearClusterLabels,
+              };
               // ⚠️ 必须监听 sourcedata：addLayer 之后数据仍要在 worker 里构建聚合索引，
               //    此刻立刻调用 querySourceFeatures 会返回空数组 —— 表现为
               //    「聚合圆都画出来了，但数字一个都不显示」。所以要等 source
@@ -748,6 +955,48 @@ function MapPage({ command = null }: MapPageProps) {
     );
   };
 
+  /**
+   * 阶段21：把「图层控制」的开关真正接到 MapLibre 上。
+   *
+   * ⚠️ 两个坑：
+   *  1) 建图是异步的（Database.load + addSource/addLayer）。若在建成之前
+   *     就执行，getLayer 全返回 undefined，开关会“静默失效”。
+   *     所以这里先更新 ref 镜像，建图完成时 refreshClusterLabels 会读到最新值。
+   *  2) 高亮图层是首次高亮时才创建的，此刻可能还不存在 —— getLayer 判空跳过即可。
+   */
+  useEffect(() => {
+    visibleLayersRef.current = visibleLayers;
+
+    const map = mapRef.current;
+    if (!map || !mapReadyRef.current) return;
+
+    const visibility = (name: string) =>
+      visibleLayers.includes(name) ? "visible" : "none";
+
+    // 前三个图层都由「电厂」开关统一控制：高亮层是查询结果的叠加，
+    // 若单独留着，会出现「电厂关掉了但还飘着一圈金环」的怪状。
+    const groups: ReadonlyArray<readonly [string, readonly string[]]> = [
+      ["电厂", [CLUSTER_LAYER_ID, PLANT_LAYER_ID, HIGHLIGHT_LAYER_ID]],
+      ["变电站", [SUBSTATIONS_LAYER_ID]],
+      ["输电线路", [LINES_LAYER_ID]],
+    ];
+
+    for (const [name, ids] of groups) {
+      for (const id of ids) {
+        if (map.getLayer(id)) {
+          map.setLayoutProperty(id, "visibility", visibility(name));
+        }
+      }
+    }
+
+    // 聚合数字是 HTML Marker，上面的 setLayoutProperty 管不到它
+    if (visibleLayers.includes("电厂")) {
+      labelApiRef.current?.refresh();
+    } else {
+      labelApiRef.current?.clear();
+    }
+  }, [visibleLayers]);
+
   return (
     <div className={styles.viewport}>
       {/* 地图画布容器：铺满视窗，位于悬浮 UI 之下 */}
@@ -780,7 +1029,11 @@ function MapPage({ command = null }: MapPageProps) {
                   aria-pressed={isVisible}
                   onClick={() => toggleLayer(name)}
                 >
-                  <span className={styles.layerSwatch} aria-hidden="true" />
+                  <span
+                    className={styles.layerSwatch}
+                    style={{ background: LAYER_SWATCH[name] }}
+                    aria-hidden="true"
+                  />
                   {name}
                 </button>
               </li>
@@ -804,6 +1057,39 @@ function MapPage({ command = null }: MapPageProps) {
               </li>
             ))}
           </ul>
+
+          {/* 阶段21：电网基础设施的视觉约定。颜色与上面的图层开关、
+              以及 MapPage.tsx 顶部的 SUBSTATION_COLOR / LINE_COLOR 保持一致。 */}
+          <p className={styles.legendTitle}>基础设施</p>
+          <ul className={styles.legendList}>
+            <li className={styles.legendItem}>
+              <span
+                className={styles.legendSwatch}
+                style={{ backgroundColor: SUBSTATION_COLOR }}
+                aria-hidden="true"
+              />
+              变电站
+            </li>
+            <li className={styles.legendItem}>
+              <span
+                className={styles.legendLine}
+                style={{ backgroundColor: LINE_COLOR }}
+                aria-hidden="true"
+              />
+              输电线路
+            </li>
+            <li className={styles.legendItem}>
+              <span
+                className={styles.legendSwatch}
+                style={{ backgroundColor: "#ffd24a" }}
+                aria-hidden="true"
+              />
+              查询高亮
+            </li>
+          </ul>
+          <p className={styles.legendFoot}>
+            变电站半径与线路宽度均随电压等级递增；变电站与线路为演示数据。
+          </p>
         </div>
       </section>
 

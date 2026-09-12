@@ -31,6 +31,13 @@ fn greet(name: &str) -> String {
 ///
 /// - v1：只建三张空表，不插入任何数据
 /// - v2：为接入真实数据源补充 gppd_idnr（唯一）与 primary_fuel 两列
+/// - v3：灌入阶段21 的电力网络演示数据（200 变电站 / 100 线路）
+///
+/// 为什么演示数据走 migration 而不是前端导入：
+///   前端 capabilities 只有 sql:allow-select，没有 sql:allow-execute，
+///   运行时写库会被 Tauri 直接拒绝（实测 "sql.execute not allowed"）。
+///   放进 migration 则对「已有库」和「全新库」都会自动执行，两条路径统一，
+///   且无需为写入功能开放前端权限、也无需把 sqlx 加回 Cargo.toml。
 fn migrations() -> Vec<Migration> {
     vec![
         Migration {
@@ -43,6 +50,13 @@ fn migrations() -> Vec<Migration> {
             version: 2,
             description: "add_plant_source_and_fuel",
             sql: include_str!("../migrations/002_add_plant_source_and_fuel.sql"),
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 3,
+            description: "seed_demo_power_grid",
+            // 由 scripts/make_demo_grid.py 生成，勿手改
+            sql: include_str!("../migrations/003_seed_demo_grid.sql"),
             kind: MigrationKind::Up,
         },
     ]

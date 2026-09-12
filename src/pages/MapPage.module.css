@@ -135,14 +135,22 @@
   height: 10px;
   border: 1px solid var(--gpg-border);
   border-radius: 2px;
-  background-color: #3c3c3c;
-  transition: background-color 0.15s ease, border-color 0.15s ease;
+  /* ⚠️ 颜色由 JS 以 inline style 注入（LAYER_SWATCH），它优先级高于本文件的
+     任何选择器。所以这里**不**给 background-color，否则关闭态会把真实色
+     盖成灰色，开关就不成其为图例了。 */
 }
 
-/* 图层开启时色块填充科技蓝 */
+/* 图层开启时：边框提亮，表示“已生效”。色块本身保持真实图层色。 */
 .layerBtn[aria-pressed="true"] .layerSwatch {
   border-color: var(--gpg-accent);
-  background-color: var(--gpg-accent);
+}
+
+/* 图层关闭时：去色 + 降低不透明度。
+   这样即使 inline 背景是真实色，也能一眼看出该层当前是关着的。 */
+.layerBtn[aria-pressed="false"] .layerSwatch {
+  opacity: 0.3;
+  filter: grayscale(1);
+  transition: opacity 0.15s ease, filter 0.15s ease;
 }
 
 /* ---------- 左上：图例（燃料类型 -> 颜色） ----------
@@ -195,6 +203,23 @@
   height: 8px;
   border: 1px solid rgba(255, 255, 255, 0.3);
   border-radius: 2px;
+}
+
+/* 线路图例：用一段短横线而不是方块，和地图上的线状图层对应 */
+.legendLine {
+  flex: 0 0 auto;
+  width: 12px;
+  height: 3px;
+  border-radius: 2px;
+}
+
+/* 图例补充说明：解释“半径/线宽随电压递增”这条视觉约定 */
+.legendFoot {
+  margin: 6px 0 0;
+  padding: 0 0.5rem;
+  color: var(--gpg-muted);
+  font-size: 0.65rem;
+  line-height: 1.5;
 }
 
 /* ---------- 右上：缩放控件 ---------- */

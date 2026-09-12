@@ -15,7 +15,9 @@ const CORE_SQL = `SELECT
   (SELECT COUNT(*)                     FROM power_plants) AS total_plants,
   (SELECT SUM(capacity_mw)             FROM power_plants) AS total_capacity_mw,
   (SELECT COUNT(DISTINCT country)      FROM power_plants) AS countries,
-  (SELECT COUNT(DISTINCT primary_fuel) FROM power_plants) AS fuels`;
+  (SELECT COUNT(DISTINCT primary_fuel) FROM power_plants) AS fuels,
+  (SELECT COUNT(*)                     FROM substations)         AS substations,
+  (SELECT COUNT(*)                     FROM transmission_lines)   AS lines`;
 
 /** Q2：装机容量 Top5 国家（GROUP BY / ORDER BY / LIMIT 全部下推到 SQLite） */
 const TOP_COUNTRIES_SQL = `SELECT country,
@@ -41,6 +43,8 @@ type CoreStats = {
   total_capacity_mw: number;
   countries: number;
   fuels: number;
+  substations: number;
+  lines: number;
 };
 
 type CountryRow = { country: string; capacity_mw: number; plants: number };
@@ -175,6 +179,17 @@ function StatsPage({ hint }: StatsPageProps) {
       label: "燃料类型",
       value: ready ? fmtInt(state.core.fuels) : "—",
       unit: "种",
+    },
+    // 阶段21：电网两张表的真实行数（数据来自设置页的演示数据导入按钮）
+    {
+      label: "变电站",
+      value: ready ? fmtInt(state.core.substations) : "—",
+      unit: "座",
+    },
+    {
+      label: "输电线路",
+      value: ready ? fmtInt(state.core.lines) : "—",
+      unit: "条",
     },
   ];
 
