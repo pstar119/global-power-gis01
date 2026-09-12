@@ -153,7 +153,6 @@
 /* ---------- 后端自检块（GreetSelfCheck 复用，样式保留在本模块） ---------- */
 
 .selfCheck {
-  max-width: 420px;
   margin-top: 2rem;
   padding: 1rem 1.25rem;
   border: 1px solid var(--gpg-border);

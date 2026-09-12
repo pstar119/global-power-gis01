@@ -21,11 +21,10 @@
   z-index: 0;
 }
 
-/* ---------- 三个悬浮面板的公共外观 ---------- */
+/* ---------- 两个悬浮面板的公共外观 ---------- */
 
 .layerPanel,
-.zoomControl,
-.scaleBar {
+.zoomControl {
   position: absolute;
   z-index: 1;
   box-sizing: border-box;
@@ -195,30 +194,28 @@
   border-top: 1px solid var(--gpg-border);
 }
 
-/* ---------- 左下：比例尺 ---------- */
+/* ---------- 左下：比例尺 ----------
+   已改用 MapLibre 自带的 ScaleControl（见 MapPage.tsx 的 addControl）。
+   它是库的一部分，零新增依赖；这里只把默认的浅色外观改造成与其余悬浮面板一致。
+   必须用 :global —— maplibregl 的类名不在 CSS Modules 的哈希范围内；
+   而“后代选择器 + 两类名”的特异性(0,2,0)也足以压过库自带的单类名规则(0,1,0)。 */
 
-.scaleBar {
-  bottom: 12px;
-  left: 12px;
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 0.375rem 0.625rem;
+.viewport :global(.maplibregl-ctrl-bottom-left) {
+  /* 容器偏 2px + 控件自带的 10px margin = 12px，与其余三个面板的内缩对齐 */
+  bottom: 2px;
+  left: 2px;
 }
 
-/* 用 3 条 border 画出「匚」形刻度条，无需任何图片或图标 */
-.scaleTrack {
-  display: block;
-  width: 96px;
-  height: 6px;
-  border-left: 1px solid var(--gpg-text);
-  border-right: 1px solid var(--gpg-text);
-  border-bottom: 1px solid var(--gpg-text);
-}
-
-.scaleLabel {
+.viewport :global(.maplibregl-ctrl-scale) {
+  box-sizing: border-box;
+  border: 1px solid var(--gpg-border);
+  border-top: none;
+  border-radius: 0 0 6px 6px;
+  background-color: rgba(37, 37, 38, 0.85);
+  -webkit-backdrop-filter: blur(4px);
+  backdrop-filter: blur(4px);
   color: var(--gpg-text);
+  font-family: inherit;
   font-size: 0.7rem;
-  line-height: 1;
-  font-variant-numeric: tabular-nums;
+  line-height: 1.5;
 }
