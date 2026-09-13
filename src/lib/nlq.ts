@@ -85,6 +85,55 @@ export function formatViewport(b: ViewportBbox): string {
   return `${lon(b.minLon)}~${lon(b.maxLon)}, ${lat(b.minLat)}~${lat(b.maxLat)}`;
 }
 
+/**
+ * 阶段32：点击结果表格行时携带的**电厂标识**。
+ *
+ * 🔴 电厂名**不是唯一键**：实测 `Shanghai Lingang` 在库里对应 2 个点，
+ *    WRI 里同名/近名的电站也不罕见。所以唯一标识必须是
+ *    **(name, lat, lon) 三元组** —— 只用名字会出现「点了 Lingang 却飞到另一座」。
+ */
+export interface PlantFocus {
+  name: string;
+  lat: number;
+  lon: number;
+  /** 高亮圆半径按容量分级，所以要带上（可为 null） */
+  capacityMW: number | null;
+  /** 弹窗/提示里想显示燃料时用；模型与点击路径都允许为空 */
+  primaryFuel?: string | null;
+}
+
+/**
+ * 从一行查询结果里提取电厂标识。
+ * 聚合类行（按国家/燃料/全球总量）没有单个坐标 → 返回 null，
+ * 于是那些行天然不可点击，不需要额外判断 intent。
+ */
+export function toPlantFocus(row: Record<string, unknown>): PlantFocus | null {
+  const name = row.name;
+  const lat = Number(row.lat);
+  const lon = Number(row.lon);
+  if (typeof name !== "string" || !name) return null;
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+
+  const mw = Number(row.capacity_mw);
+  const fuel = row.primary_fuel;
+  return {
+    name,
+    lat,
+    lon,
+    capacityMW: Number.isFinite(mw) ? mw : null,
+    primaryFuel: typeof fuel === "string" ? fuel : null,
+  };
+}
+
+/** 三元组相等判定（选中行高亮用）—— 同样**不能**退化成只比 name */
+export function samePlant(
+  a: PlantFocus | null | undefined,
+  b: PlantFocus | null | undefined,
+): boolean {
+  if (!a || !b) return false;
+  return a.name === b.name && a.lat === b.lat && a.lon === b.lon;
+}
+
 /** 燃料别名 -> WRI 的 primary_fuel 取值 */
 const FUEL_ALIASES: ReadonlyArray<readonly [string, string]> = [
   ["煤电", "Coal"],
@@ -156,6 +205,13 @@ export interface MapCommand extends ParsedQuery {
    * 否则在解析的几秒里，表格已经空了而地图还挂着旧结果，比表格残留更误导。
    */
   clearOnly?: boolean;
+  /**
+   * 阶段32：聚焦到**单个**电厂（点击结果表格行触发）。
+   *
+   * 有它时**不重跑 SQL**、不动旧结果，只是飞过去 + 把高亮换成这一个点 ——
+   * 「定位」与「查询」是两件事，混在一起会让用户困惑（点一行就把整张表换了）。
+   */
+  focus?: PlantFocus;
 }
 
 /**
@@ -201,9 +257,12 @@ function matchAlias(
 
 /** 抽取「前 5 / top5 / 最大的 3 个」里的数字 */
 function findLimit(text: string): number | undefined {
+  // ⚠️ 允许 3 位数字：用户说「当前视野最大的100个电厂」时，
+  //    原来的 `\d{1,2}` 会把 100 当成 10，静默返回 10 行（实测踩到）。
+  //    上限仍由 plantListLimit 封在 50。
   const m =
-    text.match(/(?:前|top|排名前|最大的?|最高的?)\s*(\d{1,2})/i) ??
-    text.match(/(\d{1,2})\s*(?:个|名|位)/);
+    text.match(/(?:前|top|排名前|最大的?|最高的?)\s*(\d{1,3})/i) ??
+    text.match(/(\d{1,3})\s*(?:个|名|位)/);
   if (!m) return undefined;
   const n = Number(m[1]);
   // 上限 50：防止用户输入夸张数字导致界面被撑爆
@@ -297,11 +356,15 @@ ORDER BY capacity_mw DESC${limitSql}`,
     const { where, params } = buildWhere(query, { requireCoords: true });
     // ⚠️ 强制带上 LIMIT。limit 缺省时用默认值，绝不生成无 LIMIT 的查询 ——
     //    那会把 34936 行明细全拉回前端并在表格里渲染。
+    // ‼️ 阶段32：必须带 lat / lon —— 点击表格行要能飞到那座电厂。
+    //    地图页的小表格会把这两列隐藏，设置页的完整表格则显示为「纬度 / 经度」。
     return {
       sql: `SELECT name,
        country,
        primary_fuel,
-       capacity_mw
+       capacity_mw,
+       lat,
+       lon
 FROM power_plants
 ${where}
 ORDER BY capacity_mw DESC

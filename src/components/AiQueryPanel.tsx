@@ -15,7 +15,10 @@ import {
 import {
   EXAMPLES,
   formatViewport,
+  samePlant,
+  toPlantFocus,
   type ParsedQuery,
+  type PlantFocus,
   type QueryContext,
 } from "../lib/nlq";
 // 阶段31：解析 / SQL / 取数与地图页浮动查询框**完全共用**，避免两份实现分道扬镳
@@ -111,6 +114,12 @@ function downloadCsv(
 function formatCell(key: string, value: unknown): string {
   if (value === null || value === undefined) return "—";
 
+  // 阶段32：坐标保留 4 位小数（约 11 米精度）。原始浮点串太长，读起来费劲
+  if (key === "lat" || key === "lon") {
+    const v = Number(value);
+    return Number.isFinite(v) ? v.toFixed(4) : String(value);
+  }
+
   if (key === "country") return countryLabel(String(value));
   if (key === "primary_fuel") return fuelLabel(String(value));
 
@@ -147,6 +156,10 @@ interface AiQueryPanelProps {
   viewportRef?: RefObject<QueryContext | null>;
   /** 值变化 = 视野移动导致上次结果失效，应清空表格 */
   staleSeq?: number;
+  /** 阶段32：点击结果行 → 飞到该电厂并单点高亮 */
+  onFocusPlant?: (plant: PlantFocus) => void;
+  /** 当前被聚焦的电厂（AppLayout 统一持有，两个表格据此标出同一行） */
+  focusedPlant?: PlantFocus | null;
 }
 
 function AiQueryPanel({
@@ -154,6 +167,8 @@ function AiQueryPanel({
   onClearMap,
   viewportRef,
   staleSeq = 0,
+  onFocusPlant,
+  focusedPlant,
 }: AiQueryPanelProps) {
   const [input, setInput] = useState("");
   const [state, setState] = useState<QueryState>({ status: "idle" });
@@ -556,13 +571,42 @@ function AiQueryPanel({
                   </tr>
                 </thead>
                 <tbody>
-                  {state.rows.map((row, index) => (
-                    <tr key={index}>
-                      {columns.map((col) => (
-                        <td key={col}>{formatCell(col, row[col])}</td>
-                      ))}
-                    </tr>
-                  ))}
+                  {state.rows.map((row, index) => {
+                    // 阶段32：有坐标的行才可点（聚合行天然没有 lat/lon）。
+                    // ⚠️ 匹配用 (name, lat, lon) 三元组 —— 只用名字会在同名电厂上点错：
+                    //    实测 `Shanghai Lingang` 在库里对应 2 个点。
+                    const focus = toPlantFocus(row);
+                    const active = samePlant(focus, focusedPlant);
+                    return (
+                      <tr
+                        key={index}
+                        className={[
+                          focus ? styles.rowClickable : "",
+                          active ? styles.rowActive : "",
+                        ]
+                          .filter(Boolean)
+                          .join(" ")}
+                        tabIndex={focus ? 0 : -1}
+                        title={
+                          focus ? "点击定位到地图并高亮这座电厂" : undefined
+                        }
+                        aria-current={active ? "true" : undefined}
+                        onClick={() => {
+                          if (focus) onFocusPlant?.(focus);
+                        }}
+                        onKeyDown={(e) => {
+                          if (focus && (e.key === "Enter" || e.key === " ")) {
+                            e.preventDefault();
+                            onFocusPlant?.(focus);
+                          }
+                        }}
+                      >
+                        {columns.map((col) => (
+                          <td key={col}>{formatCell(col, row[col])}</td>
+                        ))}
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

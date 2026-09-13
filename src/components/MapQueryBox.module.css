@@ -129,3 +129,25 @@
   background-color: var(--gpg-hover);
   color: var(--gpg-text);
 }
+
+/* ---------- 阶段32：结果行可点击定位 ---------- */
+
+.rowClickable {
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.rowClickable:hover {
+  background-color: var(--gpg-hover);
+}
+
+/* 当前被聚焦的那一行：与地图上的金色高亮对应 */
+.rowActive,
+.rowActive:hover {
+  background-color: rgba(77, 170, 252, 0.18);
+}
+
+.rowActive td {
+  color: var(--gpg-text);
+  font-weight: 600;
+}

@@ -30,6 +30,7 @@ import {
   viewportChanged,
   type MapCommand,
   type ParsedQuery,
+  type PlantFocus,
   type QueryContext,
   type ViewportBbox,
 } from "../lib/nlq";
@@ -234,6 +235,9 @@ const OSM_FALLBACK_NOTICE =
  * 所以在飞行结束后兜一次底。
  */
 const MIN_COMMAND_ZOOM = 2.2;
+
+/** 阶段32：点击结果行定位时的目标缩放（只放大不缩小，见 applyCommand 的 focus 分支） */
+const FOCUS_ZOOM = 11;
 
 /** Popup 里展示的字段（来自 GeoJSON properties） */
 type PlantProperties = {
@@ -1134,6 +1138,46 @@ function layersForContext(visible: readonly string[]): string[] {
   return names;
 }
 
+/** 阶段32：MapLibre 的瓦片像素尺寸（注意是 512，不是 256） */
+const TILE_SIZE = 512;
+
+/**
+ * 由「相机中心 + 缩放 + 容器尺寸」推导视野 bbox（Web Mercator），与 MapLibre 内部算法一致。
+ *
+ * 🔴 为什么不直接用 `map.getBounds()`：
+ *    地图页被切走时容器会变成 `display: none`，MapLibre 会把 transform 尺寸更新为 0，
+ *    此后 `getBounds()` **不再等于用户看到过的范围**。实测后果：AI 收到的 bbox
+ *    只有真实视野的一半多（0.55° x 0.35° 对 1.49° x 0.88°），
+ *    于是「当前视野里最大的 N 个电厂」会漏掉本该在框内的电厂（上海 35 座只回了 6 座）。
+ *    改用「中心 + 缩放 + 缓存的容器尺寸」后，切页、隐藏都不再影响结果。
+ */
+function boundsFromCamera(
+  lon: number,
+  lat: number,
+  zoom: number,
+  width: number,
+  height: number,
+): ViewportBbox {
+  const world = TILE_SIZE * Math.pow(2, zoom);
+  const x = ((lon + 180) / 360) * world;
+  const sinLat = Math.sin((lat * Math.PI) / 180);
+  const y = (0.5 - Math.log((1 + sinLat) / (1 - sinLat)) / (4 * Math.PI)) * world;
+
+  const toLon = (px: number) => (px / world) * 360 - 180;
+  const toLat = (py: number) => {
+    const n = Math.PI - (2 * Math.PI * py) / world;
+    return (180 / Math.PI) * Math.atan(Math.sinh(n));
+  };
+
+  return {
+    minLon: Math.max(-180, toLon(x - width / 2)),
+    maxLon: Math.min(180, toLon(x + width / 2)),
+    // 屏幕 y 向下、纬度向上，所以 maxLat 对应 y - h/2
+    minLat: Math.max(-85.0511, toLat(y + height / 2)),
+    maxLat: Math.min(85.0511, toLat(y - height / 2)),
+  };
+}
+
 interface MapPageProps {
   /** 来自设置页「在地图上查看」的指令；null 表示没有待执行的指令 */
   command?: MapCommand | null;
@@ -1148,6 +1192,10 @@ interface MapPageProps {
   onViewOnMap?: (query: ParsedQuery) => void;
   /** 发起新查询前清掉地图上的旧高亮 */
   onClearMap?: () => void;
+  /** 阶段32：点击结果行 → 飞到该电厂并单点高亮（由地图页查询框触发） */
+  onFocusPlant?: (plant: PlantFocus) => void;
+  /** 阶段32：当前被聚焦的电厂（用于查询框表格标出选中行） */
+  focusedPlant?: PlantFocus | null;
 }
 
 function MapPage({
@@ -1156,6 +1204,8 @@ function MapPage({
   onResultsStale,
   onViewOnMap,
   onClearMap,
+  onFocusPlant,
+  focusedPlant,
 }: MapPageProps) {
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
@@ -1175,8 +1225,16 @@ function MapPage({
   /** 阶段31：视野上下文的**展示副本**（防抖后更新，给地图页查询框那一行读数用）。
       真正用于解析的是 `viewportRef` —— 刚拖完就提问时它一定是最新的。 */
   const [viewportInfo, setViewportInfo] = useState<QueryContext | null>(null);
+  /** 阶段32：缓存最后一次**有效**的容器尺寸（CSS 像素）—— 切页隐藏时容器为 0，不能拿它算 bbox */
+  const viewSizeRef = useRef<{ w: number; h: number } | null>(null);
   /** 阶段31：上一次「限定当前视野」查询用的范围；视野一旦移动就作废 */
   const lastViewportQueryRef = useRef<ViewportBbox | null>(null);
+  /**
+   * 阶段32：聚焦会引发 **1~2 次**程序化移动 —— flyTo 一次，若动画没飞到位还有一次精确校准。
+   * 这些都不是用户改视野，不能触发「过期清空」，否则刚点出来的单点高亮会被自己抹掉。
+   * 用**计数**而不是布尔：只放过一次的话，第二次仍会把高亮清掉（实测踩到）。
+   */
+  const suppressStaleMovesRef = useRef(0);
   /** 阶段31：通知地图页查询框清空旧结果（视野已移动，结果不再对得上画面） */
   const [queryResetSeq, setQueryResetSeq] = useState(0);
 
@@ -1237,20 +1295,27 @@ function MapPage({
     const map = mapRef.current;
     if (!map || !mapReadyRef.current) return null;
 
-    const b = map.getBounds();
-    let west = b.getWest();
-    let east = b.getEast();
-    if (east - west >= 360) {
-      west = -180;
-      east = 180;
-    }
+    // ⚠️ 容器可见时才更新缓存尺寸；不可见（display:none）时沿用最后一次有效值 ——
+    //    这正是「切页后 bbox 变小」的修法：不再让隐藏状态污染视野上下文。
+    //    可见时读取真实尺寸还能自愈：即使曾缓存过错误尺寸，下一次可见就会被纠正。
+    const el = map.getContainer();
+    const w = el.clientWidth;
+    const h = el.clientHeight;
+    if (w > 0 && h > 0) viewSizeRef.current = { w, h };
+
+    const size = viewSizeRef.current;
+    // 宁可暂时不提供上下文，也不提供错的
+    if (!size) return null;
+
+    const c = map.getCenter();
+    const bbox = boundsFromCamera(c.lng, c.lat, map.getZoom(), size.w, size.h);
 
     const ctx: QueryContext = {
       viewport: {
-        minLon: Number(west.toFixed(6)),
-        minLat: Number(Math.max(-90, b.getSouth()).toFixed(6)),
-        maxLon: Number(east.toFixed(6)),
-        maxLat: Number(Math.min(90, b.getNorth()).toFixed(6)),
+        minLon: Number(bbox.minLon.toFixed(6)),
+        minLat: Number(bbox.minLat.toFixed(6)),
+        maxLon: Number(bbox.maxLon.toFixed(6)),
+        maxLat: Number(bbox.maxLat.toFixed(6)),
       },
       zoom: Number(map.getZoom().toFixed(2)),
       layers: layersForContext(visibleLayersRef.current),
@@ -1267,6 +1332,20 @@ function MapPage({
    * 区域」的误导组合。本函数只负责发现与清空，设置页表格靠 onResultsStale 通知。
    */
   const dropStaleViewportQuery = () => {
+    // ‼️ 阶段32：放过「聚焦自身引起的」那几次移动。
+    //    计数减到 0 的那一次（真正的终点）才刷新基准视野 —— 否则 flyTo 停在半路时
+    //    会把「半路的位置」当成基准，紧接着的校准就会被误判成用户改了视野。
+    if (suppressStaleMovesRef.current > 0) {
+      suppressStaleMovesRef.current -= 1;
+      // ⚠️ 只有**本来就存在**「视野限定查询」时才刷新基准。
+      //    否则会把一个「没限定视野」的查询变成被监视状态 ——
+      //    用户随手一动就会把结果表清掉（实测踩到：点名后切回设置页，表格没了）。
+      if (suppressStaleMovesRef.current === 0 && lastViewportQueryRef.current) {
+        lastViewportQueryRef.current = publishViewport()?.viewport ?? null;
+      }
+      return;
+    }
+
     const previous = lastViewportQueryRef.current;
     if (!previous) return;
 
@@ -1295,6 +1374,60 @@ function MapPage({
     if (cmd.clearOnly) {
       clearHighlight(map);
       setMapNotice(null);
+      return;
+    }
+
+    // ‼️ 阶段32：聚焦到**单个**电厂（点击结果表格行）。
+    //    刻意不重跑 SQL、不清空结果表：「定位」与「查询」是两件事，
+    //    点一行就把整张表换成一座电厂会让用户一下子找不到刚才的列表。
+    //    因此这个分支要放在最前面（也省掉一次数据库往返）。
+    if (cmd.focus) {
+      const f = cmd.focus;
+      clearHighlight(map);
+      // 这次移动是程序发起的，不要让过期检测把它当成“用户改了视野”
+      suppressStaleMovesRef.current = 1;
+      // 高亮半径同样按容量分级，所以把容量一并带上
+      renderHighlight(map, [
+        { lat: f.lat, lon: f.lon, capacity_mw: f.capacityMW },
+      ]);
+
+      // 高亮层是首次高亮时才建的，此刻才存在 —— 补一次可见性设置，
+      // 否则「先关掉电厂图层、再点行定位」会出现只有金环、没有底点的状态。
+      if (map.getLayer(HIGHLIGHT_LAYER_ID)) {
+        map.setLayoutProperty(
+          HIGHLIGHT_LAYER_ID,
+          "visibility",
+          visibleLayersRef.current.includes("电厂") ? "visible" : "none",
+        );
+      }
+
+      map.flyTo({
+        center: [f.lon, f.lat],
+        // 只放大、不缩小：用户可能已经看得比 FOCUS_ZOOM 更近，
+        // 硬拉回 11 反而会倒退。
+        zoom: Math.max(map.getZoom(), FOCUS_ZOOM),
+        duration: 1200,
+      });
+      // ‼️ 保底校准：实测本机 WebView2 里 flyTo 的动画会**在途中停住** ——
+      //    停稳后中心仍偏离目标约 11 km（可复现，且不是“还没飞完”）。
+      //    不管原因在动画还是渲染节流，「结果必须精确落在该电厂坐标上」这一点不能让步，
+      //    所以在这次移动结束时校准一次；偏差在阈值内则是空操作，不会产生抖动。
+      map.once("moveend", () => {
+        const c = map.getCenter();
+        if (Math.abs(c.lng - f.lon) > 1e-4 || Math.abs(c.lat - f.lat) > 1e-4) {
+          // 这一次也是程序发起的移动，同样要让过期检测放过
+          suppressStaleMovesRef.current += 1;
+          map.jumpTo({
+            center: [f.lon, f.lat],
+            zoom: Math.max(map.getZoom(), FOCUS_ZOOM),
+          });
+        }
+      });
+      setMapNotice(
+        `已定位到「${f.name}」` +
+          (f.capacityMW != null ? `（${f.capacityMW} MW）` : "") +
+          "，金色描边就是它；点它可看详情。",
+      );
       return;
     }
 
@@ -2093,6 +2226,10 @@ function MapPage({
 
     map.on("moveend", schedule);
     map.on("zoomend", schedule);
+    // 阶段32：容器尺寸变化（窗口缩放、切页回来）时重算并刷新视野上下文 ——
+    // 否则缓存尺寸与真实尺寸脱节，bbox 会偏
+    const onResize = () => setViewportInfo(publishViewport());
+    map.on("resize", onResize);
     // ‼️ 冷启动补丁（阶段31 收尾）：地图「就绪」只说明图层与数据已挂上，
     //    并**不**代表瓦片已经画出来。挂载时那次统计往往跑在瓦片渲染之前，
     //    queryRenderedFeatures 会返回 0 → 面板停在「线路段 0 段 · 变电站 0 座」
@@ -2107,6 +2244,7 @@ function MapPage({
       if (timer) clearTimeout(timer);
       map.off("moveend", schedule);
       map.off("zoomend", schedule);
+      map.off("resize", onResize);
       map.off("idle", schedule);
     };
   }, [mapReady, visibleLayers]);
@@ -2125,6 +2263,8 @@ function MapPage({
         staleSeq={queryResetSeq}
         onViewOnMap={onViewOnMap}
         onClearMap={onClearMap}
+        onFocusPlant={onFocusPlant}
+        focusedPlant={focusedPlant}
       />
 
       {/* 左上角：图层控制 */}

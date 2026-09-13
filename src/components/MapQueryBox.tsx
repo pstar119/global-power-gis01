@@ -12,11 +12,20 @@
 import { useEffect, useState, type RefObject } from "react";
 import {
   COLUMN_LABELS,
+  MAP_BOX_HIDDEN_COLUMNS,
   readStoredAiConfig,
   runAiQuery,
   type QueryState,
 } from "../lib/aiQuery";
-import { EXAMPLES, formatViewport, type ParsedQuery, type QueryContext } from "../lib/nlq";
+import {
+  EXAMPLES,
+  formatViewport,
+  samePlant,
+  toPlantFocus,
+  type ParsedQuery,
+  type PlantFocus,
+  type QueryContext,
+} from "../lib/nlq";
 import styles from "./MapQueryBox.module.css";
 
 interface MapQueryBoxProps {
@@ -33,6 +42,10 @@ interface MapQueryBoxProps {
   onViewOnMap?: (query: ParsedQuery) => void;
   /** 发起新查询前先清掉地图上的旧高亮 */
   onClearMap?: () => void;
+  /** 阶段32：点击结果行 → 飞到该电厂并单点高亮 */
+  onFocusPlant?: (plant: PlantFocus) => void;
+  /** 当前被聚焦的电厂（由 AppLayout 统一持有，跨页一致） */
+  focusedPlant?: PlantFocus | null;
 }
 
 function MapQueryBox({
@@ -41,6 +54,8 @@ function MapQueryBox({
   staleSeq = 0,
   onViewOnMap,
   onClearMap,
+  onFocusPlant,
+  focusedPlant,
 }: MapQueryBoxProps) {
   const [input, setInput] = useState("");
   const [state, setState] = useState<QueryState>({ status: "idle" });
@@ -76,6 +91,10 @@ function MapQueryBox({
   const ctx = viewport?.viewport;
   const rows =
     state.status === "done" ? state.rows.slice(0, 5) : [];
+  // 经纬度只用于点击定位，不在“简易”表格里显示
+  const columns = rows.length
+    ? Object.keys(rows[0]).filter((k) => !MAP_BOX_HIDDEN_COLUMNS.has(k))
+    : [];
 
   return (
     <section className={styles.box} aria-label="地图查询">
@@ -133,19 +152,44 @@ function MapQueryBox({
             <table className={styles.table}>
               <thead>
                 <tr>
-                  {Object.keys(rows[0]).map((k) => (
+                  {columns.map((k) => (
                     <th key={k}>{COLUMN_LABELS[k] ?? k}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
-                {rows.map((r, i) => (
-                  <tr key={i}>
-                    {Object.keys(rows[0]).map((k) => (
-                      <td key={k}>{String(r[k] ?? "—")}</td>
-                    ))}
-                  </tr>
-                ))}
+                {rows.map((r, i) => {
+                  // 阶段32：有坐标的行才可点（聚合行天然没有 lat/lon）
+                  const focus = toPlantFocus(r);
+                  const active = samePlant(focus, focusedPlant);
+                  return (
+                    <tr
+                      key={i}
+                      className={[
+                        focus ? styles.rowClickable : "",
+                        active ? styles.rowActive : "",
+                      ]
+                        .filter(Boolean)
+                        .join(" ")}
+                      tabIndex={focus ? 0 : -1}
+                      title={focus ? "点击定位到地图并高亮这座电厂" : undefined}
+                      aria-current={active ? "true" : undefined}
+                      onClick={() => {
+                        if (focus) onFocusPlant?.(focus);
+                      }}
+                      onKeyDown={(e) => {
+                        if (focus && (e.key === "Enter" || e.key === " ")) {
+                          e.preventDefault();
+                          onFocusPlant?.(focus);
+                        }
+                      }}
+                    >
+                      {columns.map((k) => (
+                        <td key={k}>{String(r[k] ?? "—")}</td>
+                      ))}
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           )}

@@ -34,13 +34,22 @@ export const COLUMN_LABELS: Record<string, string> = {
   name: "电厂名称",
   country: "国家/地区",
   primary_fuel: "燃料类型",
-  plants: "电厂数量",
   capacity_mw: "装机容量",
+  lat: "纬度",
+  lon: "经度",
+  plants: "电厂数量",
   total_plants: "电厂总数",
   total_capacity_mw: "总装机容量",
   countries: "覆盖国家/地区",
   fuels: "燃料类型数",
 };
+
+/**
+ * 阶段32：地图页「简易」表格里隐藏这两列。
+ * 它们只用于**点击定位**，显示在小框里会把表格撑得很宽、读数变差；
+ * 设置页的完整表格仍然显示（表头「纬度 / 经度」）。
+ */
+export const MAP_BOX_HIDDEN_COLUMNS: ReadonlySet<string> = new Set(["lat", "lon"]);
 
 export type Row = Record<string, unknown>;
 

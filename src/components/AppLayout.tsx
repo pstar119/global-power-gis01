@@ -4,7 +4,12 @@ import TopBar from "./TopBar";
 import MapPage from "../pages/MapPage";
 import StatsPage from "../pages/StatsPage";
 import SettingsPage from "../pages/SettingsPage";
-import type { MapCommand, ParsedQuery, QueryContext } from "../lib/nlq";
+import type {
+  MapCommand,
+  ParsedQuery,
+  PlantFocus,
+  QueryContext,
+} from "../lib/nlq";
 import styles from "./AppLayout.module.css";
 
 const APP_TITLE = "Global Power GIS";
@@ -42,7 +47,31 @@ function AppLayout() {
    * 「地图已经飘到别处、表格还停在那块区域」的误导组合。
    */
   const [staleSeq, setStaleSeq] = useState(0);
-  const handleResultsStale = () => setStaleSeq((n) => n + 1);
+  const handleResultsStale = () => {
+    setStaleSeq((n) => n + 1);
+    // 阶段32：结果都清空了，选中行不能还亮着
+    setFocusedPlant(null);
+  };
+
+  /**
+   * 阶段32：当前被聚焦的那一座电厂（点击结果表格行）。
+   *
+   * ⚠️ 刻意只用 useState，不引入 Zustand / Redux：跨页共享的状态只有
+   *    「一个可选命令 + 一个可选焦点」，为它加一层依赖不划算。
+   * ⚠️ 它只负责**标记表格里的选中行**；真正飞过去靠同一条 MapCommand 通道。
+   */
+  const [focusedPlant, setFocusedPlant] = useState<PlantFocus | null>(null);
+
+  const handleFocusPlant = (plant: PlantFocus) => {
+    commandSeq.current += 1;
+    setMapCommand({
+      intent: "plant_list",
+      id: commandSeq.current,
+      focus: plant,
+    });
+    setFocusedPlant(plant);
+    setActiveKey("map");
+  };
 
   const handleViewOnMap = (query: ParsedQuery) => {
     commandSeq.current += 1;
@@ -63,6 +92,8 @@ function AppLayout() {
       id: commandSeq.current,
       clearOnly: true,
     });
+    // 新查询开始 → 上一次的聚焦已经失效
+    setFocusedPlant(null);
   };
 
   const activeItem =
@@ -92,6 +123,8 @@ function AppLayout() {
               onResultsStale={handleResultsStale}
               onViewOnMap={handleViewOnMap}
               onClearMap={handleClearMap}
+              onFocusPlant={handleFocusPlant}
+              focusedPlant={focusedPlant}
             />
           </div>
 
@@ -106,6 +139,8 @@ function AppLayout() {
               onClearMap={handleClearMap}
               viewportRef={viewportRef}
               staleSeq={staleSeq}
+              onFocusPlant={handleFocusPlant}
+              focusedPlant={focusedPlant}
             />
           </div>
         </section>

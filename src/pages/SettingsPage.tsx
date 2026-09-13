@@ -1,7 +1,7 @@
 import type { RefObject } from "react";
 import AiQueryPanel from "../components/AiQueryPanel";import DbSelfCheck from "../components/DbSelfCheck";
 import GreetSelfCheck from "../components/GreetSelfCheck";
-import type { ParsedQuery, QueryContext } from "../lib/nlq";
+import type { ParsedQuery, PlantFocus, QueryContext } from "../lib/nlq";
 import styles from "./SettingsPage.module.css";
 
 interface SettingGroup {
@@ -40,6 +40,10 @@ interface SettingsPageProps {
   viewportRef?: RefObject<QueryContext | null>;
   /** 阶段31：视野移动导致上次结果失效的信号 */
   staleSeq?: number;
+  /** 阶段32：点击结果行 → 飞到该电厂并单点高亮 */
+  onFocusPlant?: (plant: PlantFocus) => void;
+  /** 阶段32：当前被聚焦的电厂（两个表格据此标出同一行） */
+  focusedPlant?: PlantFocus | null;
 }
 
 function SettingsPage({
@@ -48,6 +52,8 @@ function SettingsPage({
   onClearMap,
   viewportRef,
   staleSeq,
+  onFocusPlant,
+  focusedPlant,
 }: SettingsPageProps) {
   return (
     <div className={styles.page}>
@@ -88,6 +94,8 @@ function SettingsPage({
         onClearMap={onClearMap}
         viewportRef={viewportRef}
         staleSeq={staleSeq}
+        onFocusPlant={onFocusPlant}
+        focusedPlant={focusedPlant}
       />
     </div>
   );
