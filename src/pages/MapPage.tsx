@@ -193,6 +193,19 @@ const OSM_SUBSTATION_LAYER_ID = "osm-substations";
 const OSM_PLANT_LAYER_ID = "osm-plants";
 
 /**
+ * 阶段34：`osm-grid` 输电线路的**透明点击热区**图层 id。
+ *
+ * ⚠️ 为什么必须另建一层：视觉线宽在低缩放级别下会被收得很细
+ *    （z4 只有标称值的 0.3 倍，735kV 档才 0.9px），拿视觉层当热区几乎点不中。
+ * ⚠️ 它与阶段22 那个热区（`LINES_HIT_LAYER_ID`）**不是同一份数据**：
+ *    那个绑在数据库 GeoJSON 演示线上，这个绑在真实 PMTiles 切片上 ——
+ *    地图上看得见的彩色线是后者，这正是之前「看得见、点不着」的根因。
+ */
+const OSM_LINES_HIT_LAYER_ID = "osm-lines-hit";
+/** 点击热区宽度（屏幕像素）：14px 鼠标/手指都能稳定命中，又不会误吞相邻线路 */
+const OSM_LINES_HIT_WIDTH = 14;
+
+/**
  * 阶段30：电压分级开关的显示文案。
  * 键直接用 `vclass` 取值 —— 与 `OSM_LINE_TIERS`、以及瓦片属性一一对应，
  * 不需要任何映射表，也不会出现「开关名对不上图层」的错位。
@@ -256,11 +269,40 @@ type SubstationProperties = {
   voltage: number;
 };
 
-/** 输电线路要素的属性 */
+/**
+ * 输电线路要素的属性。
+ *
+ * ⚠️ 字段名必须与**数据来源**对齐，这里要同时兼容两条路径：
+ *   · PMTiles 切片（`scripts/build_pmtiles.mjs` 的 keepProps）
+ *     → `voltage_kv` / `vclass` / `line_kind` / `osm_id` / `name`
+ *   · 数据库演示线（阶段22 的 SQL 已把 voltage_kv 映射成 voltage）→ `name` / `voltage`
+ *   🔴 曾经的 bug：只读 `props.voltage`，而真实切片里根本没有这个字段名
+ *      （有的是 `voltage_kv`）⇒ 每条线路的 Popup 都显示「未知」。
+ */
 type LineProperties = {
-  name: string;
-  voltage: number;
+  name?: string;
+  /** PMTiles 路径：原始电压数值（kV） */
+  voltage_kv?: number;
+  /** 数据库演示线路径：已由 SQL 映射为 voltage */
+  voltage?: number;
+  /** 电压档位：735+ / 500-734 / 220-499 / <220 / unknown */
+  vclass?: string;
+  /** OSM 的 power=line / cable / minor_line 等 */
+  line_kind?: string;
+  osm_id?: string;
 };
+
+/** 线路类型 → 中文。OSM 里 power=line 是架空线、power=cable 是地下电缆。 */
+const LINE_KIND_LABEL: Record<string, string> = {
+  line: "架空线",
+  cable: "电缆",
+  minor_line: "分支线",
+};
+
+function formatLineKind(kind?: string): string {
+  if (!kind) return "未提供";
+  return LINE_KIND_LABEL[kind] ?? kind;
+}
 
 /**
  * 用原生 DOM 构建 Popup 内容。
@@ -295,6 +337,33 @@ function buildSubstationPopup(props: SubstationProperties): HTMLElement {
 }
 
 /**
+ * 从线要素里取出**一条**折线的坐标。
+ *
+ * ⚠️ 切片里的线可能是 `LineString`，也可能是 `MultiLineString`（实测两者都有）。
+ *    只认 LineString 的后果是：多段线**静默点不到**（点了没反应，也不报错），
+ *    而且拿多段线去算锚点会得到 NaN。
+ *    MultiLineString 取**最长的那一段**作为代表，起点/终点/弹窗锚点都用它。
+ */
+function longestLineCoords(geometry: {
+  type: string;
+  coordinates?: unknown;
+}): Array<[number, number]> {
+  const asLine = (v: unknown) => v as Array<[number, number]>;
+  if (geometry.type === "LineString") {
+    return asLine(geometry.coordinates);
+  }
+  if (geometry.type === "MultiLineString") {
+    const parts = (geometry.coordinates as unknown[]).map(asLine);
+    let best: Array<[number, number]> = [];
+    for (const part of parts) {
+      if (part.length > best.length) best = part;
+    }
+    return best;
+  }
+  return [];
+}
+
+/**
  * 输电线路 Popup：名称 / 电压等级 / 起止点。
  * 起止点从 geometry 的 LineString 坐标读取，不需要额外查询数据库。
  */
@@ -303,11 +372,29 @@ function buildLinePopup(
   coords: ReadonlyArray<[number, number]>,
 ): HTMLElement {
   const [start, end] = coords;
-  return buildPopupFrame(props.name, "未命名线路", [
-    { label: "电压等级", value: formatVoltage(props.voltage), swatch: LINE_COLOR },
+  // ⚠️ 两条数据路径的电压字段名不同，必须都认（见 LineProperties 的说明）
+  const kv = props.voltage_kv ?? props.voltage ?? 0;
+  const tier = props.vclass ? TIER_LABEL[props.vclass] : undefined;
+  // 有精确值就「735 kV（735kV 以上）」，只有档位就显示档位，都没有才是「未知」
+  const voltageText = kv ? `${kv} kV${tier ? `（${tier}）` : ""}` : (tier ?? "未知");
+
+  const rows: PopupRow[] = [
+    { label: "电压等级", value: voltageText, swatch: LINE_COLOR },
+    { label: "线路类型", value: formatLineKind(props.line_kind) },
     { label: "起点", value: start ? formatLngLat(start) : "未提供" },
     { label: "终点", value: end ? formatLngLat(end) : "未提供" },
-  ]);
+  ];
+
+  // 标题兜底（用户拍板）：有 name 用 name；没 name 但有电压 → 「未命名线路」；
+  // 两者都没有 → 「输电线路（电压未知）」
+  const fallback = kv || tier ? "未命名线路" : "输电线路（电压未知）";
+
+  return buildPopupFrame(
+    props.name ?? "",
+    fallback,
+    rows,
+    props.osm_id ? `OSM ID ${props.osm_id}` : undefined,
+  );
 }
 /** Popup 的一行：标签 + 值，可选的色块用于与图例呼应 */
 type PopupRow = { label: string; value: string; swatch?: string };
@@ -324,6 +411,7 @@ function buildPopupFrame(
   title: string,
   fallbackTitle: string,
   rows: readonly PopupRow[],
+  meta?: string,
 ): HTMLElement {
   const root = document.createElement("div");
   root.className = styles.popup;
@@ -354,6 +442,16 @@ function buildPopupFrame(
   }
 
   root.appendChild(list);
+
+  // 阶段34：弱化的元信息（如 OSM ID），放 Popup 最底部，不与主信息抢注意力。
+  // 专业 GIS 工具里带底层 ID 对排查数据问题很关键。
+  if (meta) {
+    const note = document.createElement("p");
+    note.className = styles.popupMeta;
+    note.textContent = meta;
+    root.appendChild(note);
+  }
+
   return root;
 }
 
@@ -1107,6 +1205,27 @@ function addOsmGridLayers(
       "circle-stroke-color": "#e8eef6",
       "circle-stroke-width": 1.2,
       "circle-radius": ["interpolate", ["linear"], ["zoom"], 6, 3, 12, 7],
+    },
+  });
+
+  // ---- 阶段34：输电线路的透明点击热区（真实切片）----
+  // 三层过滤的第一层：热区只允许线要素。`osm-grid` 这个 source 里同时装着
+  // 点（变电站/电厂）与线，不写这条 filter 就会「点到点图层」——
+  // 这正是「点击彩色线却没反应 / 弹出些不对的信息」的典型来源。
+  // 第二层在 click handler 里用 `queryRenderedFeatures({ layers: [...] })` 做点优先判定；
+  // 第三层是 geometry.type 兜底。
+  map.addLayer({
+    id: OSM_LINES_HIT_LAYER_ID,
+    type: "line",
+    source: OSM_SOURCE,
+    ...layerRef,
+    filter: ["==", ["get", "ftype"], "line"],
+    layout: { "line-cap": "round", "line-join": "round" },
+    paint: {
+      // 完全透明：只为扩大命中范围，视觉上不应该多出任何东西
+      "line-color": "#000000",
+      "line-opacity": 0,
+      "line-width": OSM_LINES_HIT_WIDTH,
     },
   });
 }
@@ -1986,6 +2105,14 @@ function MapPage({
                 });
                 if (onPoint.length > 0) return;
 
+                // 阶段34：同一位置若压着**真实切片**上的线路，让给那个 handler。
+                // 两份数据都有线，共用同一个 popup 实例，后执行的会覆盖先执行的；
+                // 显式让真实数据优先，就不依赖委托监听器的执行顺序了。
+                const onOsmLine = map.queryRenderedFeatures(e.point, {
+                  layers: [OSM_LINES_HIT_LAYER_ID],
+                });
+                if (onOsmLine.length > 0) return;
+
                 const feature = e.features?.[0];
                 if (!feature) return;
 
@@ -2006,12 +2133,52 @@ function MapPage({
                   .addTo(map);
               });
 
+              // ---- 阶段34：点击**真实 OSM 切片**上的输电线路 ----
+              // ‼️ 地图上看得见的彩色线属于这一份数据（`osm-grid` 切片），
+              //    阶段22 那个热区绑的是数据库 GeoJSON 演示线，两者不是一回事。
+              map.on("click", OSM_LINES_HIT_LAYER_ID, (e) => {
+                // 「点优先」：热区 14px 远宽于原子站半径（3.5~9px），
+                // 线穿过站点/电厂时热区必然盖住它；不判定就会「想点电厂却弹出线路」。
+                // 两层数据源的点都要查：数据库电厂、切片里的电厂/变电站。
+                const onPoint = map.queryRenderedFeatures(e.point, {
+                  layers: [
+                    PLANT_LAYER_ID,
+                    SUBSTATIONS_LAYER_ID,
+                    OSM_PLANT_LAYER_ID,
+                    OSM_SUBSTATION_LAYER_ID,
+                  ],
+                });
+                if (onPoint.length > 0) return;
+
+                const feature = e.features?.[0];
+                if (!feature) return;
+
+                // 第三层过滤：即便上面漏了，这里再按几何类型兜一次底。
+                // 热区图层理论上只可能返回线，但多一层判断成本极低，
+                // 收益是「永远不会点到点要素」。
+                // ⚠️ 线在切片里有 LineString 与 MultiLineString 两种，都必须接受 ——
+                //    只认前者会让多段线静默点不到。
+                const coords = longestLineCoords(feature.geometry);
+                if (!coords.length) return;
+                // 弹窗挂在线的中点而不是鼠标处：避免点在线段末端时弹窗被视窗裁掉。
+                const anchor = coords[Math.floor(coords.length / 2)];
+                if (!anchor) return;
+
+                popup
+                  .setLngLat(anchor.slice() as [number, number])
+                  .setDOMContent(
+                    buildLinePopup(feature.properties as LineProperties, coords),
+                  )
+                  .addTo(map);
+              });
+
               // ---- 光标反馈 ----
               for (const layerId of [
                 CLUSTER_LAYER_ID,
                 PLANT_LAYER_ID,
                 SUBSTATIONS_LAYER_ID,
                 LINES_HIT_LAYER_ID,
+                OSM_LINES_HIT_LAYER_ID,
               ]) {
                 map.on("mouseenter", layerId, () => {
                   map.getCanvas().style.cursor = "pointer";
@@ -2130,6 +2297,9 @@ function MapPage({
     }
     // 旧的 DB 演示线层（阶段28 已清空）与热区层跟随「任一档开启」
     apply([LINES_LAYER_ID, LINES_HIT_LAYER_ID], LINE_TIER_KEYS.some((k) => on(k)));
+    // 阶段34：真实切片线路的点击热区也必须跟着电压档开关走 ——
+    // 全部关掉时若热区还在，点空白处会弹出「看不见的线路」信息。
+    apply([OSM_LINES_HIT_LAYER_ID], LINE_TIER_KEYS.some((k) => on(k)));
 
     // 聚合数字是 HTML Marker，上面的 setLayoutProperty 管不到它
     if (visibleLayers.includes("电厂")) {

@@ -436,6 +436,16 @@
   border-radius: 2px;
 }
 
+/* 阶段34：弱化的元信息（如 OSM ID），放 Popup 最底部，不与主信息抢注意力。
+   用户拍板：0.75rem + #888。数字等宽，便于逐位比对。 */
+.popupMeta {
+  margin: 6px 0 0;
+  color: #888;
+  font-size: 0.75rem;
+  line-height: 1.3;
+  font-variant-numeric: tabular-nums;
+}
+
 .viewport :global(.maplibregl-popup-content) {
   box-sizing: border-box;
   padding: 10px 12px;
