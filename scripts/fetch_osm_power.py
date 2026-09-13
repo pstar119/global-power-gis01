@@ -319,36 +319,227 @@ def chunk_bbox(
     return out
 
 
+def sample_chunks(
+    chunks: list[tuple[float, float, float, float]], nx: int, ny: int, step: int
+) -> list[tuple[float, float, float, float]]:
+    """按 step 抽样：只保留每 step 列/行交叉处的格子。**块尺寸不变**。
+
+    ⚠️ 为什么要抽样而不是把块放大：Overpass 单次查询上限 180s，
+       块越大越容易撞上限；一旦超时就会被记成失败块，
+       于是「扫描」反而变成了不可靠的测量。保持同尺寸、只减数量才可控。
+    """
+    if step <= 1:
+        return chunks
+    out = []
+    idx = 0
+    for i in range(nx):
+        for j in range(ny):
+            if i % step == 0 and j % step == 0:
+                out.append(chunks[idx])
+            idx += 1
+    return out
+
+
 def bbox_filter(b: tuple[float, float, float, float]) -> str:
     """Overpass 的 bbox 顺序是 (south, west, north, east)。"""
     w, s, e, n = b
     return f"({s:.6f},{w:.6f},{n:.6f},{e:.6f})"
 
 
-def queries_for(b: tuple[float, float, float, float]) -> dict[str, str]:
+def queries_for(b: tuple[float, float, float, float], count_only: bool = False) -> dict[str, str]:
     f = bbox_filter(b)
     head = "[out:json][timeout:180];"
+    # ⚠️ 实测教训（2026-09-13）：`--estimate-only` **不是**廉价探针 —— 它内部仍是 `out geom;`，
+    #    要拉全量几何，单块成本与真抓一模一样（实测 50.3 秒/块）。
+    #    真正廉价的覆盖度探测是 `out count;`：Overpass 只回一个 total 数字，不序列化几何。
+    #    代价是它只给数量、不给电压分布 —— 而「这块到底有没有数据」恰好只需要数量。
+    tail = "out count;" if count_only else "out geom;"
     return {
         "lines": (
             f"{head}"
             f"(way[\"power\"=\"line\"]{f};"
             f"way[\"power\"=\"minor_line\"]{f};"
             f"way[\"power\"=\"cable\"]{f};);"
-            f"out geom;"
+            f"{tail}"
         ),
         "substations": (
             f"{head}"
             f"(node[\"power\"=\"substation\"]{f};"
             f"way[\"power\"=\"substation\"]{f};);"
-            f"out geom;"
+            f"{tail}"
         ),
         "plants": (
             f"{head}"
             f"(node[\"power\"=\"plant\"]{f};"
             f"way[\"power\"=\"plant\"]{f};);"
-            f"out geom;"
+            f"{tail}"
         ),
     }
+
+
+def count_from_payload(payload: dict[str, Any]) -> int | None:
+    """从 `out count;` 的返回体里取数量；**取不到返回 None**。
+
+    结构与正常 out 不同：是一个 `type=count` 的元素，数量在 `tags.total`（还有分开的 ways/nodes）。
+    返回 None 而不是 0 是关键 —— 调用方必须能区分「真的 0 条」与「接口异常」，
+    否则会把异常静默当成「这块没数据」，那正是历史上丢数据的那个坑。
+    """
+    for el in payload.get("elements", []):
+        if el.get("type") == "count":
+            tags = el.get("tags") or {}
+            try:
+                return int(tags.get("total", 0))
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+# ------------------------------------------------------------------
+# 廉价覆盖度扫描（--count-only）
+# 产物与真抓**完全隔离**：不写 _power_*.geojson，也不碰 _progress.json。
+# 否则扫描会把格子标成「已抓完」，真抓时就被静默跳过了。
+# ------------------------------------------------------------------
+def scan_path(out_dir: str, name: str) -> str:
+    return os.path.join(out_dir, f"scan_{name}.json")
+
+
+def load_scan(path: str) -> dict[str, dict[str, int]]:
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        cells = data.get("cells") or {}
+        return {k: v for k, v in cells.items()}
+    except Exception:  # noqa: BLE001 - 扫描结果坏了就重扫，代价很小
+        return {}
+
+
+def save_scan(
+    path: str,
+    bbox: tuple[float, float, float, float],
+    grid: str,
+    cells: dict[str, dict[str, int | None]],
+) -> None:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    totals = {"lines": 0, "substations": 0, "plants": 0}
+    anomalies = 0
+    for v in cells.values():
+        bad = False
+        for k in totals:
+            n = v.get(k)
+            if n is None:
+                bad = True
+            else:
+                totals[k] += int(n)
+        if bad:
+            anomalies += 1
+
+    def cell_sum(v: dict[str, int | None]) -> int:
+        return sum(int(v.get(k) or 0) for k in totals)
+
+    empty = sum(1 for v in cells.values() if cell_sum(v) == 0 and not any(v.get(k) is None for k in totals))
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(
+            {
+                "bbox": list(bbox),
+                "grid": grid,
+                "scanned": len(cells),
+                "empty": empty,
+                "anomalies": anomalies,
+                "totals": totals,
+                "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "note": (
+                    "由 --count-only 生成（out count 只回数量）。与真抓断点隔离，不要用做续抓依据。"
+                    " null = 解析不到数量（异常），**不等于 0**；只有显式 0 才是真空块。"
+                ),
+                "cells": cells,
+            },
+            fh,
+            ensure_ascii=False,
+            indent=2,
+        )
+
+
+def run_count_scan(
+    out_dir: str,
+    name: str,
+    bbox: tuple[float, float, float, float],
+    grid: str,
+    chunks: list[tuple[float, float, float, float]],
+    restart: bool,
+) -> int:
+    path = scan_path(out_dir, name)
+    cells = {} if restart else load_scan(path)
+    if cells:
+        print(f"断点续扫：已有 {len(cells)} 块结果，跳过重扫\n")
+    print(f"=== 覆盖度扫描（out count，只回数量）: {name} ===")
+    print(f"分块   : {len(chunks)} 块 → {path}\n")
+
+    t0 = time.time()
+    done_now = 0
+    for idx, chunk in enumerate(chunks, 1):
+        cw, cs, ce, cn = chunk
+        kkey = f"{cw:.6f},{cs:.6f},{ce:.6f},{cn:.6f}"
+        if kkey in cells:
+            continue
+        rec: dict[str, int | None] = {}
+        for kind, query in queries_for(chunk, count_only=True).items():
+            try:
+                payload = overpass_query(query, verbose=False)
+                rec[kind] = count_from_payload(payload)
+            except Exception as exc:  # noqa: BLE001
+                # ⚠️ 单块失败绝不能中断整场扫描：一次网络抖动就丢掉后面几千块的代价太大。
+                #    记 None（= 未知），绝不能记 0（= 空区域）。
+                rec[kind] = None
+                print(f"    ⚠️ {kind} 查询失败，记作未知：{exc}")
+            time.sleep(QUERY_WAIT)
+        cells[kkey] = rec
+        done_now += 1
+        missing = [k for k, v in rec.items() if v is None]
+        total = sum(int(v or 0) for v in rec.values())
+        flag = "⚠️ " + "、".join(missing) + " 解析异常" if missing else ("—" if total == 0 else "·")
+        print(
+            f"[{idx}/{len(chunks)}] {cw:.3f},{cs:.3f},{ce:.3f},{cn:.3f}  "
+            f"线 {rec['lines'] if rec['lines'] is not None else '?'!s:>6}  "
+            f"站 {rec['substations'] if rec['substations'] is not None else '?'!s:>5}  "
+            f"厂 {rec['plants'] if rec['plants'] is not None else '?'!s:>5}  {flag}"
+        )
+        save_scan(path, bbox, grid, cells)
+        time.sleep(CHUNK_WAIT)
+
+    elapsed = time.time() - t0
+    totals = {"lines": 0, "substations": 0, "plants": 0}
+    anomalies = 0
+    for v in cells.values():
+        bad = False
+        for k in totals:
+            n = v.get(k)
+            if n is None:
+                bad = True
+            else:
+                totals[k] += int(n)
+        if bad:
+            anomalies += 1
+    empty = sum(
+        1
+        for v in cells.values()
+        if sum(int(v.get(k) or 0) for k in totals) == 0 and not any(v.get(k) is None for k in totals)
+    )
+    print()
+    print("=== 扫描完成 ===")
+    print(f"本次新增扫描 : {done_now} 块，累计 {len(cells)}/{len(chunks)}")
+    print(f"耗时         : {elapsed:.1f} 秒（{elapsed / max(1, done_now):.1f} 秒/块）")
+    print(f"空块         : {empty} 个（占 {empty / max(1, len(cells)) * 100:.1f}%）")
+    if anomalies:
+        print(f"⚠️ 解析异常块 : {anomalies} 个 —— 这些块**必须**按「数据未知」处理，不能当空块跳过")
+    print(f"要素总数     : 线 {totals['lines']}  站 {totals['substations']}  厂 {totals['plants']}")
+    nonzero = [sum(int(v.get(k) or 0) for k in totals) for v in cells.values()]
+    nonzero = [n for n in nonzero if n > 0]
+    if nonzero:
+        print(f"非空块均密度 : {sum(nonzero) / len(nonzero):.0f} 个要素/块（{len(nonzero)} 个非空块）")
+    print(f"\n→ {path}")
+    return 0
 
 
 # ------------------------------------------------------------------
@@ -442,8 +633,19 @@ def main() -> int:
     ap.add_argument("--preset", default="yrd", choices=sorted(PRESETS), help="预设范围（默认 yrd 长三角）")
     ap.add_argument("--name", help="产物文件名前缀（默认取 preset 名）")
     ap.add_argument("--grid", default="4x4", help="把 bbox 切成几块抓，格式 NxM（默认 4x4）")
+    ap.add_argument(
+        "--sample-step",
+        type=int,
+        default=1,
+        help="抽样：只抓每 N 列/行交叉处的格子（块尺寸不变；默认 1 = 全抓）",
+    )
     ap.add_argument("--out-dir", default=DEFAULT_OUT_DIR)
     ap.add_argument("--estimate-only", action="store_true", help="只统计数量与电压分布，不写 GeoJSON")
+    ap.add_argument(
+        "--count-only",
+        action="store_true",
+        help="覆盖度扫描：用 out count 只取每块数量（廉价，约 1/5 成本）。绝不写 _power_*.geojson 与断点文件",
+    )
     ap.add_argument("--restart", action="store_true", help="忽略断点记录，从头重抓")
     ap.add_argument("--status", action="store_true", help="只读本地文件报告进度，不发任何网络请求")
     args = ap.parse_args()
@@ -474,11 +676,21 @@ def main() -> int:
         return 2
 
     chunks = chunk_bbox(bbox, nx, ny)
+    total_before = len(chunks)
+    chunks = sample_chunks(chunks, nx, ny, args.sample_step)
+    sampled = len(chunks) != total_before
+    # 扫描必须排在 --status 之前：它既不读也不写断点文件，与真抓是两条独立的路。
+    if args.count_only:
+        return run_count_scan(args.out_dir, name, bbox, f"{nx}x{ny}", chunks, args.restart)
     if args.status:
         return print_status(args.out_dir, name, chunks, load_done_chunks(progress_path(args.out_dir, name)))
     print("=== 阶段28：从 OSM 提取电力设施 ===")
     print(f"范围   : {w},{s},{e},{n}（{'自定义' if args.bbox else args.preset}）")
-    print(f"分块   : {nx}x{ny} = {len(chunks)} 块")
+    if sampled:
+        print(f"分块   : {nx}x{ny} = {total_before} 块，抽样 step={args.sample_step} → 实抓 {len(chunks)} 块")
+        print("⚠️ 抽样模式会留下未覆盖的格子：产物不得当作完整覆盖使用。")
+    else:
+        print(f"分块   : {nx}x{ny} = {len(chunks)} 块")
     print(f"端点   : {OVERPASS_ENDPOINTS[0]}")
     print(f"产物名 : {name}")
     print()
