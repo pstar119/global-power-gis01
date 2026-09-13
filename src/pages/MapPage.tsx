@@ -364,6 +364,23 @@ function longestLineCoords(geometry: {
 }
 
 /**
+ * 阶段36：把 MapLibre 的弹窗元素从地图容器搬到 `.viewport` 这一层（与左侧面板同级）。
+ *
+ * ⚠️ 为什么不能只给弹窗加 z-index：`.mapContainer` 是 `position:absolute; z-index:0` ——
+ *    它自己就是一个**堆叠上下文**，作为它后代的弹窗 z-index 再大，也只能在这个上下文内部排序，
+ *    永远压不过兄弟节点上的浮动面板（`.layerPanel` z-index:1、AI 工作台 z-index:2）。
+ *    反过来把 `.mapContainer` 提到面板之上也不行：不透明的画布会把面板整个盖掉。
+ * ⚠️ 为什么搬家不改位置：`.mapContainer` 是 `inset:0`，与 `.viewport` 的原点完全重合，
+ *    所以 MapLibre 写在元素上的 `transform: translate(...)` 不需要任何换算。
+ * 幂等：已经在目标父节点里就什么都不做；关闭时 MapLibre 自己 `remove()`，与父节点无关。
+ */
+function liftPopup(popup: Popup, overlay: HTMLElement | null | undefined): void {
+  if (!overlay) return;
+  const el = popup.getElement();
+  if (el && el.parentElement !== overlay) overlay.appendChild(el);
+}
+
+/**
  * 输电线路 Popup：名称 / 电压等级 / 起止点。
  * 起止点从 geometry 的 LineString 坐标读取，不需要额外查询数据库。
  */
@@ -1707,6 +1724,12 @@ function MapPage({
       maxWidth: "260px",
     });
 
+    // 阶段36：每次弹窗打开时把它搬到 `.viewport`（地图容器的父节点）——
+    // 用 open 事件挂钩而不是在每个点击处理里手写，这样能覆盖全部弹窗来源（当前 5 处）。
+    popup.on("open", () => {
+      liftPopup(popup, mapContainerRef.current?.parentElement);
+    });
+
     ensureBasemapArchive()
       .then((basemap) => {
         // 等待期间组件可能已卸载（StrictMode 下必然发生一次），此时不能再建图
@@ -2429,7 +2452,11 @@ function MapPage({
   }, [mapReady, visibleLayers]);
 
   return (
-    <div className={`${styles.viewport} ${benchOpen ? styles.withBench : ""}`}>
+    <div
+      className={`${styles.viewport} ${
+        benchOpen ? styles.withBench : styles.railOnly
+      }`}
+    >
       {/* 地图画布容器：铺满视窗，位于悬浮 UI 之下 */}
       <div ref={mapContainerRef} className={styles.mapContainer} />
 
@@ -2610,11 +2637,21 @@ function MapPage({
         <p className={styles.statsTitle}>本视野</p>
         <ul className={styles.statsList}>
           <li>
-            电厂 <b>{viewStats ? viewStats.plants.toLocaleString() : "—"}</b> 座
+            电厂{" "}
+            <b
+              key={viewStats ? viewStats.plants : "none"}
+              className={styles.statValue}
+            >
+              {viewStats ? viewStats.plants.toLocaleString() : "—"}
+            </b>{" "}
+            座
           </li>
           <li>
             线路段{" "}
-            <b>
+            <b
+              key={viewStats ? `${viewStats.lines}-${viewStats.exact}` : "none-l"}
+              className={styles.statValue}
+            >
               {viewStats
                 ? `${viewStats.exact ? "" : "≈"}${viewStats.lines.toLocaleString()}`
                 : "—"}
@@ -2623,7 +2660,10 @@ function MapPage({
           </li>
           <li>
             变电站{" "}
-            <b>
+            <b
+              key={viewStats ? `${viewStats.substations}-${viewStats.exact}` : "none-s"}
+              className={styles.statValue}
+            >
               {viewStats
                 ? `${viewStats.exact ? "" : "≈"}${viewStats.substations.toLocaleString()}`
                 : "—"}

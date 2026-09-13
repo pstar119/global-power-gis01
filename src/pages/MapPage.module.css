@@ -40,6 +40,9 @@
 .layerPanel {
   top: 12px;
   left: 12px;
+  /* 阶段36：折叠/展开 AI 工作台时，两个左侧面板的 left 平滑位移（0.22s）。
+     地图容器本身是 inset:0（一直全宽），所以用户看到的「地图展开」实际就是面板让位。 */
+  transition: left 0.22s ease;
   min-width: 148px;
   padding: 0.375rem;
   /* 阶段30：面板里多了 5 个电压档复选框。窗口最矮可到 700px（见 tauri.conf.json），
@@ -446,6 +449,15 @@
   font-variant-numeric: tabular-nums;
 }
 
+.viewport :global(.maplibregl-popup) {
+  /* 阶段36：弹窗必须压在左侧所有浮动面板之上。
+     ⚠️ 只给弹窗加 z-index 是**没用**的：`.mapContainer`（absolute + z-index:0）自成一个堆叠上下文，
+        作为它后代的弹窗永远超不出这个上下文，压不过兄弟节点面板的 z-index:1/2。
+     所以 JS 里把弹窗 DOM 从地图容器**搬到了 `.viewport`**（与面板同级、原点重合、位置像素级不变），
+     再由这条规则把它抬到 10。删除上面的搬家逻辑后，这条规则就形同虚设。 */
+  z-index: 10;
+}
+
 .viewport :global(.maplibregl-popup-content) {
   box-sizing: border-box;
   padding: 10px 12px;
@@ -529,6 +541,8 @@
   left: 12px;
   bottom: 46px;
   z-index: 1;
+  /* 与图层面板一起平滑位移，保证折叠时两个面板同步右左移动、不错帧 */
+  transition: left 0.22s ease;
   min-width: 148px;
   padding: 0.5rem 0.625rem;
   border: 1px solid var(--gpg-border);
@@ -574,6 +588,38 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* 阶段36：统计数字变化时做一次克制的淡入（纯 CSS，无动画库）。
+   靠 JSX 上的 `key={值}` 触发重挂 → 动画自动重播，不需要任何 JS 计时器；
+   配合上面的 tabular-nums，数字变化不会左右抖动。
+   没做「数字滚动」：那需要 JS 逐帧插值（等于自带一个小动画库），
+   而且统计每 200ms 防抖刷新一次，滚动动画会互相打断、反而更花。 */
+.statValue {
+  display: inline-block;
+  animation: statPop 0.28s ease-out;
+}
+
+@keyframes statPop {
+  from {
+    opacity: 0.55;
+    transform: translateY(1px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* 无障碍：用户要求减少动效时全部关掉 */
+@media (prefers-reduced-motion: reduce) {
+  .layerPanel,
+  .statsPanel {
+    transition: none;
+  }
+  .statValue {
+    animation: none;
+  }
+}
+
 .statsNote {
   margin: 0.375rem 0 0;
   color: var(--gpg-muted);
@@ -586,4 +632,12 @@
 .withBench .layerPanel,
 .withBench .statsPanel {
   left: 352px;
+}
+
+/* 阶段36：工作台**折叠成竖向导轨**时（`.rail` 宽约 32px，left 12px），
+   两个面板必须避开它，否则会与导轨重叠。
+   顺带说明：折叠态 64px 远小于展开态 352px，所以用户看到「地图可用区域变宽了」。 */
+.railOnly .layerPanel,
+.railOnly .statsPanel {
+  left: 64px;
 }
