@@ -2035,6 +2035,8 @@ function MapPage({
     };
 
     const run = () => {
+      // 组件已卸载（或地图已重建）时不要再碰地图
+      if (cancelled) return;
       const t0 = performance.now();
       const zoom = map.getZoom();
       const exact = zoom >= 8;
@@ -2091,6 +2093,12 @@ function MapPage({
 
     map.on("moveend", schedule);
     map.on("zoomend", schedule);
+    // ‼️ 冷启动补丁（阶段31 收尾）：地图「就绪」只说明图层与数据已挂上，
+    //    并**不**代表瓦片已经画出来。挂载时那次统计往往跑在瓦片渲染之前，
+    //    queryRenderedFeatures 会返回 0 → 面板停在「线路段 0 段 · 变电站 0 座」
+    //    且**不会自纠**（除非用户碰一下地图）。所以等地图首次真正空闲再补跑一次。
+    //    `once` 而非 `on`：只需覆盖冷启动那一次，之后靠 moveend 就够了。
+    map.once("idle", schedule);
     // 建图完成后立即算一次，避免面板长时间停在「—」
     schedule();
 
@@ -2099,6 +2107,7 @@ function MapPage({
       if (timer) clearTimeout(timer);
       map.off("moveend", schedule);
       map.off("zoomend", schedule);
+      map.off("idle", schedule);
     };
   }, [mapReady, visibleLayers]);
 
