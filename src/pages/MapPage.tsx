@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type RefObject } from "react";
 import Database from "@tauri-apps/plugin-sql";
 // 阶段26：读取随安装包分发的离线底图。
 // convertFileSrc 把本地绝对路径转成 `asset://localhost/...`（实现了真正的 HTTP Range）；
@@ -27,8 +27,13 @@ import {
   MAX_HIGHLIGHT_POINTS,
   buildBoundsSql,
   buildHighlightSql,
+  viewportChanged,
   type MapCommand,
+  type ParsedQuery,
+  type QueryContext,
+  type ViewportBbox,
 } from "../lib/nlq";
+import MapQueryBox from "../components/MapQueryBox";
 import styles from "./MapPage.module.css";
 
 /** 图层清单：纯 UI 占位，不含任何真实数据 */
@@ -1107,12 +1112,51 @@ function clearHighlight(map: MapLibreMap) {
   if (src) src.setData({ type: "FeatureCollection", features: [] });
 }
 
+/**
+ * 阶段31：把内部可见性键翻译成**给人看**的中文图层名，写进 AI 上下文。
+ *
+ * 输电线路总开关按下时列出具体电压档 —— 「用户在看的电压等级」比「开了输电线路」
+ * 信息量大得多，也正是这个上下文的价值所在。
+ */
+function layersForContext(visible: readonly string[]): string[] {
+  const names: string[] = [];
+  for (const name of LAYERS) {
+    if (!visible.includes(name)) continue;
+    if (name === "输电线路") {
+      const tiers = OSM_LINE_TIERS.filter((t) => visible.includes(t.vclass)).map(
+        (t) => TIER_LABEL[t.vclass] ?? t.vclass,
+      );
+      names.push(tiers.length ? `输电线路（${tiers.join("、")}）` : "输电线路");
+      continue;
+    }
+    names.push(name);
+  }
+  return names;
+}
+
 interface MapPageProps {
   /** 来自设置页「在地图上查看」的指令；null 表示没有待执行的指令 */
   command?: MapCommand | null;
+  /**
+   * 阶段31：地图视野上下文的**唯一写入点**（AppLayout 持有，AI 面板只读）。
+   * 用 ref 而不是 state：拖拽时 moveend 每秒触发多次，不能让整个应用跟着重渲染。
+   */
+  viewportRef?: RefObject<QueryContext | null>;
+  /** 视野移动导致「上次的视野限定查询」失效时通知外层（事件表格据此清空） */
+  onResultsStale?: () => void;
+  /** 地图页查询框提问后，把解析结果交回外层下达指令（复用设置页同一条通道） */
+  onViewOnMap?: (query: ParsedQuery) => void;
+  /** 发起新查询前清掉地图上的旧高亮 */
+  onClearMap?: () => void;
 }
 
-function MapPage({ command = null }: MapPageProps) {
+function MapPage({
+  command = null,
+  viewportRef,
+  onResultsStale,
+  onViewOnMap,
+  onClearMap,
+}: MapPageProps) {
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
 
@@ -1127,6 +1171,14 @@ function MapPage({ command = null }: MapPageProps) {
   const pendingCommandRef = useRef<MapCommand | null>(null);
   /** 给用户看的执行结果提示 */
   const [mapNotice, setMapNotice] = useState<string | null>(null);
+
+  /** 阶段31：视野上下文的**展示副本**（防抖后更新，给地图页查询框那一行读数用）。
+      真正用于解析的是 `viewportRef` —— 刚拖完就提问时它一定是最新的。 */
+  const [viewportInfo, setViewportInfo] = useState<QueryContext | null>(null);
+  /** 阶段31：上一次「限定当前视野」查询用的范围；视野一旦移动就作废 */
+  const lastViewportQueryRef = useRef<ViewportBbox | null>(null);
+  /** 阶段31：通知地图页查询框清空旧结果（视野已移动，结果不再对得上画面） */
+  const [queryResetSeq, setQueryResetSeq] = useState(0);
 
   // 图层可见性：纯视觉开关，不加载任何数据
   // 阶段30：除三个大开关外，还包含 4 个电压分级键（「电压未知」不在其中 = 默认关闭）
@@ -1174,6 +1226,62 @@ function MapPage({ command = null }: MapPageProps) {
   );
 
   /**
+   * 阶段31：发布「当前视野 + 已选图层」上下文，供 AI 解析「当前视野」类问题。
+   *
+   * ⚠️ 写 ref 不触发重渲染 —— 拖拽时 moveend 每秒触发多次，走 state 会让整棵应用
+   *    （含 3.5 万个点与聚合索引的地图）在最频繁交互的时刻反复重渲染。
+   * ⚠️ 跨 180° 经线、或 z<2 绕地球一圈时 `east - west >= 360`，BETWEEN 会变成
+   *    反区间（min > max）而永远查不到东西，所以直接退化为全球、不加视野约束。
+   */
+  const publishViewport = (): QueryContext | null => {
+    const map = mapRef.current;
+    if (!map || !mapReadyRef.current) return null;
+
+    const b = map.getBounds();
+    let west = b.getWest();
+    let east = b.getEast();
+    if (east - west >= 360) {
+      west = -180;
+      east = 180;
+    }
+
+    const ctx: QueryContext = {
+      viewport: {
+        minLon: Number(west.toFixed(6)),
+        minLat: Number(Math.max(-90, b.getSouth()).toFixed(6)),
+        maxLon: Number(east.toFixed(6)),
+        maxLat: Number(Math.min(90, b.getNorth()).toFixed(6)),
+      },
+      zoom: Number(map.getZoom().toFixed(2)),
+      layers: layersForContext(visibleLayersRef.current),
+    };
+
+    if (viewportRef) viewportRef.current = ctx;
+    return ctx;
+  };
+
+  /**
+   * 阶段31：视野移动后，上一个「限定当前视野」的结果已对不上当前画面。
+   *
+   * 必须把高亮与表格**一起**清掉 —— 否则会留下「地图飘走了、表格还停在那块
+   * 区域」的误导组合。本函数只负责发现与清空，设置页表格靠 onResultsStale 通知。
+   */
+  const dropStaleViewportQuery = () => {
+    const previous = lastViewportQueryRef.current;
+    if (!previous) return;
+
+    const now = publishViewport()?.viewport;
+    if (!now || !viewportChanged(previous, now)) return;
+
+    lastViewportQueryRef.current = null;
+    const map = mapRef.current;
+    if (map) clearHighlight(map);
+    setMapNotice("视野已移动：上次「当前视野」查询的结果已清空，请重新查询。");
+    setQueryResetSeq((n) => n + 1);
+    onResultsStale?.();
+  };
+
+  /**
    * 执行地图指令：飞到目标区域 + 高亮匹配的电厂。
    * ⚠️ 筛选值全部走 SQL 参数绑定（见 nlq.ts 的 buildBoundsSql / buildHighlightSql），
    *    不拼接任何用户输入。
@@ -1196,6 +1304,13 @@ function MapPage({ command = null }: MapPageProps) {
       // 全球概览：飞回默认视图。全球不做单点高亮 —— 3.5 万个点毫无意义且会卡
       if (cmd.intent === "global_stats") {
         clearHighlight(map);
+        // ‼️ 阶段31：带了「当前视野」就**不能**飞回全球视图 —— 用户正看着那块区域，
+        //    把他拽回全球会让视野限定的结果立刻变得毫无意义。数字在查询框里看。
+        if (cmd.viewport) {
+          lastViewportQueryRef.current = cmd.viewport;
+          setMapNotice("当前视野总量概览：数字见查询结果，视角保持不变。");
+          return;
+        }
         setMapNotice("已回到全球视图（全球概览不做单点高亮）");
         map.flyTo({
           center: INITIAL_CENTER,
@@ -1205,17 +1320,22 @@ function MapPage({ command = null }: MapPageProps) {
         return;
       }
 
-      // 1) 用**数据算出来的** bbox 决定飞到哪里，代码里不硬编码任何国家边界
-      const boundsPlan = buildBoundsSql(cmd);
-      const boundsRows = (await db.select(
-        boundsPlan.sql,
-        boundsPlan.params,
-      )) as Array<{
+      // ‼️ 阶段31：限定「当前视野」的查询**不移动地图**。
+      //    用户就在看那块区域，fitBounds 反而会因 padding 把视野收窄 ——
+      //    而视野一变，刚得到的结果会立刻被判成过期（自己把自己清掉）。
+      //    所以直接跳过取 bbox 这一步：boundsRows 为空，下面的飞行分支自然不执行。
+      lastViewportQueryRef.current = cmd.viewport ?? null;
+      let boundsRows: Array<{
         min_lon: number | null;
         min_lat: number | null;
         max_lon: number | null;
         max_lat: number | null;
-      }>;
+      }> = [];
+      if (!cmd.viewport) {
+        // 1) 用**数据算出来的** bbox 决定飞到哪里，代码里不硬编码任何国家边界
+        const boundsPlan = buildBoundsSql(cmd);
+        boundsRows = (await db.select(boundsPlan.sql, boundsPlan.params)) as typeof boundsRows;
+      }
 
       const b = boundsRows[0];
       if (
@@ -1273,10 +1393,11 @@ function MapPage({ command = null }: MapPageProps) {
           visibleLayersRef.current.includes("电厂") ? "visible" : "none",
         );
       }
+      const scope = cmd.viewport ? "（限定当前视野）" : "";
       setMapNotice(
         points.length > 0
-          ? `已高亮 ${points.length} 个匹配的电厂（金色描边）`
-          : "没有匹配到电厂",
+          ? `已高亮 ${points.length} 个匹配的电厂${scope}（金色描边）`
+          : `没有匹配到电厂${scope}`,
       );
     } catch (err) {
       console.error("[MapPage] 执行地图指令失败", err);
@@ -1284,8 +1405,7 @@ function MapPage({ command = null }: MapPageProps) {
     }
   };
 
-  /** 只有「地图已就绪 + 确实有待处理命令」时才真正执行 */
-  const tryApplyCommand = () => {
+  /** 只有「地图已就绪 + 确实有待处理命令」时才真正执行 */  const tryApplyCommand = () => {
     const pending = pendingCommandRef.current;
     if (!pending || !mapReadyRef.current || !mapRef.current) return;
     if (pending.id === appliedIdRef.current) return;
@@ -1875,6 +1995,10 @@ function MapPage({ command = null }: MapPageProps) {
     } else {
       labelApiRef.current?.clear();
     }
+
+    // 阶段31：图层开关变化也要立刻反映到 AI 上下文里 ——
+    // 「用户在看哪些电压等级」正是这个上下文的价值所在
+    setViewportInfo(publishViewport());
   }, [visibleLayers]);
 
   /**
@@ -1948,6 +2072,8 @@ function MapPage({ command = null }: MapPageProps) {
           if (ms > 50) {
             console.warn(`[MapPage] ⚠️ 视野统计超过 50ms 护栏：${ms.toFixed(1)}ms`);
           }
+          // 与统计数字放在同一次状态更新里，避免每帧多渲一次
+          setViewportInfo(publishViewport());
           setViewStats({ plants, lines, substations, exact });
         })
         .catch((err: unknown) => {
@@ -1956,6 +2082,9 @@ function MapPage({ command = null }: MapPageProps) {
     };
 
     const schedule = () => {
+      // 阶段31：先同步发布视野（提问瞬间要读到最新值，不能等防抖），
+      // 并顺手把「上一个视野限定查询」判为过期并清空
+      dropStaleViewportQuery();
       if (timer) clearTimeout(timer);
       timer = setTimeout(run, 200);
     };
@@ -1977,6 +2106,17 @@ function MapPage({ command = null }: MapPageProps) {
     <div className={styles.viewport}>
       {/* 地图画布容器：铺满视窗，位于悬浮 UI 之下 */}
       <div ref={mapContainerRef} className={styles.mapContainer} />
+
+      {/* 阶段31：地图页浮动查询框。
+          GIS 用户是**看着地图提问**的，放在地图页才符合直觉；
+          完整的 AI 配置与 CSV 导出仍然在设置页。 */}
+      <MapQueryBox
+        viewport={viewportInfo}
+        viewportRef={viewportRef}
+        staleSeq={queryResetSeq}
+        onViewOnMap={onViewOnMap}
+        onClearMap={onClearMap}
+      />
 
       {/* 左上角：图层控制 */}
       <section className={styles.layerPanel} aria-label="图层控制">

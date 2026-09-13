@@ -19,6 +19,72 @@
 import { COUNTRY_ALIASES, countryLabel } from "./country";
 import { FUEL_LABELS } from "./fuel";
 
+/**
+ * 地图视野快照（WGS84，单位度）。
+ * 由地图页在 moveend / 图层变化时写入，解析时作为「空间上下文」随问题下发。
+ */
+export interface ViewportBbox {
+  minLon: number;
+  minLat: number;
+  maxLon: number;
+  maxLat: number;
+}
+
+/**
+ * 解析时随问题一起下发的上下文（阶段31：空间智能）。
+ *
+ * ⚠️ 坐标**只由地图页写入**，模型永远不产出坐标 —— 「要不要限定在当前视野」
+ *    交给模型判断（输出布尔 inViewport），「视野到底是哪块矩形」由我们填。
+ *    这样提示词注入与幻觉都不可能把查询框挪到别处。
+ */
+export interface QueryContext {
+  viewport?: ViewportBbox;
+  zoom?: number;
+  /**
+   * 用户当前勾选的图层显示名，如 `["电厂","变电站","220-499kV"]`。
+   * ⚠️ 仅供提示词描述现状，**不参与 SQL** —— 本地库里只有电厂表，
+   *    线路/变电站数据在 PMTiles 瓦片里，SQL 查不到。
+   */
+  layers?: readonly string[];
+}
+
+/** 「当前视野」类空间指代（本地规则引擎用；云端由提示词判定） */
+const VIEWPORT_WORDS: readonly string[] = [
+  "当前视野",
+  "视野内",
+  "视野里",
+  "这个区域",
+  "该区域",
+  "当前区域",
+  "当前范围",
+  "屏幕内",
+  "屏幕里",
+  "画面里",
+  "这一片",
+  "这里",
+];
+
+/** 视野是否发生了「足以让上次结果失效」的变化（约 10 米级，避免浮点抖动误清） */
+export function viewportChanged(
+  a: ViewportBbox,
+  b: ViewportBbox,
+  eps = 1e-4,
+): boolean {
+  return (
+    Math.abs(a.minLon - b.minLon) > eps ||
+    Math.abs(a.maxLon - b.maxLon) > eps ||
+    Math.abs(a.minLat - b.minLat) > eps ||
+    Math.abs(a.maxLat - b.maxLat) > eps
+  );
+}
+
+/** 给人看的视野读数，例如 `116.4°E~122.0°E, 29.9°N~32.7°N` */
+export function formatViewport(b: ViewportBbox): string {
+  const lon = (v: number) => `${Math.abs(v).toFixed(1)}°${v >= 0 ? "E" : "W"}`;
+  const lat = (v: number) => `${Math.abs(v).toFixed(1)}°${v >= 0 ? "N" : "S"}`;
+  return `${lon(b.minLon)}~${lon(b.maxLon)}, ${lat(b.minLat)}~${lat(b.maxLat)}`;
+}
+
 /** 燃料别名 -> WRI 的 primary_fuel 取值 */
 const FUEL_ALIASES: ReadonlyArray<readonly [string, string]> = [
   ["煤电", "Coal"],
@@ -60,6 +126,14 @@ export interface ParsedQuery {
   country?: string;
   /** 取前 N 名 */
   limit?: number;
+  /**
+   * 只查「当前视野内」。
+   *
+   * ⚠️ 四个坐标是**解析那一刻的快照**，随 `MapCommand` 一起交给地图页 ——
+   *    否则地图页重新生成 buildBoundsSql / buildHighlightSql 时就拿不到范围，
+   *    高亮会退化成全球范围。也正因为是快照，表格里的行与地图上的金圈必然一致。
+   */
+  viewport?: ViewportBbox;
 }
 
 export interface SqlPlan {
@@ -97,6 +171,8 @@ export type ParseResult =
 
 /** 界面上提供的示例问法 */
 export const EXAMPLES: readonly string[] = [
+  "当前视野里最大的5个电厂",
+  "这个区域有多少电厂",
   "全球煤电装机容量排名前5的国家",
   "全球前10大电厂",
   "中国最大的5个水电站",
@@ -180,31 +256,27 @@ function decideIntent(
  * 导出它是为了下一阶段接大模型时能单独复用（模型只输出 ParsedQuery）。
  */
 export function buildSql(query: ParsedQuery): SqlPlan {
-  const { intent, fuel, country, limit } = query;
+  // ⚠️ 阶段31 重构：fuel / country / viewport 的判定全部下沉到 buildWhere，
+  //    四个 intent 共用它。之前只有 plant_list 用它，另外三条各写各的 ——
+  //    那种写法下加「当前视野」极容易只改一处、其余三处静默失效。
+  const { intent, limit } = query;
 
   if (intent === "global_stats") {
+    // ⚠️ 四个子查询**各自**都要带 WHERE（params 也要重复四份），漏一个就会
+    //    「电厂数按视野算、装机容量却按全球算」，数字自相矛盾。
+    const { where, params } = buildWhere(query);
     return {
-      sql: `SELECT (SELECT COUNT(*)                     FROM power_plants) AS total_plants,
-       (SELECT SUM(capacity_mw)             FROM power_plants) AS total_capacity_mw,
-       (SELECT COUNT(DISTINCT country)      FROM power_plants) AS countries,
-       (SELECT COUNT(DISTINCT primary_fuel) FROM power_plants) AS fuels`,
-      params: [],
+      sql: `SELECT (SELECT COUNT(*)                          FROM power_plants ${where}) AS total_plants,
+       (SELECT COALESCE(SUM(capacity_mw), 0)     FROM power_plants ${where}) AS total_capacity_mw,
+       (SELECT COUNT(DISTINCT country)           FROM power_plants ${where}) AS countries,
+       (SELECT COUNT(DISTINCT primary_fuel)      FROM power_plants ${where}) AS fuels`,
+      params: [...params, ...params, ...params, ...params],
     };
   }
 
   if (intent === "country_stats") {
-    const where: string[] = [];
-    const params: unknown[] = [];
-
-    if (fuel) {
-      where.push("primary_fuel = ?");
-      params.push(fuel);
-    }
-    if (country) {
-      where.push("country = ?");
-      params.push(country);
-    }
-    const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+    const { where, params } = buildWhere(query);
+    const whereSql = where;
     const limitSql = limit ? " LIMIT ?" : "";
     if (limit) params.push(limit);
 
@@ -222,7 +294,7 @@ ORDER BY capacity_mw DESC${limitSql}`,
 
   // plant_list：按单个电厂列出，容量降序
   if (intent === "plant_list") {
-    const { where, params } = buildFilter(query);
+    const { where, params } = buildWhere(query, { requireCoords: true });
     // ⚠️ 强制带上 LIMIT。limit 缺省时用默认值，绝不生成无 LIMIT 的查询 ——
     //    那会把 34936 行明细全拉回前端并在表格里渲染。
     return {
@@ -239,18 +311,8 @@ LIMIT ?`,
   }
 
   // fuel_stats
-  const where: string[] = [];
-  const params: unknown[] = [];
-
-  if (country) {
-    where.push("country = ?");
-    params.push(country);
-  }
-  if (fuel) {
-    where.push("primary_fuel = ?");
-    params.push(fuel);
-  }
-  const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const { where, params } = buildWhere(query);
+  const whereSql = where;
 
   return {
     sql: `SELECT primary_fuel,
@@ -268,11 +330,16 @@ ORDER BY capacity_mw DESC`,
 export function describeQuery(query: ParsedQuery): string {
   const fuelText = query.fuel ? (FUEL_LABELS[query.fuel] ?? query.fuel) : null;
   const countryText = query.country ? countryLabel(query.country) : null;
+  // 阶段31：视野限定要**如实说出来** —— 否则用户看到 3 座电厂会以为是数据错误
+  const scope = query.viewport ? "当前视野内" : null;
 
-  if (query.intent === "global_stats") return "全球总量概览";
+  if (query.intent === "global_stats") {
+    return scope ? "当前视野总量概览" : "全球总量概览";
+  }
 
   if (query.intent === "plant_list") {
     const parts = ["按单个电厂列出（容量降序）"];
+    if (scope) parts.push(`限定「${scope}」`);
     if (fuelText) parts.push(`只统计「${fuelText}」`);
     if (countryText) parts.push(`限定国家/地区「${countryText}」`);
     parts.push(`取容量前 ${query.limit ?? DEFAULT_PLANT_LIMIT} 座`);
@@ -283,16 +350,21 @@ export function describeQuery(query: ParsedQuery): string {
   if (query.intent === "country_stats") {
     parts.push(fuelText ? `按国家聚合 · 只统计「${fuelText}」` : "按国家聚合");
     if (countryText) parts.push(`限定国家/地区「${countryText}」`);
+    if (scope) parts.push(`限定「${scope}」`);
     if (query.limit) parts.push(`取容量前 ${query.limit} 名`);
   } else {
     parts.push(countryText ? `按燃料聚合 · 只统计「${countryText}」` : "按燃料聚合");
     if (fuelText) parts.push(`限定燃料「${fuelText}」`);
+    if (scope) parts.push(`限定「${scope}」`);
   }
   return parts.join("，");
 }
 
 /** 把一句自然语言解析成结构化查询 + 可直接执行的 SQL */
-export function parseNaturalQuery(input: string): ParseResult {
+export function parseNaturalQuery(
+  input: string,
+  ctx?: QueryContext | null,
+): ParseResult {
   const raw = input.trim();
   if (!raw) {
     return {
@@ -303,6 +375,19 @@ export function parseNaturalQuery(input: string): ParseResult {
   }
 
   const text = raw.toLowerCase();
+
+  // 阶段31：先判空间指代。命中但拿不到视野时必须**如实拒绝** ——
+  // 静默按全球查是最误导的失败方式（用户会以为「这个区域」生效了）。
+  const wantsViewport = VIEWPORT_WORDS.some((w) => text.includes(w));
+  if (wantsViewport && !ctx?.viewport) {
+    return {
+      ok: false,
+      message:
+        "这个问题需要「当前视野」，但地图还没上报视野（或地图尚未就绪）。请先切到地图页稍等片刻再试。",
+      suggestions: EXAMPLES,
+    };
+  }
+
   const fuel = matchAlias(text, FUEL_ALIASES);
   const country = matchAlias(text, COUNTRY_ALIASES);
   const limit = findLimit(text);
@@ -321,6 +406,7 @@ export function parseNaturalQuery(input: string): ParseResult {
   if (fuel) query.fuel = fuel;
   if (country) query.country = country;
   if (limit) query.limit = limit;
+  if (wantsViewport && ctx?.viewport) query.viewport = ctx.viewport;
 
   return {
     ok: true,
@@ -331,16 +417,35 @@ export function parseNaturalQuery(input: string): ParseResult {
 }
 
 /**
- * 构造筛选条件（与 buildSql 保持一致）。
+ * 单一来源的 WHERE 构造（阶段31：四个 intent 全部改用它）。
+ *
+ * ⚠️ `requireCoords` 默认 false 是**故意的**：实测 34,936 行里约 1,012 行没有坐标，
+ *    给 country/fuel/global 补上 `lat IS NOT NULL` 会让用户看到的全球电厂总数
+ *    凭空少一千，看起来就像回归 bug。
+ *    而带 viewport 时必然要求有坐标 —— 由 BETWEEN 隐含，不需重复判断。
+ *
  * ⚠️ 值一律走参数绑定，绝不拼接用户输入。
  */
-function buildFilter(query: ParsedQuery): {
+function buildWhere(
+  query: ParsedQuery,
+  opts?: { requireCoords?: boolean },
+): {
   where: string;
   params: unknown[];
 } {
-  // 没有坐标的点无法在地图上定位，所有地图相关查询都先排除
-  const conds: string[] = ["lat IS NOT NULL", "lon IS NOT NULL"];
+  const conds: string[] = [];
   const params: unknown[] = [];
+
+  if (opts?.requireCoords) {
+    // 没有坐标的点无法在地图上定位，所有地图相关查询都先排除
+    conds.push("lat IS NOT NULL", "lon IS NOT NULL");
+  }
+
+  if (query.viewport) {
+    const v = query.viewport;
+    conds.push("lon BETWEEN ? AND ?", "lat BETWEEN ? AND ?");
+    params.push(v.minLon, v.maxLon, v.minLat, v.maxLat);
+  }
 
   if (query.fuel) {
     conds.push("primary_fuel = ?");
@@ -351,7 +456,10 @@ function buildFilter(query: ParsedQuery): {
     params.push(query.country);
   }
 
-  return { where: `WHERE ${conds.join(" AND ")}`, params };
+  return {
+    where: conds.length ? `WHERE ${conds.join(" AND ")}` : "",
+    params,
+  };
 }
 
 /**
@@ -359,7 +467,7 @@ function buildFilter(query: ParsedQuery): {
  * bbox 完全由数据算出，不在代码里硬编码任何国家边界。
  */
 export function buildBoundsSql(query: ParsedQuery): SqlPlan {
-  const { where, params } = buildFilter(query);
+  const { where, params } = buildWhere(query, { requireCoords: true });
 
   // ⚠️ plant_list 是「取前 N 座」，bbox 必须只覆盖这 N 座。
   //    否则「全球前 10 大电厂」会去算全部 34936 个电厂的 bbox（≈ 整个地球），
@@ -402,7 +510,7 @@ function plantListLimit(query: ParsedQuery): number {
  *    反而看不出谁更大。
  */
 export function buildHighlightSql(query: ParsedQuery): SqlPlan {
-  const { where, params } = buildFilter(query);
+  const { where, params } = buildWhere(query, { requireCoords: true });
 
   // ⚠️ 同理：plant_list 的高亮只能是前 N 座，并且必须按容量降序取。
   //    不做这个限制的话，「全球前10大电厂」会去拉全部 34936 个点，

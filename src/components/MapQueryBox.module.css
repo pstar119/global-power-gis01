@@ -1,0 +1,131 @@
+/* ---------- 地图页浮动查询框（阶段31） ----------
+   位置：地图顶部居中。左上有图层控制、右上有缩放控件、左下有视野统计、
+   右下有图例、底部中间有指令提示 —— 只剩顶部中间是空的，也是 GIS 搜索框的惯例位置。 */
+
+.box {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2;
+  width: min(520px, calc(100% - 32px));
+  padding: 0.5rem 0.625rem;
+  border: 1px solid var(--gpg-border);
+  border-radius: 8px;
+  background-color: rgba(37, 37, 38, 0.94);
+  -webkit-backdrop-filter: blur(4px);
+  backdrop-filter: blur(4px);
+  color: var(--gpg-text);
+  font-size: 0.8125rem;
+}
+
+.row {
+  display: flex;
+  gap: 0.375rem;
+}
+
+.input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0.375rem 0.5rem;
+  border: 1px solid var(--gpg-border);
+  border-radius: 4px;
+  background-color: rgba(0, 0, 0, 0.35);
+  color: var(--gpg-text);
+  font: inherit;
+  font-size: 0.8125rem;
+}
+
+.input::placeholder {
+  color: var(--gpg-muted);
+}
+
+.input:focus {
+  outline: none;
+  border-color: #4daafc;
+}
+
+.btn {
+  flex: 0 0 auto;
+  padding: 0.375rem 0.75rem;
+  border: 1px solid var(--gpg-border);
+  border-radius: 4px;
+  background-color: transparent;
+  color: var(--gpg-text);
+  font: inherit;
+  font-size: 0.8125rem;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+/* 显式覆盖 App.css 的 `button:hover`(0,1,1) —— 本选择器 (0,2,0) 优先级更高 */
+.btn:hover:not(:disabled) {
+  background-color: var(--gpg-hover);
+}
+
+.btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+/* 只读的视野上下文读数 */
+.ctx {
+  margin: 0.375rem 0 0;
+  color: var(--gpg-muted);
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+
+.status {
+  margin: 0.375rem 0 0;
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+
+.err {
+  color: #ffb4a2;
+}
+
+.table {
+  width: 100%;
+  margin-top: 0.375rem;
+  border-collapse: collapse;
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+
+.table th,
+.table td {
+  padding: 0.125rem 0.25rem;
+  border-bottom: 1px solid var(--gpg-border);
+  text-align: left;
+}
+
+.table th {
+  color: var(--gpg-muted);
+  font-weight: 600;
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+  margin-top: 0.5rem;
+}
+
+.chip {
+  padding: 0.125rem 0.5rem;
+  border: 1px solid var(--gpg-border);
+  border-radius: 999px;
+  background-color: transparent;
+  color: var(--gpg-muted);
+  font: inherit;
+  font-size: 0.7rem;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.chip:hover {
+  background-color: var(--gpg-hover);
+  color: var(--gpg-text);
+}

@@ -1,5 +1,4 @@
-import { useEffect, useState } from "react";
-import Database from "@tauri-apps/plugin-sql";
+import { useEffect, useState, type RefObject } from "react";
 import { countryLabel } from "../lib/country";
 import { fuelLabel } from "../lib/fuel";
 import {
@@ -9,58 +8,26 @@ import {
   PROVIDER_LABELS,
   PROVIDER_ORDER,
   isConfigComplete,
-  parseQuery,
   testConnection,
   type AiConfig,
   type Provider,
 } from "../lib/llm";
-import { EXAMPLES, parseNaturalQuery, type ParseResult, type ParsedQuery } from "../lib/nlq";
+import {
+  EXAMPLES,
+  formatViewport,
+  type ParsedQuery,
+  type QueryContext,
+} from "../lib/nlq";
+// 阶段31：解析 / SQL / 取数与地图页浮动查询框**完全共用**，避免两份实现分道扬镳
+import {
+  COLUMN_LABELS,
+  LS_KEYS,
+  runAiQuery,
+  type QueryState,
+} from "../lib/aiQuery";
 import styles from "./AiQueryPanel.module.css";
 
-/** 必须与 src-tauri/src/lib.rs 里的 DB_URL 一致 */
-const DB_URL = "sqlite:global_power_gis.db";
-
-/**
- * AI 配置存在 localStorage。
- * ⚠️ 刻意**不用 SQLite**：那要放开 capabilities 里的 `sql:allow-execute`，
- *    会毁掉「前端只能读库」这条防线，代价远大于收益。
- * ⚠️ 均为**明文**存储，界面上会明确提醒用户。
- */
-const LS_KEYS = {
-  enabled: "gpg.ai.enabled",
-  provider: "gpg.ai.provider",
-  apiKey: "gpg.ai.apiKey",
-  // 本地 Ollama 的配置用**独立** key，与云端互不干扰：
-  // 从 Ollama 切回 DeepSeek 时 API Key 依然在，反之亦然。
-  ollamaUrl: "gpg.ai.ollamaUrl",
-  ollamaModel: "gpg.ai.ollamaModel",
-} as const;
-
-/** 结果列名 -> 中文表头 */
-const COLUMN_LABELS: Record<string, string> = {
-  name: "电厂名称",
-  country: "国家/地区",
-  primary_fuel: "燃料类型",
-  plants: "电厂数量",
-  capacity_mw: "装机容量",
-  total_plants: "电厂总数",
-  total_capacity_mw: "总装机容量",
-  countries: "覆盖国家/地区",
-  fuels: "燃料类型数",
-};
-
 type Row = Record<string, unknown>;
-
-type QueryState =
-  | { status: "idle" }
-  | { status: "running" }
-  | { status: "rejected"; message: string; suggestions: readonly string[] }
-  | {
-      status: "done";
-      result: Extract<ParseResult, { ok: true }>;
-      rows: Row[];
-    }
-  | { status: "error"; message: string };
 
 /**
  * CSV 单元格转义（RFC 4180）。
@@ -173,12 +140,30 @@ interface AiQueryPanelProps {
   onViewOnMap?: (query: ParsedQuery) => void;
   /** 发起新查询前，先把地图上的旧高亮清掉 */
   onClearMap?: () => void;
+  /**
+   * 当前视野上下文（阶段31）。
+   * 用 ref 传：提问瞬间读权威值，不受展示副本的防抖延迟影响。
+   */
+  viewportRef?: RefObject<QueryContext | null>;
+  /** 值变化 = 视野移动导致上次结果失效，应清空表格 */
+  staleSeq?: number;
 }
 
-function AiQueryPanel({ onViewOnMap, onClearMap }: AiQueryPanelProps) {
+function AiQueryPanel({
+  onViewOnMap,
+  onClearMap,
+  viewportRef,
+  staleSeq = 0,
+}: AiQueryPanelProps) {
   const [input, setInput] = useState("");
   const [state, setState] = useState<QueryState>({ status: "idle" });
   const [exportState, setExportState] = useState<ExportState>(null);
+
+  // 阶段31：地图视野移动后，上次的「当前视野」查询结果已经对不上当前画面。
+  // 表格不跟着清掉的话，用户会看到「地图飘走了、表格还停在那块区域」的误导组合。
+  useEffect(() => {
+    if (staleSeq > 0) setState({ status: "idle" });
+  }, [staleSeq]);
 
   // ---- AI 配置（懒初始化自 localStorage，避免每帧都读） ----
   const [useAi, setUseAi] = useState(
@@ -250,40 +235,30 @@ function AiQueryPanel({ onViewOnMap, onClearMap }: AiQueryPanelProps) {
     setExportState(null);
     setState({ status: "running" });
 
-    // 唯一的分叉点：开关开启且配置齐备就走大模型，否则回退到本地规则引擎
-    const parsed = aiReady
-      ? await parseQuery(question, aiConfig)
-      : parseNaturalQuery(question);
-
-    if (!parsed.ok) {
-      setState({
-        status: "rejected",
-        message: parsed.message,
-        suggestions: parsed.suggestions,
-      });
-      return;
-    }
-
-    try {
-      const db = await Database.load(DB_URL);
-      // 值走参数绑定，绝不拼接进 SQL 字符串
-      const rows = (await db.select(
-        parsed.plan.sql,
-        parsed.plan.params,
-      )) as Row[];
-      setState({ status: "done", result: parsed, rows });
-    } catch (err) {
-      setState({
-        status: "error",
-        message: err instanceof Error ? err.message : String(err),
-      });
-    }
+    // 唯一的分叉点：开关开启且配置齐备就走大模型，否则回退到本地规则引擎。
+    // 阶段31：两条路径都带上「当前视野」上下文，并共用同一个执行器
+    //         （地图页浮动查询框走的就是这一段）。
+    setState(
+      await runAiQuery(question, {
+        context: viewportRef?.current ?? null,
+        config: aiReady ? aiConfig : null,
+      }),
+    );
   };
 
   const columns =
     state.status === "done" && state.rows.length > 0
       ? Object.keys(state.rows[0])
       : [];
+
+  /**
+   * 阶段31：只读的视野上下文读数。
+   *
+   * 在这里读 ref 是刻意为之：面板本来就会因为输入 / 查询状态变化而重渲染，
+   * 所以读数总能跟着刷新；而真正用于**解析**的，是 `run()` 被触发那一刻
+   * 读到的 ref 值（不受展示延迟影响）。
+   */
+  const ctxView = viewportRef?.current ?? null;
 
   return (
     <section className={styles.panel}>
@@ -293,6 +268,19 @@ function AiQueryPanel({ onViewOnMap, onClearMap }: AiQueryPanelProps) {
         全球总量概览。默认由**本地规则引擎**解析（
         <code>src/lib/nlq.ts</code>，离线可用）；开启下方开关后可改用
         **真实大模型**解析。
+      </p>
+
+      {/* 阶段31：只读的视野上下文读数。
+          让用户看得见「AI 收到了什么」—— 既建立信任，也让
+          「为什么没按我的视野回答」一秒就能判断。 */}
+      <p className={styles.ctx}>
+        当前视野上下文：
+        {ctxView?.viewport
+          ? `${formatViewport(ctxView.viewport)} · z${(ctxView.zoom ?? 0).toFixed(1)}` +
+            (ctxView.layers?.length
+              ? ` · 图层 ${ctxView.layers.join(" / ")}`
+              : "")
+          : "尚未上报（地图页加载后会实时上报视野与图层状态）"}
       </p>
 
       {/* ---------- 查询方式配置 ---------- */}

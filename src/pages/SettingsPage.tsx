@@ -1,7 +1,7 @@
-import AiQueryPanel from "../components/AiQueryPanel";
-import DbSelfCheck from "../components/DbSelfCheck";
+import type { RefObject } from "react";
+import AiQueryPanel from "../components/AiQueryPanel";import DbSelfCheck from "../components/DbSelfCheck";
 import GreetSelfCheck from "../components/GreetSelfCheck";
-import type { ParsedQuery } from "../lib/nlq";
+import type { ParsedQuery, QueryContext } from "../lib/nlq";
 import styles from "./SettingsPage.module.css";
 
 interface SettingGroup {
@@ -36,9 +36,19 @@ interface SettingsPageProps {
   onViewOnMap?: (query: ParsedQuery) => void;
   /** 发起新查询时，先把地图上的旧高亮清掉 */
   onClearMap?: () => void;
+  /** 阶段31：地图视野上下文（透传给 AI 查询面板，用于「当前视野」类问题） */
+  viewportRef?: RefObject<QueryContext | null>;
+  /** 阶段31：视野移动导致上次结果失效的信号 */
+  staleSeq?: number;
 }
 
-function SettingsPage({ hint, onViewOnMap, onClearMap }: SettingsPageProps) {
+function SettingsPage({
+  hint,
+  onViewOnMap,
+  onClearMap,
+  viewportRef,
+  staleSeq,
+}: SettingsPageProps) {
   return (
     <div className={styles.page}>
       <h2 className={styles.pageTitle}>{hint}</h2>
@@ -73,7 +83,12 @@ function SettingsPage({ hint, onViewOnMap, onClearMap }: SettingsPageProps) {
       <DbSelfCheck />
 
       {/* 阶段17：本地规则引擎的自然语言查询（尚未接入真实大模型 API） */}
-      <AiQueryPanel onViewOnMap={onViewOnMap} onClearMap={onClearMap} />
+      <AiQueryPanel
+        onViewOnMap={onViewOnMap}
+        onClearMap={onClearMap}
+        viewportRef={viewportRef}
+        staleSeq={staleSeq}
+      />
     </div>
   );
 }

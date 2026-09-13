@@ -4,7 +4,7 @@ import TopBar from "./TopBar";
 import MapPage from "../pages/MapPage";
 import StatsPage from "../pages/StatsPage";
 import SettingsPage from "../pages/SettingsPage";
-import type { MapCommand, ParsedQuery } from "../lib/nlq";
+import type { MapCommand, ParsedQuery, QueryContext } from "../lib/nlq";
 import styles from "./AppLayout.module.css";
 
 const APP_TITLE = "Global Power GIS";
@@ -25,6 +25,24 @@ function AppLayout() {
    */
   const [mapCommand, setMapCommand] = useState<MapCommand | null>(null);
   const commandSeq = useRef(0);
+
+  /**
+   * 阶段31：地图视野上下文（供 AI 解析「当前视野」类问题）。
+   *
+   * ⚠️ 用 **ref** 而不是 state：`moveend` 在拖拽时每秒触发多次，走 state 会让
+   *    整棵应用（含挂着 3.5 万个点与聚合索引的地图页）在最频繁交互的时刻反复重渲染。
+   *    MapPage 是**唯一写入者**，其余读方在提问瞬间读取权威值。
+   */
+  const viewportRef = useRef<QueryContext | null>(null);
+
+  /**
+   * 「上次查询结果已过期」信号。地图视野移动后 +1。
+   *
+   * 两个结果展示处（设置页 AI 面板、地图页查询框）据此清空，否则会出现
+   * 「地图已经飘到别处、表格还停在那块区域」的误导组合。
+   */
+  const [staleSeq, setStaleSeq] = useState(0);
+  const handleResultsStale = () => setStaleSeq((n) => n + 1);
 
   const handleViewOnMap = (query: ParsedQuery) => {
     commandSeq.current += 1;
@@ -68,7 +86,13 @@ function AppLayout() {
               也避免了反复 create/destroy 地图带来的泄漏风险。
               代价是三页常驻内存，而地图那部分本来就只占一份，增量很小。 */}
           <div className={styles.pageSlot} hidden={activeKey !== "map"}>
-            <MapPage command={mapCommand} />
+            <MapPage
+              command={mapCommand}
+              viewportRef={viewportRef}
+              onResultsStale={handleResultsStale}
+              onViewOnMap={handleViewOnMap}
+              onClearMap={handleClearMap}
+            />
           </div>
 
           <div className={styles.pageSlot} hidden={activeKey !== "stats"}>
@@ -80,6 +104,8 @@ function AppLayout() {
               hint={hintOf("settings")}
               onViewOnMap={handleViewOnMap}
               onClearMap={handleClearMap}
+              viewportRef={viewportRef}
+              staleSeq={staleSeq}
             />
           </div>
         </section>

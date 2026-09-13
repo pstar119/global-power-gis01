@@ -18,8 +18,11 @@ import {
   EXAMPLES,
   buildSql,
   describeQuery,
+  formatViewport,
   type Intent,
   type ParseResult,
+  type ParsedQuery,
+  type QueryContext,
 } from "./nlq";
 
 export type Provider = "deepseek" | "qwen" | "glm" | "ollama";
@@ -183,6 +186,53 @@ const SYSTEM_PROMPT = `你是一个把自然语言问题解析成结构化查询
 {"ok":true,"intent":"global"}
 今天天气怎么样
 {"ok":false,"message":"该问题与全球电力设施数据无关"}`;
+
+/**
+ * 阶段31：把「当前视野」拼成提示词的一段。
+ *
+ * ⚠️ 没有上下文（地图未就绪 / 未上报视野）时返回**空串** ——
+ *    提示词逐字不变，既有行为零回归。
+ * ⚠️ 坐标由我们注入，模型只回答「要不要限定」：
+ *    即使模型被提示词注入攻击，也改不动查询框的位置。
+ */
+function viewportPromptBlock(ctx?: QueryContext | null): string {
+  const b = ctx?.viewport;
+  if (!b) return "";
+
+  const layers = ctx?.layers?.length ? ctx.layers.join("、") : "（未上报）";
+  const midLat = (b.minLat + b.maxLat) / 2;
+  const widthKm = Math.round(
+    (b.maxLon - b.minLon) * 111 * Math.cos((midLat * Math.PI) / 180),
+  );
+  const zoomText = typeof ctx?.zoom === "number" ? `z≈${ctx.zoom.toFixed(1)}` : "z未知";
+
+  return `
+
+【当前视野 Current Viewport】
+地图现在显示：${formatViewport(b)}（${zoomText}，约 ${widthKm} km 宽）。
+用户当前勾选的图层：${layers}。
+（这只是显示状态，不是筛选条件。本地数据库只有一张电厂表 power_plants，
+包含 name / country / primary_fuel / capacity_mw / lat / lon，
+**没有线路与变电站数据 —— 不要为电压等级、线路、变电站生成任何 SQL 条件**。）
+
+判定规则：
+- 只有当问题里出现空间指代（当前视野 / 视野内 / 这个区域 / 该区域 / 当前范围 / 屏幕里 / 这里 / 这一片 / 画面里）时，
+  才额外输出 "inViewport": true，表示「只在上面这块矩形内查询」。
+- **不要输出任何坐标数字**。你只负责说「要不要限定在视野内」，坐标由程序填入。
+- 问题没有空间指代时，不要输出 inViewport（否则「全球前10大电厂」会被错误地锁死在视野内）。
+- inViewport 可以与 country / fuel / limit 同时出现。
+- 若问的是线路 / 变电站 / 电压等级，返回 {"ok":false,"message":"本地数据只有电厂，暂不支持线路与变电站查询"}。
+
+示例：
+当前视野里最大的5个电厂
+{"ok":true,"intent":"plant","inViewport":true,"limit":5}
+这个区域有多少电厂
+{"ok":true,"intent":"global","inViewport":true}
+当前视野内的国家排名
+{"ok":true,"intent":"country","inViewport":true}
+这里的风电装机容量
+{"ok":true,"intent":"fuel","fuel":"Wind","inViewport":true}`;
+}
 
 /** HTTP 状态码 -> 给用户看的可操作提示 */
 function describeHttpError(
@@ -461,7 +511,10 @@ function extractJson(raw: string): unknown {
 }
 
 /** 把模型输出转成内部的 ParseResult，并对所有值做白名单校验 */
-function toParseResult(payload: unknown): ParseResult {
+function toParseResult(
+  payload: unknown,
+  ctx?: QueryContext | null,
+): ParseResult {
   if (typeof payload !== "object" || payload === null) {
     return {
       ok: false,
@@ -492,8 +545,7 @@ function toParseResult(payload: unknown): ParseResult {
     };
   }
 
-  const query: { intent: Intent; fuel?: string; country?: string; limit?: number } =
-    { intent };
+  const query: ParsedQuery = { intent };
 
   // ⚠️ 白名单校验：模型幻觉出的燃料名一律丢弃，绝不能进 SQL
   const fuel = String(obj.fuel ?? "");
@@ -507,6 +559,14 @@ function toParseResult(payload: unknown): ParseResult {
     query.limit = Math.round(limit);
   }
 
+  // 阶段31：视野限定。
+  // ⚠️ 模型只输出**布尔** inViewport，坐标一律取自调用方传入的地图快照 ——
+  //    模型碰不到坐标，因此幻觉与提示词注入都不可能把查询框挪到别处。
+  // ⚠️ 没有上下文时静默忽略：降级为不限视野的正常查询，绝不报错。
+  if (obj.inViewport === true && ctx?.viewport) {
+    query.viewport = ctx.viewport;
+  }
+
   // 复用本地引擎的 SQL 生成与说明文案，保证两条路径行为完全一致
   return {
     ok: true,
@@ -516,10 +576,15 @@ function toParseResult(payload: unknown): ParseResult {
   };
 }
 
-/** 与本地引擎同签名的解析入口（异步版） */
+/**
+ * 与本地引擎同签名的解析入口（异步版）。
+ *
+ * `context` 为阶段31 新增的**可选**参数：不传时行为与之前逐字一致（向后兼容）。
+ */
 export async function parseQuery(
   userInput: string,
   config: AiConfig,
+  context?: QueryContext | null,
 ): Promise<ParseResult> {
   const input = userInput.trim();
   if (!input) {
@@ -537,10 +602,10 @@ export async function parseQuery(
   }
 
   const r = await callChatApi(config, [
-    { role: "system", content: SYSTEM_PROMPT },
+    { role: "system", content: SYSTEM_PROMPT + viewportPromptBlock(context) },
     { role: "user", content: input },
   ]);
   if (!r.ok) return { ok: false, message: r.message, suggestions: EXAMPLES };
 
-  return toParseResult(extractJson(r.content));
+  return toParseResult(extractJson(r.content), context);
 }
