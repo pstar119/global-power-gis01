@@ -14,6 +14,7 @@
  * 用法：node scripts/verify_pack.mjs data/packs/osm-huadong.pmtiles
  */
 import { readFileSync, statSync } from "node:fs";
+import { gunzipSync } from "node:zlib";
 import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -58,9 +59,32 @@ async function main() {
   });
   const header = await pm.getHeader();
 
-  const { VectorTile } = await import("@mapbox/vector-tile");
+  /**
+   * ‼️ 阶段42 修复：原先写的是 `const { VectorTile } = await import("@mapbox/vector-tile")`
+   *    与 `const Pbf = pbfMod.default ?? pbfMod`。
+   *
+   *    但本项目装的 `pbf` 是**新版**：导出 `{ PbfReader, PbfWriter }`
+   *    —— **既没有 default 导出，也没有名为 `Pbf` 的类**。
+   *    于是 `new Pbf(buf)` 必抛 "Pbf is not a constructor"，
+   *    而这个异常被下面那句 `catch { continue; }` **静默吞掉**，
+   *    结果每一张瓦片都“解码失败”并跳过 ⇒ 要素计数恒为 0 ⇒
+   *    「不丢数据」断言变成 0 >= 93559 的空断言。
+   *    换句话说：**这个校验脚本自己失去了校验能力，而且不报错。**
+   *
+   *    另外瓦片是 **gzip 压缩** 的（header.tileCompression=2），
+   *    必须先解压再交给 MVT 解码器。
+   */
+  const vtMod = await import("@mapbox/vector-tile");
+  const VectorTile = vtMod.VectorTile ?? vtMod.default?.VectorTile ?? vtMod.default ?? vtMod;
   const pbfMod = await import("pbf");
-  const Pbf = pbfMod.default ?? pbfMod;
+  const PbfReader = pbfMod.PbfReader ?? pbfMod.default?.PbfReader ?? pbfMod.default ?? pbfMod;
+  if (typeof VectorTile !== "function" || typeof PbfReader !== "function") {
+    console.error(
+      `无法解析 MVT 解码器：VectorTile=${typeof VectorTile} PbfReader=${typeof PbfReader}` +
+        `（pbf 导出：${Object.keys(pbfMod).join(",")}）`,
+    );
+    process.exit(1);
+  }
 
   console.log("=== 可选包体检 ===");
   console.log(`文件        : ${rel}`);
@@ -72,6 +96,11 @@ async function main() {
   console.log();
 
   const results = [];
+  /** 每个 ftype 实际出现过的属性键（用于校验属性白名单没漏字段） */
+  const keysByType = { line: new Set(), substation: new Set(), plant: new Set() };
+  /** ‼️ 解码失败必须计数而不能静默跳过 —— 阶段42 的「假断言」就是静默跳过造成的 */
+  let decodeFailed = 0;
+  let decodeErrMsg = null;
   for (const z of zooms) {
     const n = 1 << z;
     /**
@@ -111,8 +140,17 @@ async function main() {
         }
         let vt;
         try {
-          vt = new VectorTile(new Pbf(new Uint8Array(r.data)));
-        } catch {
+          // ‼️ 先 gunzip：瓦片是 gzip 压缩的（header.tileCompression=2）
+          let bytes = new Uint8Array(r.data);
+          if (bytes.length > 2 && bytes[0] === 0x1f && bytes[1] === 0x8b) {
+            bytes = gunzipSync(bytes);
+          }
+          vt = new VectorTile(new PbfReader(bytes));
+        } catch (e) {
+          // ‼️ 不再静默 continue：解码失败就直接让整个脚本失败。
+          //    否则脚本会“全部通过”而实际什么都没检查到。
+          decodeFailed++;
+          if (!decodeErrMsg) decodeErrMsg = e && e.message ? e.message : String(e);
           continue;
         }
         const layer = vt.layers[LAYER];
@@ -123,6 +161,8 @@ async function main() {
           const p = layer.feature(i).properties ?? {};
           const k = p.vclass ?? "?";
           hist[k] = (hist[k] ?? 0) + 1;
+          const t = p.ftype;
+          if (keysByType[t]) for (const key of Object.keys(p)) keysByType[t].add(key);
         }
       }
     }
@@ -189,6 +229,39 @@ async function main() {
       .join(" "),
     通过: results.filter((r) => r.z < LOWZOOM_CAP_FROM).every((r) => r.maxTileFeats <= LOWZOOM_CAP),
   });
+
+  // ---- 阶段42 新增的两条断言 ----
+  // ① 解码失败必须响亮失败：原先 catch 里静默 continue，
+  //    结果「什么都读不出来」也能一路走到「全部通过」。
+  checks.push({
+    断言: "所有抽样瓦片都能解码（不允许静默跳过）",
+    实测: `${decodeFailed} 张解码失败${decodeErrMsg ? `；首个错误：${decodeErrMsg}` : ""}`,
+    通过: decodeFailed === 0,
+  });
+
+  // ② 属性白名单：z>=8 的瓦片应保留各 ftype 的专属属性。
+  //    ‼️ 这条专为防止阶段42 那类 bug 复现 ——
+  //    `build_pmtiles.mjs` 的 keepProps 漏字段时**不会报错、不会崩溃**，
+  //    只表现为前端的某个字段永远不出现（plant_source 就是这样丢了很久）。
+  //    光看「构建 exit=0」永远发现不了，必须在这里把期望的属性钉死。
+  const expectProp = { line: "line_kind", substation: "substation_kind", plant: "plant_source" };
+  if (results.some((r) => r.z >= 8)) {
+    const missing = [];
+    for (const [ftype, key] of Object.entries(expectProp)) {
+      const seen = keysByType[ftype];
+      if (seen.size === 0) continue; // 该 ftype 没抽样到，不做判断，避免误报
+      if (!seen.has(key)) missing.push(`${ftype}.${key}`);
+    }
+    checks.push({
+      断言: "z>=8 的瓦片保留了各 ftype 的专属属性（line_kind / substation_kind / plant_source）",
+      实测: Object.entries(expectProp)
+        .map(([t, k]) =>
+          keysByType[t].size === 0 ? `${t}:未抽样到` : `${t}:${keysByType[t].has(k) ? "有" : "缺"}${k}`,
+        )
+        .join("  "),
+      通过: missing.length === 0,
+    });
+  }
 
   for (const c of checks) {
     console.log(`${c.通过 ? "✅" : "❌"} ${c.断言} — 实测 ${c.实测}`);
