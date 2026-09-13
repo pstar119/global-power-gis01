@@ -111,9 +111,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const chunks = rows.reduce((a, r) => a + r.块数, 0);
   const minutes = rows.reduce((a, r) => a + r.预计分钟, 0);
   console.log(`合计块数：${chunks}`);
-  console.log(`串行预计：${(minutes / 60).toFixed(1)} 小时（按华东实测 ${CELL_MEASURED.secPerChunk} 秒/块）`);
-  console.log("⚠️ 这是**上界**：稀疏区（藏/新/青）每块远快于密集区。");
-  console.log("   真实工期用 --count-only 抽样扫后按实测密度修正，别拿这个数当承诺。");
+  console.log(`串行预计：${(minutes / 60).toFixed(1)} 小时（按 50.3 秒/块）`);
+  console.log("⚠️ 这只是**估算**，不要写成「上界」。");
+  console.log("   实测（阶段38，238 块）已推翻「稀疏区每块更快」这个直觉：");
+  console.log("   东北 267 要素/块却 54.8 秒/块（最慢），华北 1963 要素/块 49.6 秒/块。");
+  console.log("   单块耗时由**服务端负载**主导，与数据量几乎无关 —— 别再拿密度推测工期。");
   console.log("\n扫描抽样（step=3，单块尺寸与真抓一致）：");
   console.table(
     REGIONS.map((r) => {

@@ -217,7 +217,7 @@ async function processRegion(region, cfg, report) {
   console.log(`\n\n${"█".repeat(72)}`);
   console.log(`█ 批次 ${region.label}（${name}） · ${region.provinces}`);
   console.log(`█ bbox ${bboxStr} · 网格 ${cols}x${rows} = ${chunks} 块 · 块尺寸 ${rec.cellSize}`);
-  console.log(`█ 串行预计 ${((chunks * cfg.target.secPerChunk) / 60).toFixed(0)} 分钟（按华东实测 ${cfg.target.secPerChunk} 秒/块）`);
+  console.log(`█ 串行预计 ${((chunks * cfg.target.secPerChunk) / 60).toFixed(0)} 分钟（按 ${cfg.target.secPerChunk} 秒/块估算）`);
   console.log(`${"█".repeat(72)}`);
 
   // ---- 1. 抽样扫描：只数数量，估体积 ----
@@ -399,9 +399,13 @@ async function main() {
 
   console.log("=== 阶段38 全国分批流水线 ===");
   console.log(`批次     : ${picked.map((r) => r.label).join(" → ")}`);
-  console.log(`阶段     : ${[...cfg.stages].join(",")}`);  console.log(`可选包   : ${cfg.packDir}/osm-<region>.pmtiles（不进安装包；该目录已被 .gitignore 忽略）`);
+  console.log(`阶段     : ${[...cfg.stages].join(",")}`);
+  console.log(`可选包   : ${cfg.packDir}/osm-<region>.pmtiles（不进安装包；该目录已被 .gitignore 忽略）`);
   console.log(`合计块数 : ${totalChunks}`);
-  console.log(`串行预计 : ${((totalChunks * cfg.target.secPerChunk) / 3600).toFixed(1)} 小时 (上界；稀疏区远快于此)`);
+  console.log(
+    `串行预计 : ${((totalChunks * cfg.target.secPerChunk) / 3600).toFixed(1)} 小时 ` +
+      `（按 ${cfg.target.secPerChunk} 秒/块估算，**不是上界**）`,
+  );
 
   if (cfg.dryRun) {
     console.log("\n[dry-run] 将执行：");
