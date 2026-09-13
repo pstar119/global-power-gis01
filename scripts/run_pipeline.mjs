@@ -129,7 +129,25 @@ function runStep(label, cmd, args, logFile) {
     if (!logFile) {
       // dry-run 路径不会走到这
     }
-    const child = spawn(cmd, args, { cwd: ROOT, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(cmd, args, {
+      cwd: ROOT,
+      stdio: ["ignore", "pipe", "pipe"],
+      /**
+       * ⚠️ 必须显式指定 Python 的 IO 编码。
+       *
+       * 实测踩坑（2026-09-13）：加了 `-u` 之后，Python 的 stdout 变成**管道**，
+       * 此时它不再按控制台编码输出，而是按 Windows 本地编码（GBK）写字节；
+       * 而 Node 按 UTF-8 解码 ⇒ 中文全部变成 `�׶�28` 这样的乱码，
+       * **而且这个乱码会被原样写进日志文件**，几小时后就没法分析了。
+       * 数据本身没事（都走文件落盘），但监控与事后分析全废。
+       */
+      env: {
+        ...process.env,
+        PYTHONIOENCODING: "utf-8",
+        PYTHONUTF8: "1",
+        PYTHONUNBUFFERED: "1",
+      },
+    });
     let out = "";
     const onData = (stream, chunk) => {
       const s = chunk.toString();
