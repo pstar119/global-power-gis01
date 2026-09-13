@@ -206,6 +206,83 @@ const OSM_LINES_HIT_LAYER_ID = "osm-lines-hit";
 const OSM_LINES_HIT_WIDTH = 14;
 
 /**
+ * 阶段39：区域数据包（可选包）—— 按视口动态加载。
+ *
+ * 背景：全国 7 个大区被切成 7 个独立归档（`data/packs/osm-<region>.pmtiles`，共 116 MB），
+ * **刻意不进安装包**（否则安装包从 ~54 MB 涨到 ~170 MB）。它们由
+ * `scripts/install_packs.mjs` 投放到 `$RESOURCE/packs/`，靠 asset 协议按 Range 读取。
+ *
+ * 三条已定的策略（每条都有代价，记在这里免得以后被"优化"掉）：
+ *  1. **核心区优先**：视口中心落在核心区覆盖矩形内时，只显示核心区包（随安装包分发的那份），
+ *     不叠加区域包。代价：长三角用不到华东包更全的数据（93,559 对 25,611 要素）。
+ *     换来的是行为可预期 —— 打开就有数据，不依赖用户是否装了可选包。
+ *  2. **z ≥ 6 才加载**：更低缩放时视口覆盖半个中国，此时"按重叠面积取前 2 个"会让用户
+ *     看到 2 个区域有数据、其余空白，看起来像坏了。低缩放保持现状。
+ *  3. **同时最多 2 个**：每个包 = 1 个 source + 7 个图层。上限 2 → 最多 14 个额外图层。
+ *     不能再多，MapLibre 的样式规模与每帧查询开销都会明显上升。
+ *
+ * ⚠️ 区域包之间**存在重叠**（已实测：华东与华北在鲁冀交界的瓦片逐字节相同，
+ *    都在 z12/3388/1595）。MapLibre 的 vector source 不支持按 bbox 裁剪，
+ *    所以同时激活两个包时，接缝处会重复绘制 —— 同色同位置，视觉无差异，
+ *    代价只是多一倍瓦片请求。这是取舍，不是 bug。
+ */
+interface PackEntry {
+  key: string;
+  label: string;
+  provinces?: string;
+  bbox: [number, number, number, number];
+  file: string;
+  features?: number | null;
+  sizeMb?: number | null;
+}
+interface PacksManifest {
+  core: { label: string; resource: string; bbox: [number, number, number, number] };
+  packs: PackEntry[];
+}
+
+const PACKS_MANIFEST_URL = "/packs_manifest.json";
+/** 低于该级别不加载区域包 */
+const PACK_MIN_ZOOM = 6;
+/** 同时激活的区域包上限 */
+const PACK_MAX_ACTIVE = 2;
+
+/**
+ * 区域图层 id：在原 id 后加 `--<region>` 后缀。
+ * ‼️ **现有图层 id 一个都不改** —— 只是给区域包新增带后缀的平行图层。
+ *    这样阶段29~38 关于 `osm-line-735` 等 id 的全部结论仍然成立。
+ */
+function packLayerId(base: string, key: string): string {
+  return `${base}--${key}`;
+}
+
+/** 一个区域包对应的全部图层 id（配色与 filter 与核心区完全一致） */
+function packLayerIds(key: string) {
+  return {
+    lines: OSM_LINE_TIERS.map((t) => packLayerId(t.id, key)),
+    substations: packLayerId(OSM_SUBSTATION_LAYER_ID, key),
+    plants: packLayerId(OSM_PLANT_LAYER_ID, key),
+    hit: packLayerId(OSM_LINES_HIT_LAYER_ID, key),
+  };
+}
+
+/** 视口与包 bbox 的交集面积（度²）；0 表示不相交 */
+function bboxOverlapArea(view: ViewportBbox, pack: readonly number[]): number {
+  const [w, s, e, n] = pack;
+  const ow = Math.max(view.minLon, w);
+  const os = Math.max(view.minLat, s);
+  const oe = Math.min(view.maxLon, e);
+  const on = Math.min(view.maxLat, n);
+  if (oe <= ow || on <= os) return 0;
+  return (oe - ow) * (on - os);
+}
+
+/** 点是否落在矩形内（用于「视口中心是否已被核心区覆盖」的判定） */
+function bboxContainsPoint(box: readonly number[], lon: number, lat: number): boolean {
+  const [w, s, e, n] = box;
+  return lon >= w && lon <= e && lat >= s && lat <= n;
+}
+
+/**
  * 阶段30：电压分级开关的显示文案。
  * 键直接用 `vclass` 取值 —— 与 `OSM_LINE_TIERS`、以及瓦片属性一一对应，
  * 不需要任何映射表，也不会出现「开关名对不上图层」的错位。
@@ -900,10 +977,12 @@ function ensurePmtilesProtocol(): Protocol {
  * @param resource    资源相对路径，例如 "maps/osm_grid.pmtiles"
  * @param label       日志用的中文名
  * @param missingHint 拿不到时的补救提示
+ * @param quiet       true 时文件不存在不告警（用于**探测可选包是否已安装** ——
+ *                    用户没装区域包是正常状态，不该每次启动刷 7 条 warn）
  */
 function ensurePmtilesArchive(
   resource: string,
-  { label, missingHint }: { label: string; missingHint: string },
+  { label, missingHint, quiet = false }: { label: string; missingHint: string; quiet?: boolean },
 ): Promise<ArchiveHandle | null> {
   const cached = archivePromises.get(resource);
   if (cached) return cached;
@@ -954,7 +1033,11 @@ function ensurePmtilesArchive(
         mode: "memory",
       };
     } catch (err) {
-      console.warn(`[MapPage] ${label}不可用。${missingHint}`, err);
+      if (quiet) {
+        console.info(`[MapPage] ${label}未安装（属于正常情况）：${resource}`);
+      } else {
+        console.warn(`[MapPage] ${label}不可用。${missingHint}`, err);
+      }
       return null;
     }
   })();
@@ -1247,6 +1330,141 @@ function addOsmGridLayers(
   });
 }
 
+/** 区域包的 source id */
+function packSourceId(key: string): string {
+  return `osm-pack-${key}`;
+}
+
+/**
+ * 阶段39：给一个区域包挂上 source 与图层。
+ *
+ * ⚠️ 这里刻意**不改动** `addOsmGridLayers`（核心区那条已验证的路径），而是另写一份：
+ *    两者的生命周期根本不同 —— 核心区在启动时一次性挂上、之后永不摘除；
+ *    区域包随视口增删，还必须支持卸载。把已验证的核心区路径冻结住，
+ *    换来的是「阶段29~38 关于核心区图层的全部结论继续成立」。
+ *    代价是这段规格与 `addOsmGridLayers` 有重复 —— 但**所有数值都来自同一组常量**
+ *    （`OSM_LINE_TIERS` 的 color/width、`SUBSTATION_COLOR`、`OSM_LINES_HIT_WIDTH`、
+ *    `TIER_LABEL` 对应的 filter），所以改配色只需改常量，两个函数会一起变。
+ *    唯一需要人工保持同步的是**图层的结构**（几个档、哪个 filter、hit 层宽度）——
+ *    改动其中一个函数时请对照另一个。
+ */
+function addPackLayers(
+  map: MapLibreMap,
+  key: string,
+  archive: ArchiveHandle,
+): void {
+  const sourceId = packSourceId(key);
+  if (map.getSource(sourceId)) return;
+
+  map.addSource(sourceId, {
+    type: "vector",
+    // 与核心区同理：用 `tiles` 而不是 `url`，避开协议把归档 header 的 bbox 当 bounds 返回
+    tiles: [`pmtiles://${archive.key}/{z}/{x}/{y}`],
+    minzoom: archive.minZoom,
+    maxzoom: archive.maxZoom,
+    bounds: [-180, -85.0511, 180, 85.0511],
+    attribution: OSM_ATTRIBUTION,
+  });
+
+  const layerRef = { "source-layer": OSM_GRID_SOURCE_LAYER };
+  // 区域包用带 `--<region>` 后缀的 id，**不覆盖核心区的 id**
+  const id = (base: string) => packLayerId(base, key);
+
+  for (const tier of OSM_LINE_TIERS) {
+    map.addLayer({
+      id: id(tier.id),
+      type: "line",
+      source: sourceId,
+      ...layerRef,
+      filter: [
+        "all",
+        ["==", ["get", "ftype"], "line"],
+        ["==", ["get", "vclass"], tier.vclass],
+      ],
+      layout: {
+        "line-cap": "round",
+        "line-join": "round",
+        visibility: tier.vclass === "unknown" ? "none" : "visible",
+      },
+      paint: {
+        "line-color": tier.color,
+        "line-opacity": 0.85,
+        "line-width": [
+          "interpolate",
+          ["linear"],
+          ["zoom"],
+          4,
+          tier.width * 0.3,
+          8,
+          tier.width * 0.55,
+          11,
+          tier.width,
+        ],
+      },
+    });
+  }
+
+  map.addLayer({
+    id: id(OSM_SUBSTATION_LAYER_ID),
+    type: "circle",
+    source: sourceId,
+    ...layerRef,
+    filter: ["==", ["get", "ftype"], "substation"],
+    paint: {
+      "circle-color": SUBSTATION_COLOR,
+      "circle-opacity": 0.9,
+      "circle-stroke-color": "#06333a",
+      "circle-stroke-width": 0.8,
+      "circle-radius": ["interpolate", ["linear"], ["zoom"], 5, 2.5, 10, 5, 14, 8],
+    },
+  });
+
+  map.addLayer({
+    id: id(OSM_PLANT_LAYER_ID),
+    type: "circle",
+    source: sourceId,
+    ...layerRef,
+    filter: ["==", ["get", "ftype"], "plant"],
+    paint: {
+      "circle-color": "transparent",
+      "circle-stroke-color": "#e8eef6",
+      "circle-stroke-width": 1.2,
+      "circle-radius": ["interpolate", ["linear"], ["zoom"], 6, 3, 12, 7],
+    },
+  });
+
+  map.addLayer({
+    id: id(OSM_LINES_HIT_LAYER_ID),
+    type: "line",
+    source: sourceId,
+    ...layerRef,
+    filter: ["==", ["get", "ftype"], "line"],
+    layout: { "line-cap": "round", "line-join": "round" },
+    paint: {
+      "line-color": "#000000",
+      "line-opacity": 0,
+      "line-width": OSM_LINES_HIT_WIDTH,
+    },
+  });
+}
+
+/**
+ * 卸载一个区域包的图层与 source。
+ *
+ * ⚠️ 顺序不能反：先删图层再删 source。反过来 MapLibre 会抛
+ *    "Source ... cannot be removed while layer ... is using it"。
+ * ⚠️ 必须真的 remove，而不是只把 visibility 设成 none —— 留着 source 就留着
+ *    pmtiles 归档引用与已缓存的瓦片，切几次视野就把内存堆满了。
+ */
+function removePackLayers(map: MapLibreMap, key: string): void {
+  const ids = packLayerIds(key);
+  for (const lid of [...ids.lines, ids.substations, ids.plants, ids.hit]) {
+    if (map.getLayer(lid)) map.removeLayer(lid);
+  }
+  const sourceId = packSourceId(key);
+  if (map.getSource(sourceId)) map.removeSource(sourceId);
+}
+
 /** 清空高亮（保留图层，避免反复增删） */
 function clearHighlight(map: MapLibreMap) {
   const src = map.getSource(HIGHLIGHT_SOURCE) as GeoJSONSource | undefined;
@@ -1408,6 +1626,18 @@ function MapPage({
     exact: boolean;
   } | null>(null);
 
+  /**
+   * 阶段39：区域数据包。
+   *  `packsManifest` —— 清单（有哪些包、覆盖哪里），随前端一起分发。
+   *  `packsAvailable` —— **本机实际装了哪些**（靠 127 字节 Range 探测得出，清单里没有这信息）。
+   *  `activePacks` —— 当前按视口选中的包；它一变，图层同步 effect 就增删 source/layer。
+   */
+  const [packsManifest, setPacksManifest] = useState<PacksManifest | null>(null);
+  const [packsAvailable, setPacksAvailable] = useState<readonly string[]>([]);
+  const [activePacks, setActivePacks] = useState<readonly string[]>([]);
+  /** 探测是一次性的，用 ref 防止 StrictMode 下重复探测（虽然归档缓存已幂等，这里省掉重复日志） */
+  const packsProbedRef = useRef(false);
+
   /** 输电线路总开关的状态：任一电压档开启即为「开」 */
   const anyTierOn = LINE_TIER_KEYS.some((k) => visibleLayers.includes(k));
 
@@ -1427,6 +1657,16 @@ function MapPage({
   const labelApiRef = useRef<{ refresh: () => void; clear: () => void } | null>(
     null,
   );
+
+  /**
+   * 阶段39：popup 实例的 ref 镜像。
+   * ⚠️ 区域包的点击处理注册在**地图级**（`map.on("click", fn)` 不带 layerId），
+   *    因为区域图层是随视口动态增删的 —— 没法在建图那一刻为它们逐个注册 layer 级处理。
+   *    地图级回调必须能拿到 popup，而 popup 是建图 effect 里的局部变量，所以做镜像。
+   */
+  const popupRef = useRef<Popup | null>(null);
+  /** 阶段39：activePacks 的 ref 镜像，供地图级 click 回调读到**最新**值 */
+  const activePacksRef = useRef<readonly string[]>([]);
 
   /**
    * 阶段31：发布「当前视野 + 已选图层」上下文，供 AI 解析「当前视野」类问题。
@@ -1729,6 +1969,8 @@ function MapPage({
     popup.on("open", () => {
       liftPopup(popup, mapContainerRef.current?.parentElement);
     });
+    // 阶段39：把 popup 镜像到 ref，供区域包的地图级点击回调使用
+    popupRef.current = popup;
 
     ensureBasemapArchive()
       .then((basemap) => {
@@ -2211,6 +2453,49 @@ function MapPage({
                 });
               }
 
+              // ---- 阶段39：点击**区域包**的输电线路 ----
+              // 为什么用不带 layerId 的地图级监听而不是 `map.on("click", layerId, fn)`：
+              // 区域图层是随视口动态增删的，建图那一刻它们还不存在，没法逐个注册 layer 级处理。
+              // 地图级回调自己查当前激活的 hit 图层即可。
+              // ⚠️ 与核心区不会打架：两者按策略互斥（视口中心在核心区内就不加载区域包，
+              //    在外面则核心区图层在该处没有要素可画）。即便边界处重叠，
+              //    本回调是在建图 effect 内注册的、晚于核心区各 handler，所以弹出的是区域包的信息（更全的那份）。
+              map.on("click", (e) => {
+                const keys = activePacksRef.current;
+                if (!keys.length) return;
+                const p = popupRef.current;
+                if (!p) return;
+
+                const ids = keys.map((k) => packLayerIds(k));
+                const hitIds = ids.map((x) => x.hit).filter((lid) => map.getLayer(lid));
+                if (!hitIds.length) return;
+
+                // 「点优先」：热区 14px 远宽于点的半径，线穿过站点/电厂时热区必然盖住它。
+                // 核心区与全部已激活区域包的点图层都要查。
+                const pointIds = [
+                  PLANT_LAYER_ID,
+                  SUBSTATIONS_LAYER_ID,
+                  OSM_PLANT_LAYER_ID,
+                  OSM_SUBSTATION_LAYER_ID,
+                  ...ids.map((x) => x.plants),
+                  ...ids.map((x) => x.substations),
+                ].filter((lid) => map.getLayer(lid));
+                if (pointIds.length && map.queryRenderedFeatures(e.point, { layers: pointIds }).length) {
+                  return;
+                }
+
+                const feats = map.queryRenderedFeatures(e.point, { layers: hitIds });
+                if (!feats.length) return;
+                // 几何兜底：线在切片里有 LineString 与 MultiLineString 两种，都必须接受
+                const coords = longestLineCoords(feats[0].geometry);
+                if (!coords.length) return;
+                const anchor = coords[Math.floor(coords.length / 2)];
+                if (!anchor) return;
+                p.setLngLat(anchor.slice() as [number, number])
+                  .setDOMContent(buildLinePopup(feats[0].properties as LineProperties, coords))
+                  .addTo(map);
+              });
+
               // 阶段27：地名标签必须压在所有电力图层之上。
               // 样式里的图层先于本回调里的 addLayer 执行，所以现在用 moveLayer（不给 beforeId
               // 即移到最顶）把它提上来 —— 否则 3.5 万个电厂点会把文字盖住。
@@ -2283,6 +2568,186 @@ function MapPage({
   };
 
   /**
+   * 阶段39：加载区域包清单，并探测**本机装了哪些包**。
+   *
+   * 清单随前端分发（`public/packs_manifest.json`，2.6 KB），但「本机有没有这个包」清单里
+   * 没有 —— 那必须运行时探测。探测方式就是 `ensurePmtilesArchive` 的那次
+   * **127 字节 Range 请求**（正好是 PMTiles 头部长度）：拿到 206 且魔数为 "PMTiles" 才算装了。
+   * 好处是不需要给前端开任何目录列举权限（不引 fs 插件 = 不引新依赖）。
+   *
+   * ⚠️ 探测必须 quiet —— 用户没装区域包是**正常状态**，不该每次启动刷一串 warn。
+   */
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetch(PACKS_MANIFEST_URL);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const manifest = (await res.json()) as PacksManifest;
+        if (cancelled) return;
+        setPacksManifest(manifest);
+
+        if (packsProbedRef.current) return;
+        packsProbedRef.current = true;
+        const results = await Promise.all(
+          manifest.packs.map(async (p) => ({
+            key: p.key,
+            ok:
+              (await ensurePmtilesArchive(p.file, {
+                label: `${p.label}区域包`,
+                missingHint: `把 ${p.file} 放到 $RESOURCE/packs/（node scripts/install_packs.mjs）`,
+                quiet: true,
+              })) !== null,
+          })),
+        );
+        if (cancelled) return;
+        const ok = results.filter((r) => r.ok).map((r) => r.key);
+        setPacksAvailable(ok);
+        console.info(
+          `[MapPage] 区域数据包：清单 ${manifest.packs.length} 个，本机已安装 ${ok.length} 个` +
+            (ok.length ? `（${ok.join("、")}）` : "（未安装，本视图只能显示核心区）"),
+        );
+      } catch (err) {
+        console.warn(
+          `[MapPage] 未能加载区域包清单 ${PACKS_MANIFEST_URL}，按「无区域包」处理。` +
+            "该文件由 `node scripts/gen_packs_manifest.mjs` 生成。",
+          err,
+        );
+        if (!cancelled) setPacksManifest(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  /**
+   * 阶段39：按视口决定激活哪些区域包。
+   *
+   * 三条策略（与 `PACK_MIN_ZOOM` 等常量处的说明一致）：
+   *   1. z < PACK_MIN_ZOOM 不加载 —— 低缩放覆盖半个中国，只显示 2 个区域会显得像坏了
+   *   2. 视口中心落在核心区覆盖内不加载 —— 核心区优先，长三角只用随安装包分发的那份
+   *   3. 其余情况按**重叠面积**排序取前 N 个
+   *
+   * ⚠️ 用 `moveend`/`zoomend` 而不是每帧的 `move`：后者在拖拽时每秒触发几十次，
+   *    会不停地增删 source/layer（每次都是真实网络与样式重建）。
+   */
+  useEffect(() => {
+    if (!mapReady || !packsManifest) return;
+    const map = mapRef.current;
+    if (!map) return;
+
+    const recompute = () => {
+      const setIfChanged = (next: readonly string[]) => {
+        const cur = activePacksRef.current;
+        if (cur.length === next.length && next.every((k, i) => cur[i] === k)) return;
+        setActivePacks(next);
+      };
+
+      if (!packsAvailable.length) {
+        setIfChanged([]);
+        return;
+      }
+      if (map.getZoom() < PACK_MIN_ZOOM) {
+        setIfChanged([]);
+        return;
+      }
+      const el = map.getContainer();
+      const w = el.clientWidth;
+      const h = el.clientHeight;
+      const size = w > 0 && h > 0 ? { w, h } : viewSizeRef.current;
+      if (!size) return;
+
+      const c = map.getCenter();
+      if (bboxContainsPoint(packsManifest.core.bbox, c.lng, c.lat)) {
+        setIfChanged([]);
+        return;
+      }
+
+      const view = boundsFromCamera(c.lng, c.lat, map.getZoom(), size.w, size.h);
+      const next = packsManifest.packs
+        .filter((p) => packsAvailable.includes(p.key))
+        .map((p) => ({ key: p.key, area: bboxOverlapArea(view, p.bbox) }))
+        .filter((x) => x.area > 0)
+        .sort((a, b) => b.area - a.area)
+        .slice(0, PACK_MAX_ACTIVE)
+        .map((x) => x.key);
+      setIfChanged(next);
+    };
+
+    map.on("moveend", recompute);
+    map.on("zoomend", recompute);
+    recompute();
+    return () => {
+      map.off("moveend", recompute);
+      map.off("zoomend", recompute);
+    };
+  }, [mapReady, packsManifest, packsAvailable]);
+
+  /**
+   * 阶段39：把 `activePacks` 同步成地图上的 source/layer。
+   *
+   * ⚠️ 卸载必须真的 `removeSource`，不能只设 visibility=none：留着 source 就留着
+   *    pmtiles 归档引用与已缓存的瓦片，来回切几次视野内存就堆满了。
+   * ⚠️ 挂载是异步的（要等归档探测 Promise），等待期间视野可能又变了 ——
+   *    所以 `then` 里要**复核一次** `activePacksRef.current` 是否还需要这个包。
+   */
+  useEffect(() => {
+    activePacksRef.current = activePacks;
+    const map = mapRef.current;
+    if (!map || !mapReady || !packsManifest) return;
+
+    const want = activePacks.filter((k) => packsAvailable.includes(k));
+
+    for (const key of packsAvailable) {
+      if (want.includes(key)) continue;
+      if (map.getSource(packSourceId(key))) {
+        removePackLayers(map, key);
+        console.info(`[MapPage] 卸载区域包 ${key}`);
+      }
+    }
+
+    for (const key of want) {
+      if (map.getSource(packSourceId(key))) continue;
+      const entry = packsManifest.packs.find((p) => p.key === key);
+      if (!entry) continue;
+      void ensurePmtilesArchive(entry.file, {
+        label: `${entry.label}区域包`,
+        missingHint: `把 ${entry.file} 放到 $RESOURCE/packs/`,
+        quiet: true,
+      }).then((archive) => {
+        const m = mapRef.current;
+        if (!archive || !m) return;
+        if (!activePacksRef.current.includes(key)) return; // 视野又变了，不挂了
+        addPackLayers(m, key, archive);
+
+        // 新图层默认全可见，必须先按当前开关设一次，否则会出现
+        // 「面板里关掉了电压未知，新加载的区域包却把它画出来」的不一致。
+        const vis = visibleLayersRef.current;
+        const on = (name: string) => vis.includes(name);
+        const ids = packLayerIds(key);
+        for (const tier of OSM_LINE_TIERS) {
+          m.setLayoutProperty(packLayerId(tier.id, key), "visibility", on(tier.vclass) ? "visible" : "none");
+        }
+        m.setLayoutProperty(ids.substations, "visibility", on("变电站") ? "visible" : "none");
+        m.setLayoutProperty(ids.plants, "visibility", on("电厂") ? "visible" : "none");
+        m.setLayoutProperty(ids.hit, "visibility", LINE_TIER_KEYS.some((k) => on(k)) ? "visible" : "none");
+
+        // 光标反馈（与核心区那几个 hit 层一致）
+        m.on("mouseenter", ids.hit, () => {
+          m.getCanvas().style.cursor = "pointer";
+        });
+        m.on("mouseleave", ids.hit, () => {
+          m.getCanvas().style.cursor = "";
+        });
+        console.info(
+          `[MapPage] 加载区域包 ${key}（${entry.label}${entry.features ? `，${entry.features} 个要素` : ""}）`,
+        );
+      });
+    }
+  }, [activePacks, mapReady, packsManifest, packsAvailable]);
+
+  /**
    * 阶段21：把「图层控制」的开关真正接到 MapLibre 上。
    *
    * ⚠️ 两个坑：
@@ -2324,6 +2789,18 @@ function MapPage({
     // 全部关掉时若热区还在，点空白处会弹出「看不见的线路」信息。
     apply([OSM_LINES_HIT_LAYER_ID], LINE_TIER_KEYS.some((k) => on(k)));
 
+    // 阶段39：区域包的图层跟随**同一套**开关。
+    // 这里按当前 activePacks 重新算一遍 —— 刚挂上的包也会被设成正确状态，
+    // 不用等用户下一次拨开关（否则新加载的包会短暂地把「电压未知」也画出来）。
+    for (const key of activePacks) {
+      for (const tier of OSM_LINE_TIERS) {
+        apply([packLayerId(tier.id, key)], on(tier.vclass));
+      }
+      apply([packLayerId(OSM_SUBSTATION_LAYER_ID, key)], on("变电站"));
+      apply([packLayerId(OSM_PLANT_LAYER_ID, key)], on("电厂"));
+      apply([packLayerId(OSM_LINES_HIT_LAYER_ID, key)], LINE_TIER_KEYS.some((k) => on(k)));
+    }
+
     // 聚合数字是 HTML Marker，上面的 setLayoutProperty 管不到它
     if (visibleLayers.includes("电厂")) {
       labelApiRef.current?.refresh();
@@ -2334,7 +2811,7 @@ function MapPage({
     // 阶段31：图层开关变化也要立刻反映到 AI 上下文里 ——
     // 「用户在看哪些电压等级」正是这个上下文的价值所在
     setViewportInfo(publishViewport());
-  }, [visibleLayers]);
+  }, [visibleLayers, activePacks]);
 
   /**
    * 阶段30：当前视野数据统计。
@@ -2377,16 +2854,25 @@ function MapPage({
       const exact = zoom >= 8;
       const on = (name: string) => visibleLayersRef.current.includes(name);
 
-      // 只查**当前开启**的电压档：关掉的档不应出现在统计里
-      const lineLayers = OSM_LINE_TIERS.filter((t) => on(t.vclass)).map((t) => t.id);
+      // 只查**当前开启**的电压档：关掉的档不应出现在统计里。
+      // 阶段39：区域包的图层也要算进去 —— 否则在四川看了一屏线、面板却写「线路段 0 段」。
+      // ⚠️ 必须过滤掉不存在的图层：`queryRenderedFeatures` 传一个不存在的 layer id 会报错。
+      const packKeys = activePacksRef.current;
+      const lineLayers = [
+        ...OSM_LINE_TIERS.filter((t) => on(t.vclass)).map((t) => t.id),
+        ...packKeys.flatMap((k) =>
+          OSM_LINE_TIERS.filter((t) => on(t.vclass)).map((t) => packLayerId(t.id, k)),
+        ),
+      ].filter((lid) => !!map.getLayer(lid));
       const lines = lineLayers.length
         ? countUnique(map.queryRenderedFeatures({ layers: lineLayers }), exact)
         : 0;
-      const substations = on("变电站")
-        ? countUnique(
-            map.queryRenderedFeatures({ layers: [OSM_SUBSTATION_LAYER_ID] }),
-            exact,
-          )
+      const subLayers = [
+        OSM_SUBSTATION_LAYER_ID,
+        ...packKeys.map((k) => packLayerId(OSM_SUBSTATION_LAYER_ID, k)),
+      ].filter((lid) => !!map.getLayer(lid));
+      const substations = on("变电站") && subLayers.length
+        ? countUnique(map.queryRenderedFeatures({ layers: subLayers }), exact)
         : 0;
       // 拆两段计时：渲染查询是同步的，剩下全部是 SQL 往返（电厂精确计数走数据库）
       const tRender = performance.now();
@@ -2449,7 +2935,7 @@ function MapPage({
       map.off("resize", onResize);
       map.off("idle", schedule);
     };
-  }, [mapReady, visibleLayers]);
+  }, [mapReady, visibleLayers, activePacks]);
 
   return (
     <div

@@ -1,0 +1,129 @@
+{
+  "generatedAt": "2026-09-13T18:20:42.711Z",
+  "generatedBy": "scripts/gen_packs_manifest.mjs",
+  "note": "区域数据包元信息清单。pack 是否已安装需在运行时用 127 字节 Range 探测判定，本文件只描述「有哪些包、覆盖哪里」。",
+  "core": {
+    "label": "核心区（长三角 + 浙江）",
+    "resource": "maps/osm_grid.pmtiles",
+    "bbox": [
+      118,
+      27,
+      123,
+      33
+    ]
+  },
+  "packs": [
+    {
+      "key": "huadong",
+      "label": "华东",
+      "provinces": "沪苏浙皖闽赣鲁（含粤北、湘南邻界带）",
+      "bbox": [
+        113.5,
+        23,
+        123,
+        38.5
+      ],
+      "file": "packs/osm-huadong.pmtiles",
+      "chunks": 64,
+      "features": 93559,
+      "sizeMb": 20.64,
+      "maxTileKb": 400.7
+    },
+    {
+      "key": "huazhong",
+      "label": "华中",
+      "provinces": "豫鄂湘",
+      "bbox": [
+        108.3,
+        24.5,
+        116.7,
+        36.4
+      ],
+      "file": "packs/osm-huazhong.pmtiles",
+      "chunks": 42,
+      "features": 57576,
+      "sizeMb": 13.69,
+      "maxTileKb": 376.2
+    },
+    {
+      "key": "huanan",
+      "label": "华南",
+      "provinces": "粤桂琼港澳台",
+      "bbox": [
+        104.4,
+        18.1,
+        120,
+        26.5
+      ],
+      "file": "packs/osm-huanan.pmtiles",
+      "chunks": 52,
+      "features": 45295,
+      "sizeMb": 9.98,
+      "maxTileKb": 321.2
+    },
+    {
+      "key": "huabei",
+      "label": "华北",
+      "provinces": "京津冀晋",
+      "bbox": [
+        110.2,
+        34.5,
+        120,
+        42.7
+      ],
+      "file": "packs/osm-huabei.pmtiles",
+      "chunks": 32,
+      "features": 62820,
+      "sizeMb": 14.61,
+      "maxTileKb": 398.8
+    },
+    {
+      "key": "dongbei",
+      "label": "东北",
+      "provinces": "辽吉黑",
+      "bbox": [
+        118.8,
+        38.6,
+        135.1,
+        53.6
+      ],
+      "file": "packs/osm-dongbei.pmtiles",
+      "chunks": 112,
+      "features": 29948,
+      "sizeMb": 9.71,
+      "maxTileKb": 282.7
+    },
+    {
+      "key": "xinan",
+      "label": "西南",
+      "provinces": "川渝云贵藏",
+      "bbox": [
+        78.4,
+        21.1,
+        110.2,
+        36.5
+      ],
+      "file": "packs/osm-xinan.pmtiles",
+      "chunks": 216,
+      "features": 73055,
+      "sizeMb": 24.8,
+      "maxTileKb": 384.7
+    },
+    {
+      "key": "xibei",
+      "label": "西北",
+      "provinces": "陕甘青宁新（含内蒙西部）",
+      "bbox": [
+        73.5,
+        31.5,
+        111.3,
+        49.2
+      ],
+      "file": "packs/osm-xibei.pmtiles",
+      "chunks": 288,
+      "features": 68716,
+      "sizeMb": 23.09,
+      "maxTileKb": 403.7
+    }
+  ]
+}

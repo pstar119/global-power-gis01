@@ -50,6 +50,13 @@ dist-ssr
 __pycache__/
 *.pyc
 
+# 阶段39：区域数据包（单包 10~25 MB，7 个共 116 MB）。**绝不进仓库。**
+# 实测覆盖情况：`data/packs/` 已被上面的 `/data/` 覆盖；
+# `src-tauri/target/**/packs/` 已被 src-tauri/.gitignore 的 `/target/` 覆盖。
+# 这里显式再写一条做**兜底** —— 万一日后有人把包放到别的目录
+# （例如 src-tauri/resources/packs/，那目录**不在**任何忽略规则里），也不会误提交 116 MB。
+packs/*.pmtiles
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
