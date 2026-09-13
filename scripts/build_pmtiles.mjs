@@ -108,7 +108,19 @@ function parseArgs(argv) {
     } else throw new Error(`未知参数：${a}`);
   }
   cfg.inFile = cfg.inFile ?? `public/osm/${cfg.name}_power.geojson`;
-  cfg.out = cfg.out ?? "src-tauri/resources/maps/osm_grid.pmtiles";
+  // ⚠️ 默认输出名是写死的 `osm_grid.pmtiles`：用别的 --name 生成时必须显式 --out，
+  //    否则会把已装好的那个区域的归档**静默覆盖掉**（实测踩过：浙江盖掉了长三角）。
+  //    多区域命名约定：--out src-tauri/resources/maps/osm-<region>.pmtiles
+  if (!cfg.out) {
+    cfg.out = "src-tauri/resources/maps/osm_grid.pmtiles";
+    if (cfg.name !== "yrd") {
+      console.warn(
+        `⚠️  未指定 --out，将写入默认归档 ${cfg.out}；当前 --name=${cfg.name}，\n` +
+          `    如果那里已有其它区域的数据，会被覆盖。多区域请显式指定，例如：\n` +
+          `    --out src-tauri/resources/maps/osm-${cfg.name}.pmtiles`,
+      );
+    }
+  }
   return cfg;
 }
 
