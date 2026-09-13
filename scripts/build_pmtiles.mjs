@@ -60,8 +60,30 @@ const DEFAULTS = {
   fullPropsFromZoom: 8,
   /** 是否保留 name 属性（低级别瓦片里它会撑大字符串表，关掉可显著减体积） */
   keepNames: true,
-  /** 属性白名单之外的字段一律丢掉；MVT 只支持 string/number/bool */
-  keepProps: ["ftype", "vclass", "voltage_kv", "name", "osm_id", "line_kind", "substation_kind"],
+  /**
+   * 属性白名单之外的字段一律丢掉；MVT 只支持 string/number/bool。
+   *
+   * 🔴 阶段42 修复：原先漏了 `plant_source`。
+   *    `prepare_osm_geojson.mjs` 的 KEEP_PROPS 里**有** plant_source，
+   *    所以上游 prepared geojson 是带的；但本文件的白名单没收录它，
+   *    `cleanProps` 就在这一步把它丢掉了 ⇒ **OSM 电厂的 plant_source
+   *    从未进入任何瓦片**，前端「能源来源」那一行成了死代码
+   *    （表现是静默不显示，不报错，所以很久没被发现）。
+   *
+   * ⚠️ 这里是**第二道**属性白名单：上游 prepare 收一次、这里再收一次。
+   *    以后加字段必须**两处都改**，否则就会重演这个 bug。
+   *    各 ftype 实际上会带的字段见 prepare_osm_geojson.mjs 的 KEEP_PROPS。
+   */
+  keepProps: [
+    "ftype",
+    "vclass",
+    "voltage_kv",
+    "name",
+    "osm_id",
+    "line_kind",
+    "substation_kind",
+    "plant_source",
+  ],
   /**
    * 低级别单瓦片**要素数上限**；0 = 不封顶（默认）。
    *

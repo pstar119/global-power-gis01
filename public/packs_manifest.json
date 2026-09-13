@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-09-13T18:20:42.711Z",
+  "generatedAt": "2026-09-13T20:17:32.472Z",
   "generatedBy": "scripts/gen_packs_manifest.mjs",
   "note": "区域数据包元信息清单。pack 是否已安装需在运行时用 127 字节 Range 探测判定，本文件只描述「有哪些包、覆盖哪里」。",
   "core": {
@@ -26,7 +26,7 @@
       "file": "packs/osm-huadong.pmtiles",
       "chunks": 64,
       "features": 93559,
-      "sizeMb": 20.64,
+      "sizeMb": 20.77,
       "maxTileKb": 400.7
     },
     {
@@ -42,7 +42,7 @@
       "file": "packs/osm-huazhong.pmtiles",
       "chunks": 42,
       "features": 57576,
-      "sizeMb": 13.69,
+      "sizeMb": 13.76,
       "maxTileKb": 376.2
     },
     {
@@ -58,7 +58,7 @@
       "file": "packs/osm-huanan.pmtiles",
       "chunks": 52,
       "features": 45295,
-      "sizeMb": 9.98,
+      "sizeMb": 10.03,
       "maxTileKb": 321.2
     },
     {
@@ -74,7 +74,7 @@
       "file": "packs/osm-huabei.pmtiles",
       "chunks": 32,
       "features": 62820,
-      "sizeMb": 14.61,
+      "sizeMb": 14.69,
       "maxTileKb": 398.8
     },
     {
@@ -90,7 +90,7 @@
       "file": "packs/osm-dongbei.pmtiles",
       "chunks": 112,
       "features": 29948,
-      "sizeMb": 9.71,
+      "sizeMb": 9.75,
       "maxTileKb": 282.7
     },
     {
@@ -106,7 +106,7 @@
       "file": "packs/osm-xinan.pmtiles",
       "chunks": 216,
       "features": 73055,
-      "sizeMb": 24.8,
+      "sizeMb": 24.93,
       "maxTileKb": 384.7
     },
     {
@@ -122,7 +122,7 @@
       "file": "packs/osm-xibei.pmtiles",
       "chunks": 288,
       "features": 68716,
-      "sizeMb": 23.09,
+      "sizeMb": 23.22,
       "maxTileKb": 403.7
     }
   ]
