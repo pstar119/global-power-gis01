@@ -4,7 +4,7 @@
 
 ## 当前阶段
 
-**阶段33 —— AI 多轮对话记忆 + 左侧智能工作台**（2026-09-13）
+**阶段35 —— 第一版完整可分发离线桌面应用**（2026-09-13）
 
 已接入的能力：
 
@@ -31,6 +31,59 @@
 ![阶段33：追问继承地理约束 + 多轮对话历史](docs/screenshots/phase33-multi-turn-memory-followup.png)
 
 ![阶段33：左侧 AI 工作台折叠后只剩导轨](docs/screenshots/phase33-workbench-collapsed.png)
+
+## 分发包（第一版完整可分发离线版）
+
+安装包：`src-tauri/target/release/bundle/nsis/Global Power GIS_0.1.0_x64-setup.exe`
+
+- 体积 **44.38 MB**（NSIS，中文安装界面）；SHA256 `55747905BDFDD93AC7DFDBD4B6B693B0B5DA6C7B130B9DBACEA0A7DBF68D6805`
+- 裸主程序 10.77 MB；安装包比它多出 33.6 MB，正是下面三份资源的 LZMA 压缩后体积
+
+三份关键资源随包分发（可核：`src-tauri/target/release/nsis/x64/installer.nsi` 里的 `File /a` 指令）：
+
+| 资源 | 安装后位置 | 体积 |
+|---|---|---|
+| 离线底图 PMTiles | `maps\basemap.pmtiles` | 31.77 MB |
+| 长三角 OSM 电网切片 | `maps\osm_grid.pmtiles` | 4.68 MB |
+| 电厂数据种子库 | `seed\global_power_gis.db` | 2.98 MB |
+
+**三项全离线**：底图与电网切片来自安装目录（本地 `asset` 协议）、电厂数据来自 SQLite 种子库
+（首启播种到 `%APPDATA%\com.pstar119.globalpowergis\global_power_gis.db`）、自然语言查询走本机 Ollama。
+
+> 设置页自检显示 `substations 0 / transmission_lines 0` **属正常**：这两张表是早期演示数据，
+> 阶段29 起的真实电网数据在 PMTiles 切片里，不再入库。
+
+### ⚠️ 生产包使用本地 Ollama 的前提（实测踩到的唯一一坑）
+
+生产版前端源是 `http://tauri.localhost`，而 Ollama 默认只放行 `localhost / 127.0.0.1` 这类源，
+于是「测试连接」会报 `Failed to fetch`。实测对照（同一个 Ollama，只换 Origin）：
+
+| Origin | 结果 |
+|---|---|
+| `http://localhost:1420`（dev） | `200` + `Access-Control-Allow-Origin: http://localhost:1420` |
+| `http://tauri.localhost`（生产） | **`403 已禁止`** |
+
+放行方式（无需管理员权限，可随时改回）：
+
+```powershell
+[System.Environment]::SetEnvironmentVariable('OLLAMA_ORIGINS',
+  'http://tauri.localhost,http://localhost:*,http://127.0.0.1:*','User')
+```
+
+设完**必须重启 Ollama**（托盘图标退出后重新打开）才生效。
+注意这不是本项目代码缺陷，也**不是 CSP 问题** —— 被 CSP 拦会报 `Refused to connect`。
+
+### 安装包红线自检（在裸 exe 二进制里逐字符串搜）
+
+| 关键字 | 结果 |
+|---|---|
+| `9222` | 未命中 ✅ |
+| `remote-debugging` | 未命中 ✅ |
+| 硬编码 API Key（`sk-*` / `Bearer *` / `api_key=`） | 源码扫描零命中 ✅ |
+| `additionalBrowserArgs` | 命中，但那是 Tauri 自身给 WebView2 传 `--disable-features=…` 的字段名；本项目 `tauri.conf.json` 未配置该项 |
+
+打包注意：`target/release` 从零重建时，实时防护会偶发抢占新产物，报
+`link.exe` / `icu_properties_data` 的 `拒绝访问 (os error 5)`，**原样重试一次即过**（本阶段实测）。
 
 取数与切片流程见 [`README_OSM.md`](./README_OSM.md)。
 
