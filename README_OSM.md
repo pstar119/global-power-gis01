@@ -471,3 +471,59 @@ API Key 再问同样两句，SQL 通路与断言完全一致。
 
 ![左侧 AI 工作台折叠后只剩导轨](docs/screenshots/phase33-workbench-collapsed.png)
 
+## 十二、阶段36 实测数据（2026-09-13）
+
+### 关键指标
+
+| 项 | 实测 |
+|---|---|
+| 弹窗 DOM 父节点 | `.viewport`（修复前在地图容器内，被堆叠上下文困住） |
+| 弹窗计算样式 `z-index` | `10` |
+| 弹窗矩形内采样点命中自身 | **9 / 9**（修复前 6/9） |
+| 图层面板 `left` | 折叠前 352px → **110ms 中间态 112.626px** → 终态 64px |
+| `transition` | `left 0.22s ease` |
+| 统计数字动画 | `_statPop_1rvwk_1`（CSS Modules 加前缀）、`0.28s`、刷新瞬间 `opacity 0.55`、`running=1` |
+| 控制台 | error / 异常 = **0** |
+| `npm run build` | exit **0** |
+
+### 🔴 核心：单纯给弹窗加 `z-index` 是**无效**的
+
+`.mapContainer` 是 `position:absolute; z-index:0` —— 它自己形成一个**堆叠上下文**，
+作为它后代的弹窗 `z-index` 再大，也只能在这个上下文**内部**比较，
+永远压不过兄弟节点上的浮动面板（`.layerPanel` z-index:1、AI 工作台 z-index:2）。
+反过来把 `.mapContainer` 提到面板之上也不行：不透明的画布会把面板整个盖掉。
+
+**修法**：在 `popup` 的 `open` 事件里把弹窗 DOM **搬到 `.viewport`**（与面板同级），再由 CSS 抬到 `z-index: 10`。
+搬家不改位置的原因：`.mapContainer` 是 `inset:0`，与 `.viewport` 原点完全重合，
+所以 MapLibre 写在元素上的 `transform: translate(...)` 不需要任何换算。
+挂在 `open` 而不是每个点击处理里，一处就能覆盖全部 5 个弹窗来源。
+
+### 折叠动画：先纠正「地图视窗平滑扩展」的事实
+
+地图容器是 `inset:0`，**一直全宽**，折叠不会让画布变大；变化的只是被面板盖住的面积。
+所以落地为「左侧两个面板平滑位移」，并顺手修掉一个真 bug：
+折叠后面板原本停在 12px，会与宽约 32px 的竖向导轨**重叠** —— 现在 `.railOnly` 把它推到 64px。
+
+bbox 不受影响：`boundsFromCamera()` 用的是容器尺寸（折叠不变）+ 中心 + 缩放；
+地图没有移动，所以也不会误触发阶段31 的「视野变了就清结果」。
+
+### 统计数字过渡（纯 CSS，零依赖）
+
+不做「数字滚动」：那需要 JS 逐帧插值（等于自带一个小动画库），
+而统计每 200ms 防抖刷新一次，滚动动画会互相打断、反而更花。
+改用 `key={值}` 触发节点重挂 + `@keyframes statPop`（0.28s 淡入 + 1px 位移 + 0.96 缩放），
+配合已有的 `font-variant-numeric: tabular-nums` 不抖动，并加 `prefers-reduced-motion: reduce` 降级。
+
+### 验收脚本自身踩的坑（记下来省得再犯）
+
+1. `‹` 这个折叠箭头**侧边栏也在用**（阶段9 定的），全局找按钮会点到侧边栏 ⇒ 表现为「折叠没发生」。
+   必须限定在 `section[aria-label="地图查询"]` 内找。
+2. MapLibre 弹窗有**外围透明留白**（给小三角的位置），那部分按设计不接收点击 ⇒
+   采样必须用 `.maplibregl-popup-content`，拿外层 `.maplibregl-popup` 会得到假失败。
+3. CSS Modules 会给 `@keyframes` **加模块前缀**（实测 `_statPop_1rvwk_1`）⇒ 断言只能做包含判断。
+4. 验收脚本的模板字符串里**不能用反引号写注释**，会提前截断字符串（实测报 `popup is not defined`）。
+
+![弹窗完整显示在左侧面板之上](docs/screenshots/phase36-popup-above-panels.png)
+
+![折叠过渡中间态（~110ms，面板停在 112.6px）](docs/screenshots/phase36-collapse-transition-mid.png)
+
