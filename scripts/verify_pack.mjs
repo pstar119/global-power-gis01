@@ -38,15 +38,34 @@ const LOWZOOM_CAP_FROM = 8;
 async function main() {
   const rel = process.argv[2];
   if (!rel) {
-    console.error("用法: node scripts/verify_pack.mjs <pack.pmtiles> [--zoom 0,4,6,12]");
+    console.error(
+      "用法: node scripts/verify_pack.mjs <pack.pmtiles> [选项]\n" +
+        "  --zoom a,b,c        抽样级别（默认 0,4,6,12）\n" +
+        "  --expect-cap <n>    期望的低级别封顶值（默认 20000）。\n" +
+        "                      ‼️ 传 0 表示「本包按设计不封顶」—— 核心区归档\n" +
+        "                      src-tauri/resources/maps/osm_grid.pmtiles 就是这种，\n" +
+        "                      它必须保持 build_pmtiles.mjs 的默认参数。此时唯一体积护栏是 500 KB 硬限。\n" +
+        "  --src-meta <prefix> 源 meta 前缀（默认从包名去 osm- 前缀推）。\n" +
+        "                      核心区归档包名是 osm_grid 而 meta 叫 core_power_meta.json，所以要显式传 core。",
+    );
     process.exitCode = 2;
     return;
   }
   const packPath = resolve(ROOT, rel);
-  const zoomArg = process.argv.includes("--zoom")
-    ? process.argv[process.argv.indexOf("--zoom") + 1]
-    : "0,4,6,12";
-  const zooms = zoomArg.split(",").map(Number);
+  const argOf = (name, dflt) =>
+    process.argv.includes(name) ? process.argv[process.argv.indexOf(name) + 1] : dflt;
+  const zooms = String(argOf("--zoom", "0,4,6,12")).split(",").map(Number);
+  /**
+   * 阶段43：封顶値不再是硬编码常量。
+   *
+   * ‼️ 原先无条件断言「z<8 每片 <= 20000」—— 那是**把构建参数当成了不变量**。
+   *    可选包确实开了封顶，但核心区归档按设计**不开**（见 build_pmtiles.mjs 的
+   *    maxFeaturesPerTile 注释：核心区默认值必须保持不变，否则阶段29~37 的结论被推翻）。
+   *    铁路数据进来后核心区 z6 到了 20,207 个要素，这条断言就报了一个
+   *    **与真实风险无关的假失败**。现在把前提显式化：传 0 = 不适用。
+   */
+  const expectCap = Number(argOf("--expect-cap", String(LOWZOOM_CAP)));
+  const srcMetaPrefix = argOf("--src-meta", null);
 
   const raw = readFileSync(packPath);
   const pm = new PMTiles({
@@ -110,6 +129,21 @@ async function main() {
   /** ‼️ 解码失败必须计数而不能静默跳过 —— 阶段42 的「假断言」就是静默跳过造成的 */
   let decodeFailed = 0;
   let decodeErrMsg = null;
+  /**
+   * ‼️ 阶段43：空属性值计数器。
+   *
+   * 背景：vt-pbf 遇到 `undefined` 属性值时，会走 JSON.stringify(undefined) -> undefined
+   * -> writeValue 三个分支都不匹配 -> 写出一条**空值消息**。
+   * 写入侧不报错，**但读取侧会**：MapLibre 解到空值消息会报
+   * `unknown feature value` 并**整张瓦片放弃解析**（静默不渲染）。
+   *
+   * 而本脚本用的 @mapbox/vector-tile 比 MapLibre 宽松，会把它解成 null/undefined，
+   * 所以必须**显式**检查 —— 否则这个 bug 依然能一路走到「全部通过」。
+   * （真实案例：铁路要素没有 vclass，低级别标签收敛时硬写 vclass 就产生了这个空值，
+   *   核心区归档 z0/z1 直接挂了，而华东可选包因为封顶把铁路在 z<8 丢光了反而看不出来。）
+   */
+  let emptyPropValues = 0;
+  let emptyPropSample = null;
   for (const z of zooms) {
     const n = 1 << z;
     /**
@@ -172,6 +206,14 @@ async function main() {
           hist[k] = (hist[k] ?? 0) + 1;
           const t = p.ftype;
           if (keysByType[t]) for (const key of Object.keys(p)) keysByType[t].add(key);
+          // 空值消息检出（详见 emptyPropValues 的注释）
+          for (const key of Object.keys(p)) {
+            const v = p[key];
+            if (v === undefined || v === null) {
+              emptyPropValues++;
+              if (!emptyPropSample) emptyPropSample = `z${z}/${x}/${y} ftype=${t} key=${key}`;
+            }
+          }
         }
       }
     }
@@ -197,10 +239,11 @@ async function main() {
 
   // 源要素数：从 prepare 产出的 meta 读（可选包名 osm-<region>.pmtiles 对应 <region>_power_meta.json）
   const base = basename(packPath).replace(/^osm-/, "").replace(/\.pmtiles$/, "");
+  const metaPrefix = srcMetaPrefix ?? base;
   let srcCount = null;
   try {
     srcCount = JSON.parse(
-      readFileSync(resolve(ROOT, "public", "osm", `${base}_power_meta.json`), "utf8"),
+      readFileSync(resolve(ROOT, "public", "osm", `${metaPrefix}_power_meta.json`), "utf8"),
     ).featureCount;
   } catch {
     srcCount = null;
@@ -227,17 +270,34 @@ async function main() {
       通过: deepest.feats >= srcCount,
     });
   } else {
-    console.log(`ℹ️ 未能读到源要素数（public/osm/${base}_power_meta.json），跳过「不丢数据」断言`);
+    console.log(
+      `ℹ️ 未能读到源要素数（public/osm/${metaPrefix}_power_meta.json），跳过「不丢数据」断言`,
+    );
   }
 
-  checks.push({
-    断言: `抽样级别 z<${LOWZOOM_CAP_FROM} 的瓦片没有超过封顶上限 ${LOWZOOM_CAP.toLocaleString()} 要素`,
-    实测: results
-      .filter((r) => r.z < LOWZOOM_CAP_FROM)
-      .map((r) => `z${r.z}:${r.maxTileFeats}`)
-      .join(" "),
-    通过: results.filter((r) => r.z < LOWZOOM_CAP_FROM).every((r) => r.maxTileFeats <= LOWZOOM_CAP),
-  });
+  if (expectCap > 0) {
+    checks.push({
+      断言: `抽样级别 z<${LOWZOOM_CAP_FROM} 的瓦片没有超过封顶上限 ${expectCap.toLocaleString()} 要素`,
+      实测: results
+        .filter((r) => r.z < LOWZOOM_CAP_FROM)
+        .map((r) => `z${r.z}:${r.maxTileFeats}`)
+        .join(" "),
+      通过: results.filter((r) => r.z < LOWZOOM_CAP_FROM).every((r) => r.maxTileFeats <= expectCap),
+    });
+  } else {
+    // 未启用封顶的包（核心区归档）：这条不适用，但要**响亮说明**而不是默默跳过。
+    // 此时 500 KB 硬限是唯一体积护栏（就是上面那条断言）。
+    const lowZoomTiles = results.filter((r) => r.z < LOWZOOM_CAP_FROM);
+    const maxLowZoomFeats = lowZoomTiles.length
+      ? Math.max(...lowZoomTiles.map((r) => r.maxTileFeats))
+      : 0;
+    const biggestKb = biggest ? (biggest.maxTileBytes / 1024).toFixed(1) : "?";
+    console.log(
+      `ℹ️ --expect-cap 0：本包按设计**未启用**低级别封顶（核心区归档必须保持切片默认参数）。\n` +
+        `   跳过封顶断言；z<${LOWZOOM_CAP_FROM} 实测最大单瓦片 ${maxLowZoomFeats.toLocaleString()} 要素，\n` +
+        `   此时 **500 KB 硬限**是唯一体积护栏 —— 见上面第一条断言（本包实测 ${biggestKb} KB）。`,
+    );
+  }
 
   // ---- 阶段42 新增的两条断言 ----
   // ① 解码失败必须响亮失败：原先 catch 里静默 continue，
@@ -246,6 +306,16 @@ async function main() {
     断言: "所有抽样瓦片都能解码（不允许静默跳过）",
     实测: `${decodeFailed} 张解码失败${decodeErrMsg ? `；首个错误：${decodeErrMsg}` : ""}`,
     通过: decodeFailed === 0,
+  });
+
+  // ③ 阶段43：属性值里不能有空值。
+  //    这条专为捕获「vt-pbf 写出空值消息、MapLibre 整片放弃解析」这一类问题 ——
+  //    它与解码失败不同：宽松解码器（如本脚本用的那个）不会报错，
+  //    于是瓦片在验收里「可解码」，到了真机上却什么都不显示。
+  checks.push({
+    断言: "抽样瓦片的属性值都是有效类型（无 undefined/null，否则 MapLibre 会整片放弃解析）",
+    实测: emptyPropValues === 0 ? "0 个空值" : `${emptyPropValues} 个空值，首个：${emptyPropSample}`,
+    通过: emptyPropValues === 0,
   });
 
   // ② 属性白名单：z>=8 的瓦片应保留各 ftype 的专属属性。

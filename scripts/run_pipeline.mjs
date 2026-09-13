@@ -40,9 +40,48 @@ const ALL_STAGES = ["scan", "fetch", "prepare", "build"];
 const DEFAULT_STAGES = ["fetch", "prepare", "build"];
 
 // ---------------------------------------------------------------- 参数
+/**
+ * 阶段43：抓取类别。
+ *
+ * ‼️ 为什么要拆分：抓取很贵（华东电力 44~50 秒/块 × 64 块）。
+ *    如果只想补一批管道（比如新增某条长输管线），绝不应该把电网数据重抓一遍。
+ *    每个类别的产物/断点/meta 完全隔离（见 `fetch_osm_power.py` 的 `geom_path` /
+ *    `progress_path` / `meta_path`），所以可以单独重跑。
+ *
+ * `grid` 的含义：
+ *  - `region`：沿用区域网格（与电力一致，块尺寸已实测安全）；
+ *  - `coarse`：把块放大到边长约 `COARSE_CHUNK_DEG` 度。
+ *    管道极稀疏（全国 7 区域加起来才千条量级），用电力那种小块会
+ *    把时间全花在几十次空查询上；但也不能直接 1x1 —— Overpass 单次上限 180 秒，
+ *    西北 bbox 有 669 deg²，实测外推会超时。所以要按面积限幅。
+ */
+const CATEGORY_INFO = {
+  power: { label: "电力", metaFile: (n) => `${n}_power_meta.json`, grid: "region" },
+  rail: { label: "铁路干线", metaFile: (n) => `${n}_rail_meta.json`, grid: "region" },
+  pipeline: { label: "油气管道", metaFile: (n) => `${n}_pipeline_meta.json`, grid: "coarse" },
+};
+/** `coarse` 策略的目标块边长（度）。9° -> 约 80 deg²/块，实测外推单块 < 90 秒 */
+const COARSE_CHUNK_DEG = 9;
+
+/**
+ * 某一类别在某批次上的分块方案。
+ * ⚠️ 返回的 `cols/rows` 直接传给 `fetch_osm_power.py --grid`，
+ *    必须与该类别已有的断点文件对应的网格一致，否则断点对不上会全部重抓
+ *    （数据不会错，只是白跑）。
+ */
+function gridForCategory(region, category, target) {
+  if (CATEGORY_INFO[category]?.grid !== "coarse") return gridFor(region, target);
+  const [w, s, e, n] = region.bbox;
+  return {
+    cols: Math.max(1, Math.round((e - w) / COARSE_CHUNK_DEG)),
+    rows: Math.max(1, Math.round((n - s) / COARSE_CHUNK_DEG)),
+  };
+}
+
 function parseArgs(argv) {
   const cfg = {
     regions: null,
+    categories: ["power"],
     stages: new Set(DEFAULT_STAGES),
     target: { ...CELL_MEASURED },
     scanFactor: 3,
@@ -63,6 +102,11 @@ function parseArgs(argv) {
     const a = argv[i];
     const next = () => argv[++i];
     if (a === "--regions") cfg.regions = next().split(",").map((s) => s.trim()).filter(Boolean);
+    else if (a === "--category") {
+      cfg.categories = next().split(",").map((s) => s.trim()).filter(Boolean);
+      const bad = cfg.categories.filter((c) => !CATEGORY_INFO[c]);
+      if (bad.length) throw new Error(`未知类别：${bad.join(",")}；可用：${Object.keys(CATEGORY_INFO).join(",")}`);
+    }
     else if (a === "--stage") cfg.stages = new Set(next().split(",").map((s) => s.trim()).filter(Boolean));
     else if (a === "--target-cell") {
       const [lon, lat] = next().split("x").map(Number);
@@ -81,6 +125,11 @@ function parseArgs(argv) {
           "用法: node scripts/run_pipeline.mjs [选项]",
           "",
           "  --regions a,b   只跑指定批次（默认全部，按密度递减顺序）",
+          "  --category <list>  抓取类别，逗号分隔。默认 power",
+          "                     power    电力设施（线路/变电站/电厂）",
+          "                     rail     铁路干线（railway=rail 且无 service，不含地铁轻轨）",
+          "                     pipeline 油气管道（man_made=pipeline 且 substance=gas|oil）",
+          "                     ‼️ 各类别产物/断点/meta 完全隔离，可单独重跑某一类而不碰其他类",
           "  --stage s1,s2   要执行的阶段：fetch,prepare,build,scan（默认 fetch,prepare,build）",
           "                  不加 scan：实测它只快 ~1.5x 却换不到数据，直接抓更划算",
           "  --target-cell   目标块尺寸 lonxlat（默认对齐华东实测 1.1875x1.9375）",
@@ -272,33 +321,58 @@ async function processRegion(region, cfg, report) {
     }
   }
 
-  // ---- 2. 抓取 ----
+  // ---- 2. 抓取（按类别逐个跑）----
+  // ‼️ 每个类别的产物 / 断点 / meta 完全隔离（见 fetch_osm_power.py 的
+  //    geom_path / progress_path / meta_path），所以「只补管道」不会碰电网数据。
   if (cfg.stages.has("fetch")) {
-    console.log(`\n[fetch] ${chunks} 块串行抓取（可随时中断，重跑同一条命令即续抓）`);
-    const res = await runStep(
-      "fetch",
-      PY,
-      [...PY_ARGS_PREFIX, "scripts/fetch_osm_power.py", "--bbox", bboxStr, "--grid", `${cols}x${rows}`, "--name", name],
-      logFile,
-    );
-    const meta = readJson(join(ROOT, "data", "osm", `${name}_power_meta.json`));
-    rec.stages.fetch = {
-      exit: res.code,
-      elapsedSec: meta?.elapsed_sec ?? null,
-      complete: meta?.complete ?? null,
-      failedChunks: meta?.failed_chunks?.length ?? null,
-      duplicatesDropped: meta?.duplicates_dropped ?? null,
-      outputs: meta?.outputs ?? null,
-      voltageClasses: meta?.voltage_class_histogram ?? null,
-    };
-    if (meta?.failed_chunks?.length) {
-      console.error(`\n${"⚠️".repeat(30)}`);
-      console.error(`⚠️ 批次 ${region.label} 有 ${meta.failed_chunks.length} 个失败块，数据存在覆盖空洞：`);
-      for (const c of meta.failed_chunks) console.error(`     ${c.join(",")}`);
-      console.error(`   补齐：node scripts/run_pipeline.mjs --regions ${name} --stage fetch`);
-      console.error(`${"⚠️".repeat(30)}`);
+    rec.stages.fetch = {};
+    let fetchFailed = false;
+    for (const cat of cfg.categories) {
+      const info = CATEGORY_INFO[cat];
+      const g = gridForCategory(region, cat, cfg.target);
+      const catChunks = g.cols * g.rows;
+      console.log(`\n[fetch:${cat}] ${info.label} —— ${g.cols}x${g.rows} = ${catChunks} 块串行抓取（可中断，重跑同一条命令即续抓）`);
+      if (catChunks !== chunks) {
+        console.log(`           （与区域网格 ${cols}x${rows} 不同：${info.grid === "coarse" ? "本类别极稀疏，块已放大以避开大量空查询" : "与区域一致"}）`);
+      }
+      const res = await runStep(
+        `fetch:${cat}`,
+        PY,
+        [
+          ...PY_ARGS_PREFIX,
+          "scripts/fetch_osm_power.py",
+          "--bbox", bboxStr,
+          "--grid", `${g.cols}x${g.rows}`,
+          "--name", name,
+          "--category", cat,
+        ],
+        logFile,
+      );
+      const meta = readJson(join(ROOT, "data", "osm", info.metaFile(name)));
+      rec.stages.fetch[cat] = {
+        label: info.label,
+        grid: `${g.cols}x${g.rows}`,
+        chunks: catChunks,
+        exit: res.code,
+        elapsedSec: meta?.elapsed_sec ?? null,
+        complete: meta?.complete ?? null,
+        failedChunks: meta?.failed_chunks?.length ?? null,
+        duplicatesDropped: meta?.duplicates_dropped ?? null,
+        outputs: meta?.outputs ?? null,
+        // 电压分档只对电力有意义（铁路/管道没有 voltage）
+        voltageClasses: cat === "power" ? (meta?.voltage_class_histogram ?? null) : null,
+      };
+      if (meta?.failed_chunks?.length) {
+        fetchFailed = true;
+        console.error(`\n${"⚠️".repeat(30)}`);
+        console.error(`⚠️ 批次 ${region.label} / ${info.label} 有 ${meta.failed_chunks.length} 个失败块，数据存在覆盖空洞：`);
+        for (const c of meta.failed_chunks) console.error(`     ${c.join(",")}`);
+        console.error(`   补齐：node scripts/run_pipeline.mjs --regions ${name} --stage fetch --category ${cat}`);
+        console.error(`${"⚠️".repeat(30)}`);
+      }
+      if (res.code !== 0 || meta?.complete === false) fetchFailed = true;
     }
-    if (res.code !== 0 || meta?.complete === false) {
+    if (fetchFailed) {
       if (!cfg.force) {
         rec.status = "fetch-incomplete";
         report.regions[name] = rec;
@@ -400,6 +474,9 @@ async function main() {
   console.log("=== 阶段38 全国分批流水线 ===");
   console.log(`批次     : ${picked.map((r) => r.label).join(" → ")}`);
   console.log(`阶段     : ${[...cfg.stages].join(",")}`);
+  console.log(
+    `类别     : ${cfg.categories.map((c) => `${c}（${CATEGORY_INFO[c].label}）`).join(" + ")}`,
+  );
   console.log(`可选包   : ${cfg.packDir}/osm-<region>.pmtiles（不进安装包；该目录已被 .gitignore 忽略）`);
   console.log(`合计块数 : ${totalChunks}`);
   console.log(
@@ -417,7 +494,13 @@ async function main() {
       if (cfg.stages.has("scan"))
         console.log(`  ${PY} -u scripts/fetch_osm_power.py --bbox ${bboxStr} --grid ${cols}x${rows} --sample-step ${s.step} --name ${r.key} --count-only   # ${s.cells}/${cols * rows} 块`);
       if (cfg.stages.has("fetch"))
-        console.log(`  ${PY} -u scripts/fetch_osm_power.py --bbox ${bboxStr} --grid ${cols}x${rows} --name ${r.key}`);
+        for (const cat of cfg.categories) {
+          const g = gridForCategory(r, cat, cfg.target);
+          console.log(
+            `  ${PY} -u scripts/fetch_osm_power.py --bbox ${bboxStr} --grid ${g.cols}x${g.rows} --name ${r.key} --category ${cat}` +
+              `   # ${CATEGORY_INFO[cat].label}，${g.cols * g.rows} 块`,
+          );
+        }
       if (cfg.stages.has("prepare"))
         console.log(`  node scripts/prepare_osm_geojson.mjs --name ${r.key} --out-dir public/osm --out-name ${r.key}_power`);
       if (cfg.stages.has("build"))
@@ -451,6 +534,18 @@ async function main() {
 
   // ---- 汇总 ----
   console.log(`\n\n${"=".repeat(72)}\n=== 流水线汇总 ===\n${"=".repeat(72)}`);
+  /** 阶段43：每类的失败块数括起来，任一类有空洞都能一眼看到 */
+  const fetchSummary = (r) => {
+    const f = r.stages?.fetch;
+    if (!f) return "—";
+    // 兼容阶段42 及以前的旧报表：那时 stages.fetch 是单对象而不是按类别分键
+    if (typeof f.failedChunks !== "undefined") return f.failedChunks ?? "—";
+    const vals = Object.values(f).filter((v) => v && typeof v === "object");
+    if (!vals.length) return "—";
+    return Object.entries(f)
+      .map(([c, v]) => `${c}:${v?.failedChunks ?? "?"}`)
+      .join(" ");
+  };
   const rows = Object.values(report.regions).map((r) => ({
     批次: r.label ?? r.key,
     状态: r.status,
@@ -458,7 +553,7 @@ async function main() {
     可选包MB: r.stages?.build?.packSizeMb ?? "—",
     最大瓦片KB: r.stages?.build?.widest?.rawKb ?? "—",
     封顶丢弃: r.stages?.build?.cappedDropped ?? "—",
-    失败块: r.stages?.fetch?.failedChunks ?? "—",
+    失败块: fetchSummary(r),
   }));
   console.table(rows);
   console.log(`报表：${cfg.reportPath}`);

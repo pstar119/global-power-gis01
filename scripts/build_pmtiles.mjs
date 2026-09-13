@@ -362,7 +362,17 @@ async function main() {
       if (tz < cfg.fullPropsFromZoom) {
         for (const f of tile.features) {
           const t = f.tags ?? {};
-          f.tags = { ftype: t.ftype, vclass: t.vclass };
+          // 🔴 阶段43 修复：不能无脑写成 `{ ftype, vclass }`。
+          //    铁路/管道**没有 vclass**（没有电压概念），硬写会产生 `vclass: undefined`
+          //    → vt-pbf 的 writeProperties 走 JSON.stringify(undefined) → undefined
+          //    → writeValue 三个分支都不匹配 → 写出一条**空值消息**。
+          //    ⚠️ 写入侧确实不抛错（已读源码确认），但**读取侧会抛**：
+          //       MapLibre 解到空值消息时报 `unknown feature value`，整张瓦片解析失败、
+          //       静默不渲染。实测：核心区归档（不封顶，铁路会进 z0/z1）启动即报错；
+          //       华东可选包（封顶，铁路在 z<8 已被 pickForLowZoom 丢光）看不出问题 ——
+          //       这正是这个 bug 前面几轮没被发现的原因。
+          //    修法：只在 vclass 真实存在时才写这个键。
+          f.tags = "vclass" in t ? { ftype: t.ftype, vclass: t.vclass } : { ftype: t.ftype };
         }
       }
       // 🔴 必须显式指定 version: 2。
