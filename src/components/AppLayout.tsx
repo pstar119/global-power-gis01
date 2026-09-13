@@ -5,11 +5,13 @@ import MapPage from "../pages/MapPage";
 import StatsPage from "../pages/StatsPage";
 import SettingsPage from "../pages/SettingsPage";
 import type {
+  ConversationTurn,
   MapCommand,
   ParsedQuery,
   PlantFocus,
   QueryContext,
 } from "../lib/nlq";
+import { MAX_STORED_TURNS } from "../lib/nlq";
 import styles from "./AppLayout.module.css";
 
 const APP_TITLE = "Global Power GIS";
@@ -61,6 +63,17 @@ function AppLayout() {
    * ⚠️ 它只负责**标记表格里的选中行**；真正飞过去靠同一条 MapCommand 通道。
    */
   const [focusedPlant, setFocusedPlant] = useState<PlantFocus | null>(null);
+
+  /**
+   * 阶段33：共享的多轮对话记忆。
+   *
+   * ⚠️ 放这里而不是各页面自己存：地图页工作台与设置页面板是两个**兄弟组件**，
+   *    各存一份会变成两段互不可见的对话（在一边追问，另一边完全不知道）。
+   * ⚠️ 仍然只用 useState + Props，**不引入任何状态库**。
+   */
+  const [history, setHistory] = useState<readonly ConversationTurn[]>([]);
+  const handleQueryDone = (turn: ConversationTurn) =>
+    setHistory((prev) => [...prev, turn].slice(-MAX_STORED_TURNS));
 
   const handleFocusPlant = (plant: PlantFocus) => {
     commandSeq.current += 1;
@@ -125,6 +138,8 @@ function AppLayout() {
               onClearMap={handleClearMap}
               onFocusPlant={handleFocusPlant}
               focusedPlant={focusedPlant}
+              history={history}
+              onQueryDone={handleQueryDone}
             />
           </div>
 
@@ -141,6 +156,8 @@ function AppLayout() {
               staleSeq={staleSeq}
               onFocusPlant={handleFocusPlant}
               focusedPlant={focusedPlant}
+              history={history}
+              onQueryDone={handleQueryDone}
             />
           </div>
         </section>

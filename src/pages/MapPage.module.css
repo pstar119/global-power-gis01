@@ -570,3 +570,10 @@
   font-size: 0.75rem;
   line-height: 1.3;
 }
+
+/* ---------- 阶段33：AI 工作台展开时，把左侧浮动面板右推 ----------
+   工作台固定在左边缘（展开 320px），图层控制与视野统计随之右移，避免三者抢空间。 */
+.withBench .layerPanel,
+.withBench .statsPanel {
+  left: 352px;
+}

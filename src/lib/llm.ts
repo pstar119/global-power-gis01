@@ -19,6 +19,8 @@ import {
   buildSql,
   describeQuery,
   formatViewport,
+  hasCoreference,
+  type ConversationTurn,
   type Intent,
   type ParseResult,
   type ParsedQuery,
@@ -232,6 +234,32 @@ function viewportPromptBlock(ctx?: QueryContext | null): string {
 {"ok":true,"intent":"country","inViewport":true}
 这里的风电装机容量
 {"ok":true,"intent":"fuel","fuel":"Wind","inViewport":true}`;
+}
+
+/**
+ * 阶段33：把「上一轮对话」拼成提示词的一段。
+ * 没有历史时返回空串 —— 提示词逐字不变，零回归。
+ */
+function historyPromptBlock(history?: readonly ConversationTurn[] | null): string {
+  if (!history?.length) return "";
+
+  const lines = history.map((t, i) => {
+    const parsed = JSON.stringify({
+      intent: t.query.intent,
+      ...(t.query.fuel ? { fuel: t.query.fuel } : {}),
+      ...(t.query.country ? { country: t.query.country } : {}),
+      ...(t.query.limit ? { limit: t.query.limit } : {}),
+      ...(t.query.viewport ? { inViewport: true } : {}),
+    });
+    return `${i + 1}. 问：${t.question}\n   解析：${parsed}\n   说明：${t.summary}`;
+  });
+
+  return `
+
+【对话上下文（最近的在最后；当前问题是最后一条的追问）】
+${lines.join("\n")}
+
+判定规则：\n- 出现「那…呢 / 还是 / 同样 / 那么」这类指代时，继承上一轮**未被改写**的约束（尤其是 inViewport 与国家/燃料），只替换用户显式改写的部分。\n- 问题自成完整语义时（例如「全球最大的5个水电站呢？」）**不要**继承。\n- 仍然不要输出坐标，inViewport 只是布尔值。\n\n示例：\n上一轮 {"intent":"plant","inViewport":true,"limit":10}\n那最大的5个水电站呢？\n{"ok":true,"intent":"plant","fuel":"Hydro","inViewport":true,"limit":5}`;
 }
 
 /** HTTP 状态码 -> 给用户看的可操作提示 */
@@ -514,6 +542,8 @@ function extractJson(raw: string): unknown {
 function toParseResult(
   payload: unknown,
   ctx?: QueryContext | null,
+  text?: string,
+  history?: readonly ConversationTurn[] | null,
 ): ParseResult {
   if (typeof payload !== "object" || payload === null) {
     return {
@@ -567,6 +597,20 @@ function toParseResult(
     query.viewport = ctx.viewport;
   }
 
+  // 阶段33：追问的指代继承（确定性兜底）。
+  // ‼️ 实测本地 qwen2.5:7b 在追问时**经常不输出** inViewport ——
+  //    一旦漏掉，「那最大的5个水电站呢？」就会静默退回全球查询，
+  //    把上一轮的地理框架丢掉（这恰恰是本阶段要保证的能力）。
+  //    因此这里按与本地引擎 parseNaturalQuery 相同的判定补一条硬规则：
+  //    出现指代词 + 上一轮带视野 + 本轮没换国家 + 模型没有已给出视野 → 继承上一轮视野。
+  //    模型答极端情况（比如用户其实想换国家）由 |query.country| 拦住，不会误继承。
+  if (!query.viewport && !query.country && ctx?.viewport && text && history?.length) {
+    const prev = history[history.length - 1];
+    if (prev?.query?.viewport && hasCoreference(text)) {
+      query.viewport = prev.query.viewport;
+    }
+  }
+
   // 复用本地引擎的 SQL 生成与说明文案，保证两条路径行为完全一致
   return {
     ok: true,
@@ -585,6 +629,7 @@ export async function parseQuery(
   userInput: string,
   config: AiConfig,
   context?: QueryContext | null,
+  history?: readonly ConversationTurn[] | null,
 ): Promise<ParseResult> {
   const input = userInput.trim();
   if (!input) {
@@ -602,10 +647,13 @@ export async function parseQuery(
   }
 
   const r = await callChatApi(config, [
-    { role: "system", content: SYSTEM_PROMPT + viewportPromptBlock(context) },
+    {
+      role: "system",
+      content: SYSTEM_PROMPT + viewportPromptBlock(context) + historyPromptBlock(history),
+    },
     { role: "user", content: input },
   ]);
   if (!r.ok) return { ok: false, message: r.message, suggestions: EXAMPLES };
 
-  return toParseResult(extractJson(r.content), context);
+  return toParseResult(extractJson(r.content), context, input, history);
 }

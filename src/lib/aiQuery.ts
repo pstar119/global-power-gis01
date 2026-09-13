@@ -22,6 +22,7 @@ import {
 } from "./llm";
 import {
   parseNaturalQuery,
+  type ConversationTurn,
   type ParseResult,
   type QueryContext,
 } from "./nlq";
@@ -121,6 +122,11 @@ export interface RunAiQueryOptions {
    * 不传则等价于「没有可用配置」，同样回退本地。
    */
   config?: AiConfig | null;
+  /**
+   * 阶段33：多轮对话记忆。两条路径（大模型 / 本地规则引擎）都支持追问，
+   * 所以历史要同时传给它们。
+   */
+  history?: readonly ConversationTurn[] | null;
 }
 
 /**
@@ -134,8 +140,8 @@ export async function runAiQuery(
   opts: RunAiQueryOptions = {},
 ): Promise<QueryState> {
   const parsed = opts.config
-    ? await parseQuery(question, opts.config, opts.context)
-    : parseNaturalQuery(question, opts.context);
+    ? await parseQuery(question, opts.config, opts.context, opts.history)
+    : parseNaturalQuery(question, opts.context, opts.history);
 
   if (!parsed.ok) {
     return {

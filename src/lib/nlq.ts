@@ -134,6 +134,41 @@ export function samePlant(
   return a.name === b.name && a.lat === b.lat && a.lon === b.lon;
 }
 
+/**
+ * 阶段33：一轮已完成的问答，用于追问时给模型 / 本地引擎提供上下文。
+ *
+ * 🔴 刻意**不保存 bbox 坐标**，只保存「上一轮是否限定当前视野」这个事实 ——
+ *    坐标每次解析都从 live 视野重新注入。否则用户平移地图后追问会拿旧快照去查，
+ *    正是阶段32 刚修掉的那类坑。
+ */
+export interface ConversationTurn {
+  question: string;
+  /** describeQuery() 的产物：给人看，也给模型看 */
+  summary: string;
+  query: ParsedQuery;
+}
+
+/** 内存里最多保留多少轮（界面默认只露 5 轮，「展开更多」可看全部） */
+export const MAX_STORED_TURNS = 20;
+/** 界面上默认展示的轮数 */
+export const HISTORY_SHOWN_TURNS = 5;
+
+/** 追问指代词：出现这些词、且问题本身没给新范围时，继承上一轮的约束 */
+const COREFERENCE_WORDS: readonly string[] = [
+  "那",
+  "呢",
+  "还是",
+  "同样",
+  "那么",
+  "这个",
+  "这些",
+];
+
+/** 问题是否依赖上一轮上下文（纯函数，可独立验证） */
+export function hasCoreference(text: string): boolean {
+  return COREFERENCE_WORDS.some((w) => text.includes(w));
+}
+
 /** 燃料别名 -> WRI 的 primary_fuel 取值 */
 const FUEL_ALIASES: ReadonlyArray<readonly [string, string]> = [
   ["煤电", "Coal"],
@@ -427,6 +462,7 @@ export function describeQuery(query: ParsedQuery): string {
 export function parseNaturalQuery(
   input: string,
   ctx?: QueryContext | null,
+  history?: readonly ConversationTurn[] | null,
 ): ParseResult {
   const raw = input.trim();
   if (!raw) {
@@ -442,7 +478,14 @@ export function parseNaturalQuery(
   // 阶段31：先判空间指代。命中但拿不到视野时必须**如实拒绝** ——
   // 静默按全球查是最误导的失败方式（用户会以为「这个区域」生效了）。
   const wantsViewport = VIEWPORT_WORDS.some((w) => text.includes(w));
-  if (wantsViewport && !ctx?.viewport) {
+
+  // 阶段33：追问。「那…呢」这类指代、且问题本身没给新范围时，继承上一轮的约束 ——
+  // 否则「那最大的5个水电站呢？」会退化成全球查询，用户会以为 AI「忘了」刚才的视野。
+  const prev = history?.length ? history[history.length - 1] : undefined;
+  const followUp = !!prev && hasCoreference(text);
+  const inheritViewport = wantsViewport || (followUp && !!prev?.query.viewport);
+
+  if (inheritViewport && !ctx?.viewport) {
     return {
       ok: false,
       message:
@@ -455,7 +498,11 @@ export function parseNaturalQuery(
   const country = matchAlias(text, COUNTRY_ALIASES);
   const limit = findLimit(text);
 
-  const intent = decideIntent(text, fuel, country);
+  // ⚠️ 继承必须在 decideIntent **之前**算好：意图判定要看得到生效后的国家/燃料。
+  const effFuel = fuel ?? (followUp ? prev?.query.fuel : undefined);
+  const effCountry = country ?? (followUp ? prev?.query.country : undefined);
+
+  const intent = decideIntent(text, effFuel, effCountry);
   if (!intent) {
     return {
       ok: false,
@@ -466,10 +513,12 @@ export function parseNaturalQuery(
   }
 
   const query: ParsedQuery = { intent };
-  if (fuel) query.fuel = fuel;
-  if (country) query.country = country;
-  if (limit) query.limit = limit;
-  if (wantsViewport && ctx?.viewport) query.viewport = ctx.viewport;
+  if (effFuel) query.fuel = effFuel;
+  if (effCountry) query.country = effCountry;
+  // 追问时若没说「前几名」，沿用上一轮的条数（更贴合「记住了」的直觉）
+  const effLimit = limit ?? (followUp ? prev?.query.limit : undefined);
+  if (effLimit) query.limit = effLimit;
+  if (inheritViewport && ctx?.viewport) query.viewport = ctx.viewport;
 
   return {
     ok: true,

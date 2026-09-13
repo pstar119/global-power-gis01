@@ -17,6 +17,7 @@ import {
   formatViewport,
   samePlant,
   toPlantFocus,
+  type ConversationTurn,
   type ParsedQuery,
   type PlantFocus,
   type QueryContext,
@@ -160,6 +161,9 @@ interface AiQueryPanelProps {
   onFocusPlant?: (plant: PlantFocus) => void;
   /** 当前被聚焦的电厂（AppLayout 统一持有，两个表格据此标出同一行） */
   focusedPlant?: PlantFocus | null;
+  /** 阶段33：共享的多轮对话记忆 */
+  history?: readonly ConversationTurn[];
+  onQueryDone?: (turn: ConversationTurn) => void;
 }
 
 function AiQueryPanel({
@@ -169,6 +173,8 @@ function AiQueryPanel({
   staleSeq = 0,
   onFocusPlant,
   focusedPlant,
+  history = [],
+  onQueryDone,
 }: AiQueryPanelProps) {
   const [input, setInput] = useState("");
   const [state, setState] = useState<QueryState>({ status: "idle" });
@@ -251,14 +257,20 @@ function AiQueryPanel({
     setState({ status: "running" });
 
     // 唯一的分叉点：开关开启且配置齐备就走大模型，否则回退到本地规则引擎。
-    // 阶段31：两条路径都带上「当前视野」上下文，并共用同一个执行器
-    //         （地图页浮动查询框走的就是这一段）。
-    setState(
-      await runAiQuery(question, {
-        context: viewportRef?.current ?? null,
-        config: aiReady ? aiConfig : null,
-      }),
-    );
+    // 阶段31：两条路径都带上「当前视野」上下文；阶段33：都带上多轮对话记忆。
+    const next = await runAiQuery(question, {
+      context: viewportRef?.current ?? null,
+      config: aiReady ? aiConfig : null,
+      history,
+    });
+    setState(next);
+    if (next.status === "done") {
+      onQueryDone?.({
+        question,
+        summary: next.result.explanation,
+        query: next.result.query,
+      });
+    }
   };
 
   const columns =

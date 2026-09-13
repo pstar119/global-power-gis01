@@ -19,9 +19,11 @@ import {
 } from "../lib/aiQuery";
 import {
   EXAMPLES,
+  HISTORY_SHOWN_TURNS,
   formatViewport,
   samePlant,
   toPlantFocus,
+  type ConversationTurn,
   type ParsedQuery,
   type PlantFocus,
   type QueryContext,
@@ -46,6 +48,13 @@ interface MapQueryBoxProps {
   onFocusPlant?: (plant: PlantFocus) => void;
   /** 当前被聚焦的电厂（由 AppLayout 统一持有，跨页一致） */
   focusedPlant?: PlantFocus | null;
+  /** 阶段33：多轮对话记忆（AppLayout 持有） */
+  history?: readonly ConversationTurn[];
+  /** 阶段33：一轮查询完成后回报，供写入共享记忆 */
+  onQueryDone?: (turn: ConversationTurn) => void;
+  /** 工作台是否展开（由地图页持有，展开时会把左上的图层控制面板右推） */
+  open?: boolean;
+  onToggleOpen?: () => void;
 }
 
 function MapQueryBox({
@@ -56,9 +65,15 @@ function MapQueryBox({
   onClearMap,
   onFocusPlant,
   focusedPlant,
+  history = [],
+  onQueryDone,
+  open = true,
+  onToggleOpen,
 }: MapQueryBoxProps) {
   const [input, setInput] = useState("");
   const [state, setState] = useState<QueryState>({ status: "idle" });
+  /** 会话历史默认只露最近 5 轮，「展开更多」看全部 */
+  const [showAllHistory, setShowAllHistory] = useState(false);
 
   // 视野移动 → 上一次的视野限定结果已经对不上当前画面，清掉，
   // 不然用户会看到「地图已经飘走了，表格还停在那块区域」的误导组合。
@@ -81,8 +96,18 @@ function MapQueryBox({
     const next = await runAiQuery(q, {
       context: viewportRef?.current ?? null,
       config: enabled ? config : null,
+      history,
     });
     setState(next);
+
+    // 阶段33：成功一轮就写进共享记忆，下一次追问才能「记得」刚才的视野与约束
+    if (next.status === "done") {
+      onQueryDone?.({
+        question: q,
+        summary: next.result.explanation,
+        query: next.result.query,
+      });
+    }
 
     // 解析成功就把结果交给地图（飞过去 + 金色高亮）
     if (next.status === "done") onViewOnMap?.(next.result.query);
@@ -95,9 +120,40 @@ function MapQueryBox({
   const columns = rows.length
     ? Object.keys(rows[0]).filter((k) => !MAP_BOX_HIDDEN_COLUMNS.has(k))
     : [];
+  const shownHistory = showAllHistory
+    ? history
+    : history.slice(-HISTORY_SHOWN_TURNS);
+
+  // 折叠态：只留一条竖向导轨，不跟「图层控制」抢空间
+  if (!open) {
+    return (
+      <button
+        type="button"
+        className={styles.rail}
+        onClick={onToggleOpen}
+        aria-expanded={false}
+        title="展开 AI 工作台"
+      >
+        AI 工作台
+      </button>
+    );
+  }
 
   return (
     <section className={styles.box} aria-label="地图查询">
+      <div className={styles.head}>
+        <h2 className={styles.title}>AI 工作台</h2>
+        <button
+          type="button"
+          className={styles.collapse}
+          onClick={onToggleOpen}
+          aria-expanded={true}
+          title="折叠工作台"
+        >
+          ‹
+        </button>
+      </div>
+
       <div className={styles.row}>
         <input
           className={styles.input}
@@ -213,6 +269,32 @@ function MapQueryBox({
               {ex}
             </button>
           ))}
+        </div>
+      )}
+
+      {/* 阶段33：会话历史。默认只露最近 5 轮，可展开看全部。 */}
+      {history.length > 0 && (
+        <div className={styles.history}>
+          <p className={styles.historyLabel}>对话历史（{history.length} 轮）</p>
+          <ul className={styles.historyList}>
+            {shownHistory.map((t, i) => (
+              <li key={`${t.question}-${i}`} className={styles.historyItem}>
+                <span className={styles.historyQ}>{t.question}</span>
+                <span className={styles.historyA}>{t.summary}</span>
+              </li>
+            ))}
+          </ul>
+          {history.length > HISTORY_SHOWN_TURNS && (
+            <button
+              type="button"
+              className={styles.chip}
+              onClick={() => setShowAllHistory((v) => !v)}
+            >
+              {showAllHistory
+                ? `收起（只看最近 ${HISTORY_SHOWN_TURNS} 轮）`
+                : `展开更多（全部 ${history.length} 轮）`}
+            </button>
+          )}
         </div>
       )}
     </section>

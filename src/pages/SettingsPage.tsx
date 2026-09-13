@@ -1,7 +1,7 @@
 import type { RefObject } from "react";
 import AiQueryPanel from "../components/AiQueryPanel";import DbSelfCheck from "../components/DbSelfCheck";
 import GreetSelfCheck from "../components/GreetSelfCheck";
-import type { ParsedQuery, PlantFocus, QueryContext } from "../lib/nlq";
+import type { ConversationTurn, ParsedQuery, PlantFocus, QueryContext } from "../lib/nlq";
 import styles from "./SettingsPage.module.css";
 
 interface SettingGroup {
@@ -44,6 +44,9 @@ interface SettingsPageProps {
   onFocusPlant?: (plant: PlantFocus) => void;
   /** 阶段32：当前被聚焦的电厂（两个表格据此标出同一行） */
   focusedPlant?: PlantFocus | null;
+  /** 阶段33：共享的多轮对话记忆 */
+  history?: readonly ConversationTurn[];
+  onQueryDone?: (turn: ConversationTurn) => void;
 }
 
 function SettingsPage({
@@ -54,6 +57,8 @@ function SettingsPage({
   staleSeq,
   onFocusPlant,
   focusedPlant,
+  history,
+  onQueryDone,
 }: SettingsPageProps) {
   return (
     <div className={styles.page}>
@@ -96,6 +101,8 @@ function SettingsPage({
         staleSeq={staleSeq}
         onFocusPlant={onFocusPlant}
         focusedPlant={focusedPlant}
+        history={history}
+        onQueryDone={onQueryDone}
       />
     </div>
   );

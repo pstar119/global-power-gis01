@@ -28,6 +28,7 @@ import {
   buildBoundsSql,
   buildHighlightSql,
   viewportChanged,
+  type ConversationTurn,
   type MapCommand,
   type ParsedQuery,
   type PlantFocus,
@@ -1196,6 +1197,9 @@ interface MapPageProps {
   onFocusPlant?: (plant: PlantFocus) => void;
   /** 阶段32：当前被聚焦的电厂（用于查询框表格标出选中行） */
   focusedPlant?: PlantFocus | null;
+  /** 阶段33：共享的多轮对话记忆 */
+  history?: readonly ConversationTurn[];
+  onQueryDone?: (turn: ConversationTurn) => void;
 }
 
 function MapPage({
@@ -1206,12 +1210,17 @@ function MapPage({
   onClearMap,
   onFocusPlant,
   focusedPlant,
+  history,
+  onQueryDone,
 }: MapPageProps) {
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
 
   // 图层控制面板的展开 / 折叠
   const [panelOpen, setPanelOpen] = useState(true);
+
+  /** 阶段33：AI 工作台展开 / 折叠。展开时把左侧的图层控制与视野统计面板右推，避免抢空间 */
+  const [benchOpen, setBenchOpen] = useState(true);
 
   /** 地图是否已完成建图 + 数据加载（此时才能执行飞行与高亮） */
   const mapReadyRef = useRef(false);
@@ -2250,7 +2259,7 @@ function MapPage({
   }, [mapReady, visibleLayers]);
 
   return (
-    <div className={styles.viewport}>
+    <div className={`${styles.viewport} ${benchOpen ? styles.withBench : ""}`}>
       {/* 地图画布容器：铺满视窗，位于悬浮 UI 之下 */}
       <div ref={mapContainerRef} className={styles.mapContainer} />
 
@@ -2265,6 +2274,10 @@ function MapPage({
         onClearMap={onClearMap}
         onFocusPlant={onFocusPlant}
         focusedPlant={focusedPlant}
+        history={history}
+        onQueryDone={onQueryDone}
+        open={benchOpen}
+        onToggleOpen={() => setBenchOpen((v) => !v)}
       />
 
       {/* 左上角：图层控制 */}
