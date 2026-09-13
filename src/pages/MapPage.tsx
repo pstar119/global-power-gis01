@@ -20,7 +20,7 @@ import {
 } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { PMTiles, Protocol } from "pmtiles";
-import { FUEL_LEGEND, fuelColor } from "../lib/fuel";
+import { FUEL_LEGEND, fuelColor, fuelLabel } from "../lib/fuel";
 // 阶段27：离线中文字形的 `font-faces` 清单（由 scripts/fetch_glyphs.mjs 生成）
 import { BASEMAP_FONT_FACES, BASEMAP_FONT_FAMILY } from "../lib/basemapFonts.generated";
 import {
@@ -601,6 +601,248 @@ function formatLngLat([lon, lat]: [number, number]): string {
   const ew = lon >= 0 ? "E" : "W";
   const ns = lat >= 0 ? "N" : "S";
   return `${Math.abs(lon).toFixed(4)}°${ew}, ${Math.abs(lat).toFixed(4)}°${ns}`;
+}
+
+// ==========================================================
+// 阶段41：OSM 点要素（变电站 / 电厂）的 Popup 与统一点击处理
+// ==========================================================
+
+/**
+ * OSM 点要素的属性。
+ *
+ * ‼️ 字段白名单来自 `scripts/prepare_osm_geojson.mjs` 的 `KEEP_PROPS`：
+ *    substation → osm_id / name / vclass / voltage_kv / substation_kind
+ *    plant      → osm_id / name / vclass / voltage_kv / plant_source
+ *
+ * 🔴 本组类型与下面的构建器**只允许**读取表格里的自有字段。
+ *    **严禁**读底图（Protomaps / OpenMapTiles）的 schema 字段：
+ *    那些只存在于**底图图层**，我们的电力要素里一概没有，
+ *    误用会让弹窗静默显示 `undefined`（不报错、不崩溃，最难发现）。
+ *    判别一律用自建的 `ftype`。
+ */
+type OsmPointProperties = {
+  /** 自建判别字段：line / substation / plant */
+  ftype?: string;
+  name?: string;
+  vclass?: string;
+  voltage_kv?: number;
+  substation_kind?: string;
+  plant_source?: string;
+  osm_id?: string;
+};
+
+/**
+ * OSM 的 `plant:source`（小写，如 solar / wind / hydro）
+ * → `lib/fuel.ts` 的 WRI 键（首字母大写，如 Solar / Wind / Hydro）。
+ *
+ * ⚠️ 为什么必须有这张表而不能直接查 `FUEL_LABELS`：
+ *    `FUEL_LABELS` 的键是 **WRI `primary_fuel`** 的取值（首字母大写），
+ *    而 OSM 的 `plant:source` 是全小写的另一套写法。直接查表会**全部落空**，
+ *    于是每个电厂都退回英文原名 —— 看起来像“翻译没生效”，实际是键对不上。
+ */
+const OSM_PLANT_SOURCE_TO_WRI: Record<string, string> = {
+  coal: "Coal",
+  gas: "Gas",
+  oil: "Oil",
+  nuclear: "Nuclear",
+  hydro: "Hydro",
+  wind: "Wind",
+  solar: "Solar",
+  biomass: "Biomass",
+  geothermal: "Geothermal",
+  waste: "Waste",
+  storage: "Storage",
+  cogeneration: "Cogeneration",
+  petcoke: "Petcoke",
+  tidal: "Wave and Tidal",
+  wave: "Wave and Tidal",
+};
+
+/**
+ * `plant:source` → 中文（可带与图例同色的色块）。
+ *
+ * - OSM 的值可能是多值（`solar;wind`），拆开分别翻译后用 ` + ` 连接。
+ * - 认不出的值**原样返回英文**：那仍是真实数据，比丢掉或写“未知”有价值。
+ */
+function osmPlantSourceLabel(src?: string): { text: string; swatch?: string } | null {
+  if (!src) return null;
+  const parts = src.split(";").map((s) => s.trim()).filter(Boolean);
+  if (!parts.length) return null;
+  const labels = parts.map((p) => {
+    const wri = OSM_PLANT_SOURCE_TO_WRI[p.toLowerCase()];
+    return wri ? fuelLabel(wri) : p;
+  });
+  const firstWri = OSM_PLANT_SOURCE_TO_WRI[parts[0]!.toLowerCase()];
+  return {
+    text: [...new Set(labels)].join(" + "),
+    swatch: firstWri ? fuelColor(firstWri) : undefined,
+  };
+}
+
+/** OSM `substation=*` 取值 → 中文 */
+const SUBSTATION_KIND_LABEL: Record<string, string> = {
+  transmission: "输电变电站",
+  distribution: "配电变电站",
+  minor_distribution: "小型配电变电站",
+  converter: "换流站",
+  compensation: "补偿站",
+  traction: "牽引变电站",
+  industrial: "工业变电站",
+  generation: "发电厂升压站",
+};
+
+/**
+ * OSM 点要素（变电站 / 电厂）的 Popup。
+ *
+ * 优雅降级（用户拍板）：
+ *  · `name` 缺失 → 「未命名变电站」/「未命名电厂」（按 `ftype` 决定文案）
+ *  · `osm_id` 缺失 → **整行隐藏**，绝不显示 undefined
+ *  · `vclass` 与 `voltage_kv` 都缺失 → 电压行显示「未知」
+ *  · `substation_kind` / `plant_source` 缺失 → 隐藏该行
+ */
+function buildOsmPointPopup(props: OsmPointProperties): HTMLElement {
+  const isSubstation = props.ftype === "substation";
+  const rows: PopupRow[] = [];
+
+  // 有精确值就「220 kV（220-499kV）」，只有档位就显示档位，都没有才是「未知」
+  const tier = props.vclass ? TIER_LABEL[props.vclass] : undefined;
+  const kv = props.voltage_kv;
+  const voltageText = kv ? `${kv} kV${tier ? `（${tier}）` : ""}` : (tier ?? "未知");
+  rows.push({
+    label: "电压等级",
+    value: voltageText,
+    swatch: isSubstation ? SUBSTATION_COLOR : undefined,
+  });
+
+  if (isSubstation) {
+    const kind = props.substation_kind;
+    if (kind) {
+      rows.push({ label: "变电站类型", value: SUBSTATION_KIND_LABEL[kind] ?? kind });
+    }
+  } else {
+    const src = osmPlantSourceLabel(props.plant_source);
+    if (src) rows.push({ label: "能源来源", value: src.text, swatch: src.swatch });
+  }
+
+  // ‼️ `osm_id` 只在 z>=8 的瓦片里保留（低缩放为压体积被裁掉）。
+  //    这里用**属性是否存在**判定，而不是拿 `map.getZoom() >= 8` 去判：
+  //    字段是在切片阶段按瓦片级别裁的，z=8 边界上仍可能取到 z7 的父瓦片，
+  //    用 zoom 判会与实际取到的瓦片不一致。属性本身就是最可靠的信号。
+  const meta = props.osm_id ? `OSM ID ${props.osm_id}` : undefined;
+
+  return buildPopupFrame(
+    props.name ?? "",
+    isSubstation ? "未命名变电站" : "未命名电厂",
+    rows,
+    meta,
+  );
+}
+
+/**
+ * 点击热区的**额外外扩半径**（屏幕像素）。
+ *
+ * 变电站半径 2.5~8px、电厂 3~7px，直接点中很难。
+ * `queryRenderedFeatures` 支持传一个**小 bbox** 而不是一个点，
+ * 所以这里用它把命中区扩到约 ±7px（即 14x14），**零新增图层**。
+ *
+ * ‼️ 为什么不另建「热区图层」：那会让每个区域包多 2 个图层，
+ *    而区域包图层数已经顶到「不能再多」的上限（见 PACK_MAX_ACTIVE 的说明：
+ *    2 个包 = 14 个额外图层，再多 MapLibre 的样式规模与每帧查询开销会明显上升）。
+ */
+const HIT_BBOX_PAD = 7;
+
+/** `showOsmPointOrLine` 需要的最小事件形状（结构化类型，避免多引一个 maplibre 类型） */
+type OsmClickLike = {
+  point: { x: number; y: number };
+  lngLat: { lng: number; lat: number };
+};
+
+/**
+ * 阶段41：OSM 点要素 / 线路的**统一**点击处理。
+ *
+ * ‼️ 为什么必须合并成一处：在此之前有两条独立路径 ——
+ *    核心区走 `map.on("click", OSM_LINES_HIT_LAYER_ID, fn)`（layer-scoped），
+ *    区域包走地图级 `map.on("click", fn)`。两条路径都用
+ *    「命中了点要素就 return」来防止弹窗盖住点，但**都没有真正处理点要素** ——
+ *    于是点击变电站/电厂被吞掉后什么都不发生（不报错，只是没反应）。
+ *    若只改一条路径，就会出现「核心区能点、区域包点不中」的半修状态。
+ *
+ * 优先级：**点 > 线**。用 `HIT_BBOX_PAD` 的小 bbox 扩大命中区。
+ */
+function showOsmPointOrLine(
+  map: MapLibreMap,
+  e: OsmClickLike,
+  opts: { popup: Popup; packKeys: readonly string[] },
+): void {
+  const { popup, packKeys } = opts;
+  const box: [[number, number], [number, number]] = [
+    [e.point.x - HIT_BBOX_PAD, e.point.y - HIT_BBOX_PAD],
+    [e.point.x + HIT_BBOX_PAD, e.point.y + HIT_BBOX_PAD],
+  ];
+
+  const packIds = packKeys.map((k) => packLayerIds(k));
+  const osmPointLayers = [
+    OSM_PLANT_LAYER_ID,
+    OSM_SUBSTATION_LAYER_ID,
+    ...packIds.map((i) => i.plants),
+    ...packIds.map((i) => i.substations),
+  ].filter((id) => !!map.getLayer(id));
+  const osmLineLayers = [OSM_LINES_HIT_LAYER_ID, ...packIds.map((i) => i.hit)].filter((id) =>
+    !!map.getLayer(id),
+  );
+
+  // 数据库演示图层：它们各自有 layer-scoped 处理器（带自己的弹窗）。
+  // 这里**只把它们当抑制者** —— 命中了就什么都不做，把机会让给各自处理器，
+  // 避免两个弹窗互相覆盖（否则点一个数据库电厂可能被随后的线路弹窗顶掉）。
+  const dbPointLayers = [PLANT_LAYER_ID, SUBSTATIONS_LAYER_ID].filter((id) => !!map.getLayer(id));
+  // 用 [x, y] 元组而不是直接传 `e.point`：后者在本函数里是结构化类型 {x,y}，
+  // 而 MapLibre 的 PointLike 只接受 Point 实例或 [number, number]（实测 TS 报错）。
+  if (
+    dbPointLayers.length &&
+    map.queryRenderedFeatures([e.point.x, e.point.y], { layers: dbPointLayers }).length
+  ) {
+    return;
+  }
+
+  // ---- ① 点优先 ----
+  if (osmPointLayers.length) {
+    const hit = map.queryRenderedFeatures(box, { layers: osmPointLayers })[0];
+    if (hit) {
+      // 弹窗挂到要素自身坐标，而不是鼠标位置 —— 鼠标可能在扩大的热区边缘。
+      // 几何兼底：理论上点要素只有 Point，但拿不到就退回鼠标位置（总比不弹好）。
+      const geom = hit.geometry as { type?: string; coordinates?: [number, number] };
+      const at: [number, number] =
+        geom?.type === "Point" && Array.isArray(geom.coordinates)
+          ? geom.coordinates
+          : [e.lngLat.lng, e.lngLat.lat];
+      popup
+        .setLngLat(at)
+        .setDOMContent(buildOsmPointPopup(hit.properties as OsmPointProperties))
+        .addTo(map);
+      return;
+    }
+  }
+
+  // ---- ② 退到线路 ----
+  if (!osmLineLayers.length) return;
+  // 几何兼底：线在切片里有 LineString 与 MultiLineString 两种，都必须接受。
+  // 只认前者会让多段线静默点不到。
+  const lineFeat = map
+    .queryRenderedFeatures(box, { layers: osmLineLayers })
+    .find((f) => {
+      const t = (f.geometry as { type?: string }).type;
+      return t === "LineString" || t === "MultiLineString";
+    });
+  if (!lineFeat) return;
+  const coords = longestLineCoords(lineFeat.geometry);
+  if (!coords.length) return;
+  // 弹窗挂在线的中点而不是鼠标处：避免点在线段末端时弹窗被视窗裁掉。
+  const anchor = coords[Math.floor(coords.length / 2)];
+  if (!anchor) return;
+  popup
+    .setLngLat(anchor.slice() as [number, number])
+    .setDOMContent(buildLinePopup(lineFeat.properties as LineProperties, coords))
+    .addTo(map);
 }
 
 /**
@@ -1505,7 +1747,10 @@ function addPackLayers(
  * ⚠️ 不能简单地用 `off(type, layerId)` 不带 fn 去清：那会**误伤**核心区
  *    在同一个 map 上注册的其它同类型监听。所以要先把 fn 引用存下来，逐个精准摘除。
  */
-const packCursorHandlers = new Map<string, { enter: () => void; leave: () => void }>();
+const packCursorHandlers = new Map<
+  string,
+  { layers: readonly string[]; enter: () => void; leave: () => void }
+>();
 
 /**
  * 卸载一个区域包的图层与 source。
@@ -1517,11 +1762,14 @@ const packCursorHandlers = new Map<string, { enter: () => void; leave: () => voi
  */
 function removePackLayers(map: MapLibreMap, key: string): void {
   const ids = packLayerIds(key);
-  // ‼️ 先摘监听器（在图层还在的时候就摘，避免依赖“图层已删也能 off”的行为）
+  // ‼️ 先摘监听器（在图层还在的时候就摘，避免依赖“图层已删也能 off”的行为）。
+  //    阶段41：点图层也纳入了光标反馈，所以要按登记的图层表逐个摘。
   const h = packCursorHandlers.get(key);
   if (h) {
-    map.off("mouseenter", ids.hit, h.enter);
-    map.off("mouseleave", ids.hit, h.leave);
+    for (const lid of h.layers) {
+      map.off("mouseenter", lid, h.enter);
+      map.off("mouseleave", lid, h.leave);
+    }
     packCursorHandlers.delete(key);
   }
   for (const lid of [...ids.lines, ids.substations, ids.plants, ids.hit]) {
@@ -2464,52 +2712,24 @@ function MapPage({
                   .addTo(map);
               });
 
-              // ---- 阶段34：点击**真实 OSM 切片**上的输电线路 ----
-              // ‼️ 地图上看得见的彩色线属于这一份数据（`osm-grid` 切片），
-              //    阶段22 那个热区绑的是数据库 GeoJSON 演示线，两者不是一回事。
-              map.on("click", OSM_LINES_HIT_LAYER_ID, (e) => {
-                // 「点优先」：热区 14px 远宽于原子站半径（3.5~9px），
-                // 线穿过站点/电厂时热区必然盖住它；不判定就会「想点电厂却弹出线路」。
-                // 两层数据源的点都要查：数据库电厂、切片里的电厂/变电站。
-                const onPoint = map.queryRenderedFeatures(e.point, {
-                  layers: [
-                    PLANT_LAYER_ID,
-                    SUBSTATIONS_LAYER_ID,
-                    OSM_PLANT_LAYER_ID,
-                    OSM_SUBSTATION_LAYER_ID,
-                  ],
-                });
-                if (onPoint.length > 0) return;
-
-                const feature = e.features?.[0];
-                if (!feature) return;
-
-                // 第三层过滤：即便上面漏了，这里再按几何类型兜一次底。
-                // 热区图层理论上只可能返回线，但多一层判断成本极低，
-                // 收益是「永远不会点到点要素」。
-                // ⚠️ 线在切片里有 LineString 与 MultiLineString 两种，都必须接受 ——
-                //    只认前者会让多段线静默点不到。
-                const coords = longestLineCoords(feature.geometry);
-                if (!coords.length) return;
-                // 弹窗挂在线的中点而不是鼠标处：避免点在线段末端时弹窗被视窗裁掉。
-                const anchor = coords[Math.floor(coords.length / 2)];
-                if (!anchor) return;
-
-                popup
-                  .setLngLat(anchor.slice() as [number, number])
-                  .setDOMContent(
-                    buildLinePopup(feature.properties as LineProperties, coords),
-                  )
-                  .addTo(map);
-              });
+              // ---- 阶段41：OSM 线路的 layer-scoped 处理器已**移除** ----
+              // 原先核心区走 layer-scoped、区域包走地图级，是两条独立路径。
+              // 两条都用「命中了点要素就 return」防弹窗盖住点，却都没真正处理点要素，
+              // 导致点击变电站/电厂被吞掉后什么都不发生。
+              // 现在统一到下面那个地图级回调 + `showOsmPointOrLine`，
+              // 从根上杜绝「只改一条路径」造成的半修状态。
 
               // ---- 光标反馈 ----
+              // 阶段41：把 OSM 切片里的**点图层**也纳入指针反馈 ——
+              // 它们现在真的能点开弹窗了，不给 pointer 提示用户根本不知道能点。
               for (const layerId of [
                 CLUSTER_LAYER_ID,
                 PLANT_LAYER_ID,
                 SUBSTATIONS_LAYER_ID,
                 LINES_HIT_LAYER_ID,
                 OSM_LINES_HIT_LAYER_ID,
+                OSM_PLANT_LAYER_ID,
+                OSM_SUBSTATION_LAYER_ID,
               ]) {
                 map.on("mouseenter", layerId, () => {
                   map.getCanvas().style.cursor = "pointer";
@@ -2519,47 +2739,16 @@ function MapPage({
                 });
               }
 
-              // ---- 阶段39：点击**区域包**的输电线路 ----
-              // 为什么用不带 layerId 的地图级监听而不是 `map.on("click", layerId, fn)`：
-              // 区域图层是随视口动态增删的，建图那一刻它们还不存在，没法逐个注册 layer 级处理。
-              // 地图级回调自己查当前激活的 hit 图层即可。
-              // ⚠️ 与核心区不会打架：两者按策略互斥（视口中心在核心区内就不加载区域包，
-              //    在外面则核心区图层在该处没有要素可画）。即便边界处重叠，
-              //    本回调是在建图 effect 内注册的、晚于核心区各 handler，所以弹出的是区域包的信息（更全的那份）。
+              // ---- 阶段41：点击 OSM 切片上的**点要素（变电站 / 电厂）与线路** ----
+              // 统一为一个地图级回调，核心区与区域包共用同一个 `showOsmPointOrLine`。
+              //  · 区域包图层随视口动态增删，建图那一刻还不存在，
+              //    没法给它们逐个注册 layer 级处理器 —— 所以必须走地图级。
+              //  · 地图级回调自己按 `activePacksRef` 拼出当前该查的图层集。
               map.on("click", (e) => {
-                const keys = activePacksRef.current;
-                if (!keys.length) return;
-                const p = popupRef.current;
-                if (!p) return;
-
-                const ids = keys.map((k) => packLayerIds(k));
-                const hitIds = ids.map((x) => x.hit).filter((lid) => map.getLayer(lid));
-                if (!hitIds.length) return;
-
-                // 「点优先」：热区 14px 远宽于点的半径，线穿过站点/电厂时热区必然盖住它。
-                // 核心区与全部已激活区域包的点图层都要查。
-                const pointIds = [
-                  PLANT_LAYER_ID,
-                  SUBSTATIONS_LAYER_ID,
-                  OSM_PLANT_LAYER_ID,
-                  OSM_SUBSTATION_LAYER_ID,
-                  ...ids.map((x) => x.plants),
-                  ...ids.map((x) => x.substations),
-                ].filter((lid) => map.getLayer(lid));
-                if (pointIds.length && map.queryRenderedFeatures(e.point, { layers: pointIds }).length) {
-                  return;
-                }
-
-                const feats = map.queryRenderedFeatures(e.point, { layers: hitIds });
-                if (!feats.length) return;
-                // 几何兜底：线在切片里有 LineString 与 MultiLineString 两种，都必须接受
-                const coords = longestLineCoords(feats[0].geometry);
-                if (!coords.length) return;
-                const anchor = coords[Math.floor(coords.length / 2)];
-                if (!anchor) return;
-                p.setLngLat(anchor.slice() as [number, number])
-                  .setDOMContent(buildLinePopup(feats[0].properties as LineProperties, coords))
-                  .addTo(map);
+                showOsmPointOrLine(map, e, {
+                  popup: popupRef.current ?? popup,
+                  packKeys: activePacksRef.current,
+                });
               });
 
               // 阶段27：地名标签必须压在所有电力图层之上。
@@ -2817,9 +3006,14 @@ function MapPage({
         const onLeave = () => {
           m.getCanvas().style.cursor = "";
         };
-        packCursorHandlers.set(key, { enter: onEnter, leave: onLeave });
-        m.on("mouseenter", ids.hit, onEnter);
-        m.on("mouseleave", ids.hit, onLeave);
+        // 阶段41：点图层现在也能点开弹窗，一并给指针提示
+        // （只给 hit 层的话，鼠标移到变电站/电网上不会有“可点”的反应感）。
+        const cursorLayers = [ids.hit, ids.plants, ids.substations];
+        packCursorHandlers.set(key, { layers: cursorLayers, enter: onEnter, leave: onLeave });
+        for (const lid of cursorLayers) {
+          m.on("mouseenter", lid, onEnter);
+          m.on("mouseleave", lid, onLeave);
+        }
         console.info(
           `[MapPage] 加载区域包 ${key}（${entry.label}${entry.features ? `，${entry.features} 个要素` : ""}）`,
         );
