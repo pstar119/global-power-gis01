@@ -178,9 +178,9 @@ node scripts/fetch_basemap.mjs                   # 生成 src-tauri/resources/ma
 │  │  ├─ TopBar.tsx         标题栏
 │  │  └─ GreetSelfCheck.tsx 前后端通信自检
 │  └─ pages/                页面
-│     ├─ MapPage.tsx        地图（纯 CSS 模拟底图）
-│     ├─ StatsPage.tsx      统计（数值全部为 0）
-│     └─ SettingsPage.tsx   系统设置（全部为禁用占位）
+│     ├─ MapPage.tsx        地图（MapLibre GL + 瓦片底图 + OSM 电力图层）
+│     ├─ StatsPage.tsx      统计（真实数据：电厂数 / 总容量 / 国家 / 燃料）
+│     └─ SettingsPage.tsx   系统设置（仍为禁用占位）
 └─ src-tauri/               Tauri 后端
    ├─ tauri.conf.json       窗口 / 打包 / 安全配置
    ├─ capabilities/         权限声明
@@ -242,5 +242,16 @@ node scripts/fetch_basemap.mjs                   # 生成 src-tauri/resources/ma
 ## 说明
 
 - 界面为**固定深色主题**，不跟随系统浅色模式
-- 当前不含任何真实数据，统计数值均为 `0`，设置项均为禁用占位
+- **已内置真实数据**（不再是占位，阶段37–39 完成）：
+  - **全球电厂 34,936 条** —— WRI Global Power Plant Database，入库于 `power_plants` 表
+  - **全国 7 大区域电网数据包** —— OSM 电力要素共 **430,969 个**、合计 **116.52 MB**，
+    以 PMTiles 存于 `data/packs/osm-<region>.pmtiles`（**不进 Git**），前端按需加载
+- 地图支持**按需加载**与**空间查询**：
+  - 按需加载：z ≥ 6 且视口覆盖到该区域时才挂载，**最多同时 2 个**包，避免内存爆掉
+  - 空间查询：按国家 / 燃料筛选，可限定「**当前视野**」（bbox 条件由 `nlq.ts` 写进 SQL）；
+    命中后飞行到**数据算出的** bbox 并高亮，点数超上限时只飞行、不高亮
+  - 区域包要素（线路 / 变电站）可**点击查看属性**，属性来自瓦片，不走数据库
+- ⚠️ **低缩放有刻意的降采样**（不是数据缺失）：z < 8 的瓦片按**电压等级由高到低**封顶
+  **2 万要素/瓦片**，全国视角下合计省略 **140,614** 个要素；**z ≥ 8 完整保留**，放大即可见全部
+- 设置项**仍为禁用占位**（`SettingsPage.tsx` 全部 `disabled`），属已知未完成项
 - 应用图标为手写 SVG 生成的占位图标，后续可替换为正式品牌图标
