@@ -75,7 +75,13 @@ export function enumerateBboxTiles({ bbox, minZoom, maxZoom }) {
     }
     list.sort((a, b) => a - b);
     perZoom.set(z, list);
-    all.push(...list);
+    // ⚠️ 这里**不能**写 `all.push(...list)`。
+    //    展开运算符会把数组元素变成**函数实参**，而 V8 对实参个数有上限；
+    //    z12 的候选瓦片数随 bbox 面积增长，西南批次的数据实际范围
+    //    （76.4~118.6°E —— Overpass 对跨界的 way 会返回完整几何）算出约 23 万张，
+    //    直接报 `RangeError: Maximum call stack size exceeded` 把切片打挂。
+    //    华东只有约 10 万张，所以侥幸没暴露 —— 这不是「偶发」，是**随范围增长必然踩到**。
+    for (let i = 0; i < list.length; i++) all.push(list[i]);
   }
   return { ids: [...new Set(all)].sort((a, b) => a - b), perZoom };
 }

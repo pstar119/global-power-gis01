@@ -425,13 +425,17 @@ async function main() {
 
   const reportPath = join(ROOT, cfg.reportPath);
   const report = readJson(reportPath) ?? { generatedBy: "scripts/run_pipeline.mjs", regions: {} };
-  report.updatedAt = new Date().toISOString();
+  // ⚠️ 之前只在这里赋一次 updatedAt，导致它永远停在**启动时刻**，
+  //    而每批写入时并不刷新 —— 报表上就出现了一个「会撒谎的时间戳」：
+  //    单看它无法判断进度是否在推进。现在它在每次落盘前刷新（见循环内）。
+  report.startedAt = new Date().toISOString();
   report.targetCell = cfg.target;
 
   for (const region of picked) {
     try {
       const rec = await processRegion(region, cfg, report);
       // 每批结束立刻落盘：中途中断也不会丢掉已完成的批次记录
+      report.updatedAt = new Date().toISOString();
       mkdirSync(dirname(reportPath), { recursive: true });
       writeFileSync(reportPath, JSON.stringify(report, null, 2), "utf8");
       if (rec.status !== "ok") console.warn(`⚠️ 批次 ${region.label} 状态：${rec.status}`);
