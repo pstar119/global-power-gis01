@@ -189,6 +189,39 @@ const OSM_LINE_TIERS: ReadonlyArray<{
   { id: "osm-line-lt220", vclass: "<220", color: "#6b7280", width: 0.8 },
   { id: "osm-line-unknown", vclass: "unknown", color: "#8b96a8", width: 1 },
 ];
+
+/**
+ * 阶段40：线路图层的**加层顺序**（自下而上）。
+ *
+ * ‼️ 为什么必须存在这个数组：MapLibre 是**先加的在下**，
+ *    而 `queryRenderedFeatures` / 绘制都只看得到上层。
+ *    原先两个建层函数都直接遍历 `OSM_LINE_TIERS`（735+ → 500 → 220 → <220 → unknown），
+ *    于是**最后加的 `<220` 画在最上面** —— 低电压灰线盖住了 735kV 粉线。
+ *    对电网 GIS 来说这是画序颠倒：电压越高越该醒目。
+ *
+ * 反转后上层关系为：unknown < <220 < 220-499 < 500-734 < **735+（最顶）**。
+ * ⚠️ 只改「加层先后」，**图层 id、filter、配色、线宽全部不变**。
+ * ⚠️ `addOsmGridLayers` 与 `addPackLayers` **必须都用这个数组**，
+ *    否则核心区与区域包的画序会不一致，接缝处会出现「同一条线两种层级」。
+ */
+const OSM_LINE_TIERS_BOTTOM_UP: readonly (typeof OSM_LINE_TIERS)[number][] = [
+  ...OSM_LINE_TIERS,
+].reverse();
+
+/**
+ * 阶段40：视野统计的自适应节流参数。
+ *
+ * 基准延迟 350ms（用户拍板的「300ms 一档」的量级）；
+ * 一旦上一次统计耗时 >= 80ms，下一次延迟拉到 900ms ——
+ * 即「热点区域里等用户真正停下来再算」。
+ *
+ * ⚠️ 这只是降低**发生频率**，不减少单次阻塞（实测单次可达 128.9ms）。
+ *    要真正砍掉单次耗时，得减少「一次查询跨了多少个图层」——
+ *    因为成本结构是「固定 34ms + 每要素 1.7µs」，固定部分占主导。
+ */
+const STATS_DEBOUNCE_MS = 350;
+const STATS_SLOW_MS = 80;
+const STATS_SLOW_DEBOUNCE_MS = 900;
 const OSM_SUBSTATION_LAYER_ID = "osm-substations";
 const OSM_PLANT_LAYER_ID = "osm-plants";
 
@@ -299,12 +332,21 @@ const TIER_LABEL: Record<string, string> = {
 const LINE_TIER_KEYS: readonly string[] = OSM_LINE_TIERS.map((t) => t.vclass);
 
 /**
- * 默认开启的分级：除「电压未知」外全开。
- * 实测长三角有 7,917 条线路没有 `voltage` 标签（约 35%），把它们归进任何一档都是误导，
- * 所以单独一档且**默认关闭**。
+ * 默认开启的分级。
+ *
+ * - 「电压未知」默认关闭：实测长三角有 7,917 条线路没有 `voltage` 标签（约 35%），
+ *   把它们归进任何一档都是误导，所以单独一档、留给用户主动勾选。
+ * - 「220kV 以下」阶段40 起也**默认关闭**（用户拍板）。两个依据：
+ *   1. UX：它要素最多、在全局视角下干扰视线，低压线路本来也不是看图时的重点。
+ *   2. 实测（已用 CDP 在同一热点对照 6 次取均值）：
+ *      开着 77.3ms / 线路段 21,513；关掉 65.2ms / 线路段 13,888。
+ *      即**要素数 −35%、耗时 −16%**。
+ *      ⚠️ 省下的耗时远小于要素降幅，说明成本结构 ≈ 固定开销 34ms + 每要素 1.7µs，
+ *      **固定部分才是大头**，单靠关这一档治不了本。若日后要继续压，
+ *      应先攻「一次查询跨了多少个图层」，而不是继续减要素。
  */
 const DEFAULT_ON_TIERS: readonly string[] = OSM_LINE_TIERS
-  .filter((t) => t.vclass !== "unknown")
+  .filter((t) => t.vclass !== "unknown" && t.vclass !== "<220")
   .map((t) => t.vclass);
 
 /** 归档与小样本都拿不到时的提示 */
@@ -1240,7 +1282,9 @@ function addOsmGridLayers(
   // 矢量瓦片必须额外指定 source-layer；GeoJSON 不能设（设了反而报错）
   const layerRef = archive ? { "source-layer": OSM_GRID_SOURCE_LAYER } : {};
 
-  for (const tier of OSM_LINE_TIERS) {
+  // ‼️ 自下而上加层，让 735kV 画在最顶（详见 `OSM_LINE_TIERS_BOTTOM_UP`）。
+  //    ⚠️ 必须与 `addPackLayers` 用同一个数组，否则核心区与区域包画序不一致。
+  for (const tier of OSM_LINE_TIERS_BOTTOM_UP) {
     map.addLayer({
       id: tier.id,
       type: "line",
@@ -1370,7 +1414,9 @@ function addPackLayers(
   // 区域包用带 `--<region>` 后缀的 id，**不覆盖核心区的 id**
   const id = (base: string) => packLayerId(base, key);
 
-  for (const tier of OSM_LINE_TIERS) {
+  // ‼️ 用自下而上的顺序：先加的在下面，让 735kV 最后加、画在最顶。
+  //    详见 `OSM_LINE_TIERS_BOTTOM_UP` 的说明（原先低压盖高压）。
+  for (const tier of OSM_LINE_TIERS_BOTTOM_UP) {
     map.addLayer({
       id: id(tier.id),
       type: "line",
@@ -1449,6 +1495,19 @@ function addPackLayers(
 }
 
 /**
+ * 阶段40：区域包热区的**光标监听器登记表** —— 修内存/回调泄漏。
+ *
+ * ‼️ 为什么必须有它：`map.on("mouseenter", layerId, fn)` 注册的监听器存在 **map** 上、
+ *    以 layerId 为键；`removeLayer` **不会**把它们清掉（MapLibre 不管理这层生命周期）。
+ *    而区域包随视口反复增删，每次重新挂载都再 `on` 一次
+ *    → 同一个 layerId 上累积 N 份完全相同的回调，N 随进出次数无上限增长。
+ *    （光标效果看起来“正常”，所以这个 bug 不会自己暴露 —— 只会越来越慢。）
+ * ⚠️ 不能简单地用 `off(type, layerId)` 不带 fn 去清：那会**误伤**核心区
+ *    在同一个 map 上注册的其它同类型监听。所以要先把 fn 引用存下来，逐个精准摘除。
+ */
+const packCursorHandlers = new Map<string, { enter: () => void; leave: () => void }>();
+
+/**
  * 卸载一个区域包的图层与 source。
  *
  * ⚠️ 顺序不能反：先删图层再删 source。反过来 MapLibre 会抛
@@ -1458,6 +1517,13 @@ function addPackLayers(
  */
 function removePackLayers(map: MapLibreMap, key: string): void {
   const ids = packLayerIds(key);
+  // ‼️ 先摘监听器（在图层还在的时候就摘，避免依赖“图层已删也能 off”的行为）
+  const h = packCursorHandlers.get(key);
+  if (h) {
+    map.off("mouseenter", ids.hit, h.enter);
+    map.off("mouseleave", ids.hit, h.leave);
+    packCursorHandlers.delete(key);
+  }
   for (const lid of [...ids.lines, ids.substations, ids.plants, ids.hit]) {
     if (map.getLayer(lid)) map.removeLayer(lid);
   }
@@ -2721,6 +2787,16 @@ function MapPage({
         if (!activePacksRef.current.includes(key)) return; // 视野又变了，不挂了
         addPackLayers(m, key, archive);
 
+        // ‼️ 阶段40：把地名标签提回最顶。
+        //    `addLayer` 不带 `beforeId` 会把新图层**追加到样式最顶**，
+        //    而建图时已用 `moveLayer(BASEMAP_LABEL_LAYER_ID)` 把标签提到顶了 ——
+        //    所以每当挂上一个区域包，新图层就盖在标签之上，地名被线条/圆点遮住。
+        //    这个现象只在**切换过区域**之后出现（首次建图时顺序是对的），
+        //    极易被当成偶发渲染错位。每加完一个包补一次 moveLayer 最稳。
+        if (m.getLayer(BASEMAP_LABEL_LAYER_ID)) {
+          m.moveLayer(BASEMAP_LABEL_LAYER_ID);
+        }
+
         // 新图层默认全可见，必须先按当前开关设一次，否则会出现
         // 「面板里关掉了电压未知，新加载的区域包却把它画出来」的不一致。
         const vis = visibleLayersRef.current;
@@ -2733,13 +2809,17 @@ function MapPage({
         m.setLayoutProperty(ids.plants, "visibility", on("电厂") ? "visible" : "none");
         m.setLayoutProperty(ids.hit, "visibility", LINE_TIER_KEYS.some((k) => on(k)) ? "visible" : "none");
 
-        // 光标反馈（与核心区那几个 hit 层一致）
-        m.on("mouseenter", ids.hit, () => {
+        // 光标反馈（与核心区那几个 hit 层一致）。
+        // ‼️ 必须先存引用再注册：卸载时要用同一个 fn 去 `off`，匿名闭包摘不掉。
+        const onEnter = () => {
           m.getCanvas().style.cursor = "pointer";
-        });
-        m.on("mouseleave", ids.hit, () => {
+        };
+        const onLeave = () => {
           m.getCanvas().style.cursor = "";
-        });
+        };
+        packCursorHandlers.set(key, { enter: onEnter, leave: onLeave });
+        m.on("mouseenter", ids.hit, onEnter);
+        m.on("mouseleave", ids.hit, onLeave);
         console.info(
           `[MapPage] 加载区域包 ${key}（${entry.label}${entry.features ? `，${entry.features} 个要素` : ""}）`,
         );
@@ -2834,6 +2914,16 @@ function MapPage({
 
     let timer: ReturnType<typeof setTimeout> | undefined;
     let cancelled = false;
+    /**
+     * 阶段40：上一次统计的总耗时，用于自适应节流。
+     * ‼️ 实测（采样时 pmtiles 在飞请求 = 0，与瓦片加载无关）：
+     *    屏上 5,085 段线 → 26.5ms；**21,513 段线 → 77.3ms**；22,972 段线 → 128.9ms。
+     *    且关掉「220kV 以下」使要素数降 35%、耗时只降 16% ——
+     *    反推成本 ≈ **固定开销 34ms + 每要素 1.7µs**，固定部分是大头。
+     *    因此单次阻塞无法靠减要素消除，只能降低**发生频率**：
+     *    上一次跑慢了就把下一次的延迟拉长，等用户真正停下来再算。
+     */
+    let lastCostMs = 0;
 
     /** 同一要素可能被相邻瓦片各带一份（缓冲区重叠），z≥8 时用 osm_id 去重 */
     const countUnique = (feats: MapGeoJSONFeature[], exact: boolean): number => {
@@ -2886,6 +2976,7 @@ function MapPage({
         .then((plants) => {
           if (cancelled) return;
           const ms = performance.now() - t0;
+          lastCostMs = ms;
           const msRender = tRender - t0;
           console.debug(
             `[MapPage] 视野统计 ${ms.toFixed(1)}ms（渲染查询 ${msRender.toFixed(1)}ms + 数据库 ${(ms - msRender).toFixed(1)}ms，` +
@@ -2909,7 +3000,10 @@ function MapPage({
       // 并顺手把「上一个视野限定查询」判为过期并清空
       dropStaleViewportQuery();
       if (timer) clearTimeout(timer);
-      timer = setTimeout(run, 200);
+      // 阶段40：自适应节流。基准 350ms；若上一次跑得慢（>=80ms），拉到 900ms。
+      // 代价是视野停下后数字慢一拍才更新；换来的是热点区域不再“每动一下卡一下”。
+      const delay = lastCostMs >= STATS_SLOW_MS ? STATS_SLOW_DEBOUNCE_MS : STATS_DEBOUNCE_MS;
+      timer = setTimeout(run, delay);
     };
 
     map.on("moveend", schedule);
