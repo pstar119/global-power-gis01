@@ -416,3 +416,58 @@ API Key 再问同样两句，SQL 通路与断言完全一致。
 
 ![切页后状态保留](docs/screenshots/phase32-page-switch-state-kept.png)
 
+## 十一、阶段33 实测数据（2026-09-13）
+
+### 🔴 核心：LLM 路径缺「指代继承」，追问会静默丢掉地理约束
+
+实测 SQL（Ollama `qwen2.5:7b`，本地）：
+
+| 问题 | SQL |
+|---|---|
+| 第一问「当前视野最大的电厂」 | `... WHERE lat IS NOT NULL AND lon IS NOT NULL AND lon BETWEEN ? AND ? AND lat BETWEEN ? AND ? ORDER BY capacity_mw DESC LIMIT ?`（5 个参数） |
+| 追问「那最大的5个水电站呢？」（**修复前**） | `... WHERE lat IS NOT NULL AND lon IS NOT NULL AND primary_fuel = ? ORDER BY capacity_mw DESC LIMIT ?` —— **没有 `BETWEEN`**，退回全球查询（返回 Three Gorges / Baihetan / Xiluodu / Guri / Tucuruí） |
+
+根因：本地规则引擎 `parseNaturalQuery` 里有指代继承逻辑，但 **LLM 路径的 `toParseResult` 只认模型输出的布尔 `inViewport`**；
+实测 7B 模型在追问时经常不输出这个字段，于是静默退回全球查询。
+
+修法：在 `toParseResult` 内按与本地引擎**相同的判定**补一条确定性继承 ——
+出现指代词（那…呢 / 还是 / 同样 / 那么 / 这个 / 这些）+ 上一轮带视野 + 本轮未换国家 →
+继承**上一轮**的视野（继承的是「上一轮答案的框架」，不是当前地图状态）。
+
+### 实测（修复后）
+
+每次截图前都等到「出现新的 `[aiQuery] SQL` 行」这一确定性信号，不靠表格行数猜：
+
+| 问题 | SQL 关键片段 | 行数 | 高亮 | 耗时 |
+|---|---|---|---|---|
+| 当前视野最大的电厂 | `lon BETWEEN ? AND ? AND lat BETWEEN ? AND ?` | 1（Waigaoqiao / Coal / 5240MW） | 1 | 7s |
+| 那最大的5个水电站呢？ | 仍带 `BETWEEN` **且** `primary_fuel = ?` | 0 | 0 | 4s |
+| 那最大的5个火电厂呢？ | 仍带 `BETWEEN` **且** `primary_fuel = ?` | 5（全 Coal） | 5 | 4s |
+
+追问时地图视角**不动**（限定视野的查询跳过 `fitBounds`），状态栏：`已高亮 N 个匹配的电厂（限定当前视野）（金色描边）`。
+追问发起瞬间旧表格即清零（0.6s 采样行数 = 0），无视觉残留。
+
+### Python 独立复核（直连 SQLite，不信任前端自报结果）
+
+- 前端返回的每一行，都能在库里按 (name + primary_fuel + bbox) 命中 1 行
+- 独立算出视野内最大电厂 = `Waigaoqiao power station / Coal / 5240 MW`，与前端一致
+- 视野内 `Hydro` 计数 = **0** → 追问返回 0 行是**真值**；对照组：全库水电 **7156** 条，排除「数据缺失」
+- 独立算出的视野内 Coal Top5 与前端**逐名一致**；与全局 Coal Top5 **零重叠**（证明视野限定确实起了作用）
+
+### 左侧智能工作台
+
+- 可折叠：折叠后只剩竖向导轨（`.rail`，`writing-mode: vertical-rl`），图层面板 `left` 由 352px 归位；点导轨恢复输入框
+- 历史显示「对话历史（N 轮）」+ 每条的问与 AI 解析；默认最近 5 轮 +「展开更多（全部 N 轮）」
+
+### 验收脚本自身踩的坑（记下来省得再犯）
+
+- 忘了发 `Runtime.enable` → 一条 console 事件都收不到 → SQL 永远读不到，等待条件永不满足，每问空转 180s，最后连日志都没写成。
+  **等待查询完成要用「新的 SQL 行出现」这种确定性信号，不要用表格行数变化去猜。**
+- 燃料列显示的是原始值 `Hydro`，脚本却去比对中文「水电」→ 假失败
+- 折叠判定写成「`section` 元素是否消失」→ 假失败（折叠后 `section` 仍在，只是内部只剩导轨）；应判「导轨出现 **且** 输入框消失」
+- 高亮数量不要用图层计数（时序不稳），读状态栏文案最稳
+
+![多轮追问：地理约束继承 + 表格精准刷新](docs/screenshots/phase33-multi-turn-memory-followup.png)
+
+![左侧 AI 工作台折叠后只剩导轨](docs/screenshots/phase33-workbench-collapsed.png)
+
