@@ -350,9 +350,10 @@ def queries_for(b: tuple[float, float, float, float], count_only: bool = False) 
     f = bbox_filter(b)
     head = "[out:json][timeout:180];"
     # ⚠️ 实测教训（2026-09-13）：`--estimate-only` **不是**廉价探针 —— 它内部仍是 `out geom;`，
-    #    要拉全量几何，单块成本与真抓一模一样（实测 50.3 秒/块）。
-    #    真正廉价的覆盖度探测是 `out count;`：Overpass 只回一个 total 数字，不序列化几何。
-    #    代价是它只给数量、不给电压分布 —— 而「这块到底有没有数据」恰好只需要数量。
+    #    要拉全量几何，单块成本与真抓一模一样（实测 44.0 秒/块）。
+    #    `out count;` 省的是**响应体大小**（只回一个数字）。
+    #    ⚠️ 但它**不省 Overpass 的空间检索**，所以单块耗时未必显著下降，
+    #       具体倍数以 scripts/measure_count_cost.py 的实测为准，不要凭想象断言。
     tail = "out count;" if count_only else "out geom;"
     return {
         "lines": (
@@ -644,7 +645,7 @@ def main() -> int:
     ap.add_argument(
         "--count-only",
         action="store_true",
-        help="覆盖度扫描：用 out count 只取每块数量（廉价，约 1/5 成本）。绝不写 _power_*.geojson 与断点文件",
+        help="覆盖度扫描：用 out count 只取每块数量。绝不写 _power_*.geojson 与断点文件",
     )
     ap.add_argument("--restart", action="store_true", help="忽略断点记录，从头重抓")
     ap.add_argument("--status", action="store_true", help="只读本地文件报告进度，不发任何网络请求")

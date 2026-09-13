@@ -62,6 +62,21 @@ const DEFAULTS = {
   keepNames: true,
   /** 属性白名单之外的字段一律丢掉；MVT 只支持 string/number/bool */
   keepProps: ["ftype", "vclass", "voltage_kv", "name", "osm_id", "line_kind", "substation_kind"],
+  /**
+   * 低级别单瓦片**要素数上限**；0 = 不封顶（默认）。
+   *
+   * 为什么需要它（阶段38 实测）：z0~z6 只有几张瓦片，而要素数随数据量**线性增长**、
+   * 瓦片数**不增长**。核心区包 25,611 要素时最大单瓦片 283.8 KB（安全），
+   * 华东可选包 93,559 要素时最大单瓦片就涨到 **922.9 KB（z4，48,533 个要素）**，
+   * 超过了 MapLibre 的 500 KB 经验上限，解码时会有一次主线程停顿。
+   * 全国合并后会到 20 万+ 要素，只会更糟，所以必须在本阶段解决。
+   *
+   * ⚠️ 默认 **0（关闭）**，保证核心区归档 osm_grid.pmtiles 的行为**一个字节不变**，
+   *    阶段29~37 的全部验收结论继续成立。只在生产全国可选包时显式开启。
+   */
+  maxFeaturesPerTile: 0,
+  /** 只对低于该级别的瓦片做封顶（高级别本来就一张瓦片几个要素） */
+  capBelowZoom: 8,
   estimateOnly: false,
 };
 
@@ -83,6 +98,8 @@ function parseArgs(argv) {
     else if (a === "--min-features") cfg.minFeatures = Number(next());
     else if (a === "--full-props-from") cfg.fullPropsFromZoom = Number(next());
     else if (a === "--no-names") cfg.keepNames = false;
+    else if (a === "--max-features-per-tile") cfg.maxFeaturesPerTile = Number(next());
+    else if (a === "--cap-below-zoom") cfg.capBelowZoom = Number(next());
     else if (a === "--estimate-only") cfg.estimateOnly = true;
     else if (a === "-h" || a === "--help") {
       console.log(
@@ -101,6 +118,8 @@ function parseArgs(argv) {
           "  --min-features <n>   丢弃要素数少于 n 的瓦片（默认 1）",
           "  --full-props-from <n> 从第 n 级起保留全部属性（默认 8，低于它只留 ftype+vclass）",
           "  --no-names           丢弃 name 属性以减小体积",
+          "  --max-features-per-tile <n>  低级别单瓦片要素数封顶（默认 0 = 不封顶）",
+          "  --cap-below-zoom <n> 只对低于该级别的瓦片封顶（默认 8）",
           "  --estimate-only      只统计瓦片数与体积，不写文件",
         ].join("\n"),
       );
@@ -125,6 +144,32 @@ function parseArgs(argv) {
 }
 
 const cfg = parseArgs(process.argv.slice(2));
+
+// ============================================================
+// 低级别抽稀
+// ============================================================
+/** 电压档优先级：数字越小越先保留 */
+const VCLASS_RANK = { "735+": 0, "500-734": 1, "220-499": 2, "<220": 3, unknown: 4 };
+/** 同电压档内，点比线更值得保留（一个电厂/变电站点的信息量高于一段线） */
+const FTYPE_RANK = { plant: 0, substation: 1, line: 2 };
+
+/**
+ * 低级别瓦片抽稀：**按电压由高到低**优先保留。
+ *
+ * 为什么按电压而不是随机/等距抽：低级别看到的是电网**骨架**。
+ * 抽掉 10kV 支线不影响观感，抽掉 ±800kV 直流就丢掉主线了。
+ * 用「稳定排序 + 原始序号兜底」，保证同一份输入每次切出的瓦片完全一致（可重现）。
+ */
+function pickForLowZoom(features, cap) {
+  const ranked = features.map((f, i) => {
+    const t = f.tags ?? {};
+    const vr = VCLASS_RANK[t.vclass] ?? 5;
+    const fr = FTYPE_RANK[t.ftype] ?? 3;
+    return { f, i, key: vr * 10 + fr };
+  });
+  ranked.sort((a, b) => a.key - b.key || a.i - b.i);
+  return ranked.slice(0, cap).map((r) => r.f);
+}
 
 // ============================================================
 // 属性清洗：MVT 只支持 string / number / bool
@@ -241,6 +286,9 @@ async function main() {
   // 低级别瓦片会把全部要素装进去，单瓦片体积是「会不会糊住客户端」的关键指标，
   // 必须实测而不是估。MapLibre 对超大瓦片的解码会在主线程上卡一下。
   let widest = { rawSize: 0, gzSize: 0, z: -1, x: -1, y: -1, features: 0 };
+  // 低级别封顶的统计：必须报出来，否则「体积极限通过」会掩盖「要素被丢了 90%」。
+  let cappedTiles = 0;
+  let droppedFeatures = 0;
   const t1 = Date.now();
 
   for (let z = cfg.minZoom; z <= cfg.maxZoom; z++) {
@@ -249,7 +297,7 @@ async function main() {
     for (const tileId of candidates.perZoom.get(z) ?? []) {
       // tileId 是 Hilbert 序，回推 z/x/y —— 用官方实现，避免自己写错
       const [tz, tx, ty] = tileIdToZxy(tileId);
-      const tile = index.getTile(tz, tx, ty);
+      let tile = index.getTile(tz, tx, ty);
       if (!tile || tile.features.length === 0) {
         emptySkipped++;
         continue;
@@ -257,6 +305,19 @@ async function main() {
       if (tile.features.length < cfg.minFeatures) {
         tooFewSkipped++;
         continue;
+      }
+      // ---- 低级别单瓦片要素数封顶（默认关闭，见 DEFAULTS 里的说明）----
+      // ⚠️ 用「换新对象」而不是就地改 tile.features：geojson-vt 会**缓存瓦片**，
+      //    就地 splice 会污染缓存（与下面改 tags 同一个坑）。
+      if (
+        cfg.maxFeaturesPerTile > 0 &&
+        tz < cfg.capBelowZoom &&
+        tile.features.length > cfg.maxFeaturesPerTile
+      ) {
+        const kept = pickForLowZoom(tile.features, cfg.maxFeaturesPerTile);
+        droppedFeatures += tile.features.length - kept.length;
+        cappedTiles++;
+        tile = { ...tile, features: kept };
       }
       // 低级别只保留 ftype + vclass（见 fullPropsFromZoom 的说明）。
       // ⚠️ 用「换成新对象」而不是在原来的 tags 上 delete：geojson-vt 会缓存瓦片，
@@ -302,6 +363,12 @@ async function main() {
   }
   console.log(`  空瓦片跳过 : ${emptySkipped.toLocaleString()}`);
   console.log(`  过稀疏跳过 : ${tooFewSkipped.toLocaleString()}`);
+  if (cfg.maxFeaturesPerTile > 0) {
+    console.log(
+      `  低级别封顶 : ${cappedTiles.toLocaleString()} 张瓦片被截断，共丢弃 ${droppedFeatures.toLocaleString()} 个要素` +
+        `（上限 ${cfg.maxFeaturesPerTile.toLocaleString()}/瓦片，仅 z<${cfg.capBelowZoom}；按电压由高到低保留）`,
+    );
+  }
   console.log(
     `  最大单瓦片 : ${(widest.rawSize / 1024).toFixed(1)} KB 原始 / ${(widest.gzSize / 1024).toFixed(1)} KB gzip` +
       `（z${widest.z}/${widest.x}/${widest.y}，${widest.features} 个要素）`,

@@ -27,16 +27,35 @@ import { CELL_MEASURED, REGIONS, cellSizeOf, gridFor, scanSample } from "./pipel
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const ALL_STAGES = ["scan", "fetch", "prepare", "build"];
+/**
+ * 默认阶段**不含 scan**。
+ *
+ * 理由（`scripts/measure_count_cost.py` 实测，2026-09-13）：
+ *   - out count 的耗时基本是固定开销（2.4~4.6 秒），与要素数无关；
+ *   - 换算到整块：真抓 **44.0 秒/块**（华东 64 块实测）vs 扫描 ≈ **29 秒/块**，只快约 1.5x；
+ *   - 而且单点外推**高估 77%**（华东按 1 块外推 165,760，真抓 93,559），估计值本身不可靠。
+ * ⇒ 扫描省下的时间不足以成为杠杆，却换不到任何数据。**直接抓**更好（可续抓、产出真数据）。
+ *   扫描保留为显式选项，用于「探测端点是否可用」与「判断某区域有没有数据」。
+ */
+const DEFAULT_STAGES = ["fetch", "prepare", "build"];
 
 // ---------------------------------------------------------------- 参数
 function parseArgs(argv) {
   const cfg = {
     regions: null,
-    stages: new Set(ALL_STAGES),
+    stages: new Set(DEFAULT_STAGES),
     target: { ...CELL_MEASURED },
     scanFactor: 3,
     packDir: "data/packs",
     reportPath: "data/packs/pipeline_report.json",
+    /**
+     * 全国可选包**默认开启**低级别封顶，而切片脚本本身默认关闭。
+     * 分工：驱动只产可选包（要素多，z0~z6 会把瓦片撑到近 1 MB）；
+     * 切片脚本还要产进安装包的核心区归档，那里默认值必须保持不变 ——
+     * 否则阶段29~37 关于 osm_grid.pmtiles 的全部验收结论会被静默推翻。
+     */
+    maxFeaturesPerTile: 20000,
+    capBelowZoom: 8,
     dryRun: false,
     force: false,
   };
@@ -52,8 +71,8 @@ function parseArgs(argv) {
       }
       cfg.target = { ...cfg.target, lon, lat };
     } else if (a === "--scan-factor") cfg.scanFactor = Number(next());
-    else if (a === "--pack-dir") cfg.packDir = next();
-    else if (a === "--report") cfg.reportPath = next();
+    else if (a === "--pack-dir") cfg.packDir = next();    else if (a === "--max-features-per-tile") cfg.maxFeaturesPerTile = Number(next());
+    else if (a === "--cap-below-zoom") cfg.capBelowZoom = Number(next());    else if (a === "--report") cfg.reportPath = next();
     else if (a === "--dry-run") cfg.dryRun = true;
     else if (a === "--force") cfg.force = true;
     else if (a === "-h" || a === "--help") {
@@ -62,10 +81,13 @@ function parseArgs(argv) {
           "用法: node scripts/run_pipeline.mjs [选项]",
           "",
           "  --regions a,b   只跑指定批次（默认全部，按密度递减顺序）",
-          "  --stage s1,s2   要执行的阶段：scan,fetch,prepare,build（默认全部）",
+          "  --stage s1,s2   要执行的阶段：fetch,prepare,build,scan（默认 fetch,prepare,build）",
+          "                  不加 scan：实测它只快 ~1.5x 却换不到数据，直接抓更划算",
           "  --target-cell   目标块尺寸 lonxlat（默认对齐华东实测 1.1875x1.9375）",
           "  --scan-factor   抽样扫描的步长（默认 3 = 每 3 列/行取一格；**块尺寸与真抓一致**）",
           "  --pack-dir      可选包输出目录（默认 data/packs，该目录已被 .gitignore 忽略）",
+          "  --max-features-per-tile <n>  低级别单瓦片要素封顶（默认 20000；0 = 关闭）",
+          "  --cap-below-zoom <n>  只对低于该级别的瓦片封顶（默认 8）",
           "  --report        报表 JSON 路径（默认 data/packs/pipeline_report.json）",
           "  --dry-run       只打印命令，不执行",
           "  --force         即使抓取有失败块也继续切片（默认拒绝，避免出带空洞的包）",
@@ -91,6 +113,13 @@ function pythonPath() {
 }
 
 const PY = pythonPath();
+
+/**
+ * ⚠️ 必须带 `-u`：驱动用管道接住子进程 stdout，此时 Python 会切成**块缓冲**，
+ *    进度要等缓冲区满或进程退出才吐出。实测过一次：扫描跑了 5 分钟，终端一个字都没有，
+ *    只能靠产物文件猜进度。对几小时的全国运行，这是不可接受的。
+ */
+const PY_ARGS_PREFIX = ["-u"];
 
 /** 跑一条命令：实时转发输出到控制台，同时以 UTF-8 追加到日志文件 */
 function runStep(label, cmd, args, logFile) {
@@ -183,6 +212,7 @@ async function processRegion(region, cfg, report) {
       "scan",
       PY,
       [
+        ...PY_ARGS_PREFIX,
         "scripts/fetch_osm_power.py",
         "--bbox", bboxStr,
         "--grid", `${s.cols}x${s.rows}`,
@@ -230,7 +260,7 @@ async function processRegion(region, cfg, report) {
     const res = await runStep(
       "fetch",
       PY,
-      ["scripts/fetch_osm_power.py", "--bbox", bboxStr, "--grid", `${cols}x${rows}`, "--name", name],
+      [...PY_ARGS_PREFIX, "scripts/fetch_osm_power.py", "--bbox", bboxStr, "--grid", `${cols}x${rows}`, "--name", name],
       logFile,
     );
     const meta = readJson(join(ROOT, "data", "osm", `${name}_power_meta.json`));
@@ -290,20 +320,23 @@ async function processRegion(region, cfg, report) {
 
   // ---- 4. 切片（可选包） ----
   if (cfg.stages.has("build")) {
-    const res = await runStep(
-      "build",
-      process.execPath,
-      [
-        "scripts/build_pmtiles.mjs",
-        "--name", name,
-        "--in", `public/osm/${name}_power.geojson`,
-        "--out", packOut,
-      ],
-      logFile,
-    );
+    const buildArgs = [
+      "scripts/build_pmtiles.mjs",
+      "--name", name,
+      "--in", `public/osm/${name}_power.geojson`,
+      "--out", packOut,
+    ];
+    if (cfg.maxFeaturesPerTile > 0) {
+      buildArgs.push(
+        "--max-features-per-tile", String(cfg.maxFeaturesPerTile),
+        "--cap-below-zoom", String(cfg.capBelowZoom),
+      );
+    }
+    const res = await runStep("build", process.execPath, buildArgs, logFile);
     const mFeatures = /要素数\s*:\s*([\d,]+)/.exec(res.out);
     const mTiles = /合计\s*:\s*([\d,]+)\s*张瓦片/.exec(res.out);
     const mGzip = /→\s*gzip\s+([\d.]+)\s*MB/.exec(res.out);
+    const mCapped = /低级别封顶\s*:\s*([\d,]+)\s*张瓦片被截断，共丢弃\s*([\d,]+)\s*个要素/.exec(res.out);
     const mWidest = /最大单瓦片\s*:\s*([\d.]+)\s*KB 原始 \/ ([\d.]+)\s*KB gzip（z(\d+)\/(\d+)\/(\d+)，([\d,]+) 个要素）/.exec(res.out);
     rec.stages.build = {
       exit: res.code,
@@ -312,13 +345,18 @@ async function processRegion(region, cfg, report) {
       features: mFeatures ? Number(mFeatures[1].replace(/,/g, "")) : null,
       tiles: mTiles ? Number(mTiles[1].replace(/,/g, "")) : null,
       gzipMb: mGzip ? Number(mGzip[1]) : null,
+      cappedTiles: mCapped ? Number(mCapped[1].replace(/,/g, "")) : null,
+      cappedDropped: mCapped ? Number(mCapped[2].replace(/,/g, "")) : null,
       widest: mWidest
         ? { rawKb: Number(mWidest[1]), gzipKb: Number(mWidest[2]), z: +mWidest[3], x: +mWidest[4], y: +mWidest[5], features: Number(mWidest[6].replace(/,/g, "")) }
         : null,
     };
     rec.status = res.code === 0 ? "ok" : "build-failed";
   } else {
-    rec.status = rec.status === "started" ? "fetch-only" : rec.status;
+    // 没跑 build 时，状态如实写出「实际跑了哪几个阶段」，
+    // 不要笼统写成 fetch-only —— 只跑 scan 也会被误标，验收时看状态会误判。
+    const ran = Object.keys(rec.stages);
+    if (rec.status === "started") rec.status = ran.length ? `partial(${ran.join("+")})` : "no-op";
   }
 
   rec.finishedAt = new Date().toISOString();
@@ -343,8 +381,7 @@ async function main() {
 
   console.log("=== 阶段38 全国分批流水线 ===");
   console.log(`批次     : ${picked.map((r) => r.label).join(" → ")}`);
-  console.log(`阶段     : ${[...cfg.stages].join(",")}`);
-  console.log(`可选包   : ${cfg.packDir}/osm-<region>.pmtiles（不进安装包；该目录已被 .gitignore 忽略）`);
+  console.log(`阶段     : ${[...cfg.stages].join(",")}`);  console.log(`可选包   : ${cfg.packDir}/osm-<region>.pmtiles（不进安装包；该目录已被 .gitignore 忽略）`);
   console.log(`合计块数 : ${totalChunks}`);
   console.log(`串行预计 : ${((totalChunks * cfg.target.secPerChunk) / 3600).toFixed(1)} 小时 (上界；稀疏区远快于此)`);
 
@@ -356,9 +393,9 @@ async function main() {
       const s = scanSample(r, cfg.scanFactor, cfg.target);
       console.log(`\n— ${r.label} (${r.key})`);
       if (cfg.stages.has("scan"))
-        console.log(`  ${PY} scripts/fetch_osm_power.py --bbox ${bboxStr} --grid ${cols}x${rows} --sample-step ${s.step} --name ${r.key} --count-only   # ${s.cells}/${cols * rows} 块`);
+        console.log(`  ${PY} -u scripts/fetch_osm_power.py --bbox ${bboxStr} --grid ${cols}x${rows} --sample-step ${s.step} --name ${r.key} --count-only   # ${s.cells}/${cols * rows} 块`);
       if (cfg.stages.has("fetch"))
-        console.log(`  ${PY} scripts/fetch_osm_power.py --bbox ${bboxStr} --grid ${cols}x${rows} --name ${r.key}`);
+        console.log(`  ${PY} -u scripts/fetch_osm_power.py --bbox ${bboxStr} --grid ${cols}x${rows} --name ${r.key}`);
       if (cfg.stages.has("prepare"))
         console.log(`  node scripts/prepare_osm_geojson.mjs --name ${r.key} --out-dir public/osm --out-name ${r.key}_power`);
       if (cfg.stages.has("build"))
@@ -394,6 +431,7 @@ async function main() {
     要素数: r.stages?.prepare?.featureCount ?? r.stages?.build?.features ?? "—",
     可选包MB: r.stages?.build?.packSizeMb ?? "—",
     最大瓦片KB: r.stages?.build?.widest?.rawKb ?? "—",
+    封顶丢弃: r.stages?.build?.cappedDropped ?? "—",
     失败块: r.stages?.fetch?.failedChunks ?? "—",
   }));
   console.table(rows);
