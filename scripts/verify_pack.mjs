@@ -97,7 +97,16 @@ async function main() {
 
   const results = [];
   /** 每个 ftype 实际出现过的属性键（用于校验属性白名单没漏字段） */
-  const keysByType = { line: new Set(), substation: new Set(), plant: new Set() };
+  // 阶段43：新增 railway / pipeline（铁路干线、油气长输管道）。
+  // ⚠️ 这两类**没有 vclass**（它们没有电压概念），所以低级别瓦片里
+  //    它们的属性就只剩 `ftype`。断言只验证 z>=8 的专属属性。
+  const keysByType = {
+    line: new Set(),
+    substation: new Set(),
+    plant: new Set(),
+    railway: new Set(),
+    pipeline: new Set(),
+  };
   /** ‼️ 解码失败必须计数而不能静默跳过 —— 阶段42 的「假断言」就是静默跳过造成的 */
   let decodeFailed = 0;
   let decodeErrMsg = null;
@@ -244,7 +253,15 @@ async function main() {
   //    `build_pmtiles.mjs` 的 keepProps 漏字段时**不会报错、不会崩溃**，
   //    只表现为前端的某个字段永远不出现（plant_source 就是这样丢了很久）。
   //    光看「构建 exit=0」永远发现不了，必须在这里把期望的属性钉死。
-  const expectProp = { line: "line_kind", substation: "substation_kind", plant: "plant_source" };
+  const expectProp = {
+    line: "line_kind",
+    substation: "substation_kind",
+    plant: "plant_source",
+    // 阶段43：铁路只看 railway_kind（与 prepare 的 KEEP_PROPS 一一对应）；
+    // 管道看 substance（这是唯一能区分 gas / oil 的字段）
+    railway: "railway_kind",
+    pipeline: "substance",
+  };
   if (results.some((r) => r.z >= 8)) {
     const missing = [];
     for (const [ftype, key] of Object.entries(expectProp)) {
@@ -253,7 +270,7 @@ async function main() {
       if (!seen.has(key)) missing.push(`${ftype}.${key}`);
     }
     checks.push({
-      断言: "z>=8 的瓦片保留了各 ftype 的专属属性（line_kind / substation_kind / plant_source）",
+      断言: "z>=8 的瓦片保留了各 ftype 的专属属性（line_kind / substation_kind / plant_source / railway_kind / substance）",
       实测: Object.entries(expectProp)
         .map(([t, k]) =>
           keysByType[t].size === 0 ? `${t}:未抽样到` : `${t}:${keysByType[t].has(k) ? "有" : "缺"}${k}`,

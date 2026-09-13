@@ -239,6 +239,36 @@ const OSM_LINES_HIT_LAYER_ID = "osm-lines-hit";
 const OSM_LINES_HIT_WIDTH = 14;
 
 /**
+ * 阶段43：其他基础设施 —— 铁路干线 与 油气长输管道。
+ *
+ * 抓取口径（已实测、不是猜的）：
+ *  铁路 `way[railway=rail]["service"!~"."]` —— 排除侧线/站线/场线。
+ *      阶段43 实测（长三角 12 格全量）：侧线占 railway=rail 的 38.3% 条数、
+ *      **70% 的坐标点数**。城市轨道（subway/light_rail/tram/...）**不入库**：
+ *      用户判定地铁轻轨对电网骨干的视觉干扰大于价值（长三角为 2,999 条 / 73,452 点）。
+ *  管道 `way[man_made=pipeline]["substance"~"^(gas|oil)$"]` —— 全量仅 85 条。
+ *      ⚠️ 长三角油气总里程 2,540 km 里，单条「西气东输」占 2,378 km（93.6%），
+ *      所以这个图层视觉上会是「一根横穿全国的线 + 少量短线」，属于数据本身特征。
+ *
+ * 两个图层都**默认关闭**（不在 visibleLayers 初始值里），且**置于电力图层下方**：
+ * 它们是背景参照物，不该与电压分级的线条争夺注意力。
+ *
+ * ‼️ 铁路用**虚线**是刻意的：只有虚线才能在低缩放级别下与四档电压线一眼可分，
+ *    而且它不占用任何一档电压的颜色。
+ */
+const OSM_RAILWAY_LAYER_ID = "osm-railways";
+const OSM_RAILWAY_COLOR = "#c9c2b6";
+const OSM_PIPELINE_LAYER_ID = "osm-pipelines";
+const OSM_PIPELINE_COLOR = "#b98cf5";
+
+/** 面板上的两个开关名。刻意**不并进 `LAYERS`** —— 那个数组同时是「默认可见」清单。 */
+const INFRA_LAYERS = ["铁路", "油气管道"] as const;
+const INFRA_SWATCH: Record<string, string> = {
+  铁路: OSM_RAILWAY_COLOR,
+  油气管道: OSM_PIPELINE_COLOR,
+};
+
+/**
  * 阶段39：区域数据包（可选包）—— 按视口动态加载。
  *
  * 背景：全国 7 个大区被切成 7 个独立归档（`data/packs/osm-<region>.pmtiles`，共 116 MB），
@@ -294,6 +324,8 @@ function packLayerIds(key: string) {
     lines: OSM_LINE_TIERS.map((t) => packLayerId(t.id, key)),
     substations: packLayerId(OSM_SUBSTATION_LAYER_ID, key),
     plants: packLayerId(OSM_PLANT_LAYER_ID, key),
+    railways: packLayerId(OSM_RAILWAY_LAYER_ID, key),
+    pipelines: packLayerId(OSM_PIPELINE_LAYER_ID, key),
     hit: packLayerId(OSM_LINES_HIT_LAYER_ID, key),
   };
 }
@@ -1524,6 +1556,42 @@ function addOsmGridLayers(
   // 矢量瓦片必须额外指定 source-layer；GeoJSON 不能设（设了反而报错）
   const layerRef = archive ? { "source-layer": OSM_GRID_SOURCE_LAYER } : {};
 
+  // ---- 阶段43：铁路 / 油气管道（背景参照，画在**电力图层下方**）----
+  // ‼️ 必须加在电压档循环**之前**：MapLibre 先加的在下，
+  //    若加在循环之后，虚线铁路会盖在 735kV 粉线上。
+  // ‼️ layout.visibility 直接写 none：面板默认不包含这两项，
+  //    不等显隐 effect 跑第一轮就不会闪一下。
+  map.addLayer({
+    id: OSM_RAILWAY_LAYER_ID,
+    type: "line",
+    source: OSM_SOURCE,
+    ...layerRef,
+    filter: ["==", ["get", "ftype"], "railway"],
+    layout: { "line-cap": "butt", "line-join": "round", visibility: "none" },
+    paint: {
+      "line-color": OSM_RAILWAY_COLOR,
+      "line-opacity": 0.75,
+      // 虚线：低缩放级别下与四档电压实线一眼可分（不占任何一档电压的颜色）
+      "line-dasharray": [2, 1.6],
+      "line-width": ["interpolate", ["linear"], ["zoom"], 4, 0.4, 8, 0.9, 11, 1.4],
+    },
+  });
+
+  map.addLayer({
+    id: OSM_PIPELINE_LAYER_ID,
+    type: "line",
+    source: OSM_SOURCE,
+    ...layerRef,
+    filter: ["==", ["get", "ftype"], "pipeline"],
+    layout: { "line-cap": "round", "line-join": "round", visibility: "none" },
+    paint: {
+      "line-color": OSM_PIPELINE_COLOR,
+      "line-opacity": 0.9,
+      // 实线（与铁路的虚线相反）：数量极少（全区域 85 条），需要显眼
+      "line-width": ["interpolate", ["linear"], ["zoom"], 4, 0.6, 8, 1.3, 11, 2.2],
+    },
+  });
+
   // ‼️ 自下而上加层，让 735kV 画在最顶（详见 `OSM_LINE_TIERS_BOTTOM_UP`）。
   //    ⚠️ 必须与 `addPackLayers` 用同一个数组，否则核心区与区域包画序不一致。
   for (const tier of OSM_LINE_TIERS_BOTTOM_UP) {
@@ -1655,6 +1723,37 @@ function addPackLayers(
   const layerRef = { "source-layer": OSM_GRID_SOURCE_LAYER };
   // 区域包用带 `--<region>` 后缀的 id，**不覆盖核心区的 id**
   const id = (base: string) => packLayerId(base, key);
+
+  // ---- 阶段43：铁路 / 油气管道（与 `addOsmGridLayers` 同规格，只是 id 带包后缀）----
+  // ⚠️ 结构与数值必须与 `addOsmGridLayers` 保持一致 —— 改动其中一个请对照另一个。
+  map.addLayer({
+    id: id(OSM_RAILWAY_LAYER_ID),
+    type: "line",
+    source: sourceId,
+    ...layerRef,
+    filter: ["==", ["get", "ftype"], "railway"],
+    layout: { "line-cap": "butt", "line-join": "round", visibility: "none" },
+    paint: {
+      "line-color": OSM_RAILWAY_COLOR,
+      "line-opacity": 0.75,
+      "line-dasharray": [2, 1.6],
+      "line-width": ["interpolate", ["linear"], ["zoom"], 4, 0.4, 8, 0.9, 11, 1.4],
+    },
+  });
+
+  map.addLayer({
+    id: id(OSM_PIPELINE_LAYER_ID),
+    type: "line",
+    source: sourceId,
+    ...layerRef,
+    filter: ["==", ["get", "ftype"], "pipeline"],
+    layout: { "line-cap": "round", "line-join": "round", visibility: "none" },
+    paint: {
+      "line-color": OSM_PIPELINE_COLOR,
+      "line-opacity": 0.9,
+      "line-width": ["interpolate", ["linear"], ["zoom"], 4, 0.6, 8, 1.3, 11, 2.2],
+    },
+  });
 
   // ‼️ 用自下而上的顺序：先加的在下面，让 735kV 最后加、画在最顶。
   //    详见 `OSM_LINE_TIERS_BOTTOM_UP` 的说明（原先低压盖高压）。
@@ -2996,6 +3095,9 @@ function MapPage({
         }
         m.setLayoutProperty(ids.substations, "visibility", on("变电站") ? "visible" : "none");
         m.setLayoutProperty(ids.plants, "visibility", on("电厂") ? "visible" : "none");
+        // 阶段43：新加载的区域包也要按当前开关设一次，否则默认关闭的铁路/管道会自己冒出来
+        m.setLayoutProperty(ids.railways, "visibility", on("铁路") ? "visible" : "none");
+        m.setLayoutProperty(ids.pipelines, "visibility", on("油气管道") ? "visible" : "none");
         m.setLayoutProperty(ids.hit, "visibility", LINE_TIER_KEYS.some((k) => on(k)) ? "visible" : "none");
 
         // 光标反馈（与核心区那几个 hit 层一致）。
@@ -3050,6 +3152,11 @@ function MapPage({
     apply([CLUSTER_LAYER_ID, PLANT_LAYER_ID, HIGHLIGHT_LAYER_ID, OSM_PLANT_LAYER_ID], on("电厂"));
     apply([SUBSTATIONS_LAYER_ID, OSM_SUBSTATION_LAYER_ID], on("变电站"));
 
+    // 阶段43：铁路 / 油气管道。两个独立开关，**默认关闭**（不在 visibleLayers 初始值里）。
+    // 它们没有命中热区/弹窗，所以不需要像线路那样联动 hit 层。
+    apply([OSM_RAILWAY_LAYER_ID], on("铁路"));
+    apply([OSM_PIPELINE_LAYER_ID], on("油气管道"));
+
     // ⚠️ 输电线路的热区层必须跟着视觉线一起开关，否则会出现
     //    「线看不见了、却还能点到它的弹窗」的幽灵交互。
     // ‼️ 阶段30：输电线路细化为「一个电压档一个开关」，键直接用 vclass。
@@ -3072,6 +3179,8 @@ function MapPage({
       }
       apply([packLayerId(OSM_SUBSTATION_LAYER_ID, key)], on("变电站"));
       apply([packLayerId(OSM_PLANT_LAYER_ID, key)], on("电厂"));
+      apply([packLayerId(OSM_RAILWAY_LAYER_ID, key)], on("铁路"));
+      apply([packLayerId(OSM_PIPELINE_LAYER_ID, key)], on("油气管道"));
       apply([packLayerId(OSM_LINES_HIT_LAYER_ID, key)], LINE_TIER_KEYS.some((k) => on(k)));
     }
 
@@ -3316,6 +3425,35 @@ function MapPage({
                     aria-hidden="true"
                   />
                   {TIER_LABEL[tier.vclass] ?? tier.vclass}
+                </label>
+              </li>
+            ))}
+          </ul>
+        </div>
+
+        {/* 阶段43：其他基础设施（默认关闭）。
+            做成独立分组而不是并进上面三个总开关，是因为它们属于「背景参照」：
+            默认视图里不应该与电网骨干争夺注意力。
+            复用 `.tierGroup/.tierItem` 那套样式，色块取自与地图**同一份**颜色常量，
+            所以开关本身就是图例，不会与地图配色脱节。 */}
+        <div className={styles.tierGroup} hidden={!panelOpen}>
+          <p className={styles.legendTitle}>其他基础设施（默认关闭）</p>
+          <ul className={styles.tierList}>
+            {INFRA_LAYERS.map((name) => (
+              <li key={name}>
+                <label className={styles.tierItem}>
+                  <input
+                    type="checkbox"
+                    className={styles.tierCheck}
+                    checked={visibleLayers.includes(name)}
+                    onChange={() => toggleLayer(name)}
+                  />
+                  <span
+                    className={styles.layerSwatch}
+                    style={{ background: INFRA_SWATCH[name] }}
+                    aria-hidden="true"
+                  />
+                  {name}
                 </label>
               </li>
             ))}

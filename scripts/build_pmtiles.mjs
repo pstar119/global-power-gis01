@@ -73,6 +73,17 @@ const DEFAULTS = {
    * ⚠️ 这里是**第二道**属性白名单：上游 prepare 收一次、这里再收一次。
    *    以后加字段必须**两处都改**，否则就会重演这个 bug。
    *    各 ftype 实际上会带的字段见 prepare_osm_geojson.mjs 的 KEEP_PROPS。
+   *
+   * 🔴 阶段43 扩展：新增铁路 `railway_kind`/`usage` 与管道 `substance`。
+   *    这次是**照上面那条规矩两处同时改**的。
+   *
+   * ℹ️ 关于 `vclass`：铁路/管道要素**没有** vclass（它们没有电压概念）。
+   *    下面 `tz < fullPropsFromZoom` 那段会把 tags 收敛成 `{ftype, vclass}`，
+   *    因此这两类要素在低级别会带一个 `vclass: undefined`。已核对过
+   *    `vt-pbf/index.js` 的 `writeProperties`：`undefined` 既不是 string/boolean/number，
+   *    会走 `JSON.stringify(undefined)` -> `undefined` -> `writeValue` 三个分支都不匹配
+   *    -> 写出一条**空值消息**。**不会抛错**，只是多一个空属性，前端按 ftype 过滤不受影响。
+   *    正因为已确认无副作用，才没有去动切片循环 —— 保持核心逻辑零改动。
    */
   keepProps: [
     "ftype",
@@ -83,6 +94,9 @@ const DEFAULTS = {
     "line_kind",
     "substation_kind",
     "plant_source",
+    "railway_kind",
+    "usage",
+    "substance",
   ],
   /**
    * 低级别单瓦片**要素数上限**；0 = 不封顶（默认）。

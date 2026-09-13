@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-09-13T20:17:32.472Z",
+  "generatedAt": "2026-09-13T20:58:10.736Z",
   "generatedBy": "scripts/gen_packs_manifest.mjs",
   "note": "区域数据包元信息清单。pack 是否已安装需在运行时用 127 字节 Range 探测判定，本文件只描述「有哪些包、覆盖哪里」。",
   "core": {
@@ -25,9 +25,9 @@
       ],
       "file": "packs/osm-huadong.pmtiles",
       "chunks": 64,
-      "features": 93559,
-      "sizeMb": 20.77,
-      "maxTileKb": 400.7
+      "features": 168445,
+      "sizeMb": 28.92,
+      "maxTileKb": 412.3
     },
     {
       "key": "huazhong",

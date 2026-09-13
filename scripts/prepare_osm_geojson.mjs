@@ -15,8 +15,10 @@
  * ============================================================
  * 1. **合并成一个 FeatureCollection**：MapLibre 的一个 GeoJSON source 就能装下点 + 线，
  *    前端用 `filter` 分成若干图层渲染即可 —— 不必建三个 source，图层面板和显隐逻辑也简单得多。
- *    代价是必须给每个要素加一个判别字段 `ftype`（line / substation / plant），
+ *    代价是必须给每个要素加一个判别字段 `ftype`（line / substation / plant / railway / pipeline），
  *    否则前端没法区分线该用 line 图层还是 circle 图层。
+ *    ‼️ 阶段43 起铁路与管道也进同一个 FeatureCollection，**依然只有一个 source、一个 MVT 图层**，
+ *       前端靠 ftype 分图层。这是刻意的：多一个 source 就多一份瓦片请求与缓存。
  * 2. **裁属性**：只留渲染与点选真正要用的字段。属性是 GeoJSON 体积的大头之一，
  *    裁完能省下可观体积（尤其长三角那个量级）。
  * 3. **坐标降精度到 6 位小数**（约 0.11 m）：远高于任何缩放级别的可视精度，
@@ -70,17 +72,34 @@ function parseArgs(argv) {
 
 const cfg = parseArgs(process.argv.slice(2));
 
-/** 每个 ftype 保留的属性白名单。`vclass` 必须保留 —— 前端的分档 filter 全靠它。 */
+/** 每个 ftype 保留的属性白名单。`vclass` 必须保留 —— 前端的分档 filter 全靠它。
+ *
+ * ⚠️ 这是**第一道**白名单，第二道在 `build_pmtiles.mjs` 的 `keepProps`。
+ *    两处都改才算改完 —— 阶段42 就是因为只改了这一处，导致 plant_source
+ *    在切片时被静默丢掉（打包后前端拿不到该字段，而校验脚本当时假装通过）。
+ *    新增 ftype 时请同时检查 `build_pmtiles.mjs`。
+ */
 const KEEP_PROPS = {
   line: ["osm_id", "name", "vclass", "voltage_kv", "line_kind"],
   substation: ["osm_id", "name", "vclass", "voltage_kv", "substation_kind"],
   plant: ["osm_id", "name", "vclass", "voltage_kv", "plant_source"],
+  // 阶段43：铁路干线（railway=rail，已排除 service 侧线与城市轨道）
+  railway: ["osm_id", "name", "railway_kind", "usage"],
+  // 阶段43：油气长输管道（man_made=pipeline 且 substance=gas|oil）
+  pipeline: ["osm_id", "name", "substance"],
 };
 
+/**
+ * 输入文件表。`power: true` 的条目参与电压分档，缺 `vclass` 会被补成 unknown；
+ * 铁路/管道没有电压概念，**不参与**分档 —— 否则电压直方图会被这两种要素污染，
+ * 而且「缺 vclass」这个信号本来专门用来标记缺 voltage 标签的电力要素。
+ */
 const FILES = [
-  { ftype: "line", suffix: "lines" },
-  { ftype: "substation", suffix: "substations" },
-  { ftype: "plant", suffix: "plants" },
+  { ftype: "line", src: (n) => `${n}_power_lines.geojson`, power: true },
+  { ftype: "substation", src: (n) => `${n}_power_substations.geojson`, power: true },
+  { ftype: "plant", src: (n) => `${n}_power_plants.geojson`, power: true },
+  { ftype: "railway", src: (n) => `${n}_rail.geojson`, power: false },
+  { ftype: "pipeline", src: (n) => `${n}_pipeline.geojson`, power: false },
 ];
 
 const round6 = (n) => Math.round(n * 1e6) / 1e6;
@@ -116,18 +135,21 @@ function main() {
   let dropped = 0;
   let droppedNoVclass = 0;
 
-  for (const { ftype, suffix } of FILES) {
-    const src = resolve(ROOT, cfg.inDir, `${cfg.name}_power_${suffix}.geojson`);
-    if (!existsSync(src)) {
-      console.warn(`⚠️  跳过（不存在）：${src}`);
+  for (const { ftype, src, power } of FILES) {
+    const srcPath = resolve(ROOT, cfg.inDir, src(cfg.name));
+    if (!existsSync(srcPath)) {
+      // 电力三个文件缺失是真问题（会抛错），铁路/管道缺失只是「没抓」——只警告
+      if (power) console.warn(`⚠️  跳过（不存在）：${srcPath}`);
+      else console.log(`  ${ftype.padEnd(11)} （未提供 ${src(cfg.name)}，跳过）`);
       continue;
     }
-    const fc = JSON.parse(readFileSync(src, "utf8"));
+    const fc = JSON.parse(readFileSync(srcPath, "utf8"));
     if (fc?.type !== "FeatureCollection" || !Array.isArray(fc.features)) {
-      throw new Error(`${src} 不是合法的 FeatureCollection`);
+      throw new Error(`${srcPath} 不是合法的 FeatureCollection`);
     }
 
     const keep = KEEP_PROPS[ftype];
+    if (!keep) throw new Error(`FILES 里的 ftype=${ftype} 没在 KEEP_PROPS 里定义白名单`);
     let kept = 0;
     for (const f of fc.features) {
       const g = f?.geometry;
@@ -136,12 +158,13 @@ function main() {
         continue;
       }
       const props = f.properties ?? {};
-      if (props.vclass == null) {
+      if (power && props.vclass == null) {
         // 没有 vclass 就没法分档，前端只能当「未知」——这里补上而不是丢弃
         droppedNoVclass++;
         props.vclass = "unknown";
       }
-      const slim = { ftype, vclass: props.vclass };
+      const slim = { ftype };
+      if (props.vclass != null) slim.vclass = props.vclass;
       for (const k of keep) {
         if (k === "vclass") continue;
         const v = props[k];
@@ -149,10 +172,10 @@ function main() {
       }
       features.push({ type: "Feature", properties: slim, geometry: roundCoords(g) });
       kept++;
-      perClass[props.vclass] = (perClass[props.vclass] ?? 0) + 1;
+      if (power) perClass[props.vclass] = (perClass[props.vclass] ?? 0) + 1;
     }
     perType[ftype] = kept;
-    const size = (statSync(src).size / 1048576).toFixed(2);
+    const size = (statSync(srcPath).size / 1048576).toFixed(2);
     console.log(`  ${ftype.padEnd(11)} 读入 ${String(fc.features.length).padStart(6)}  保留 ${String(kept).padStart(6)}  （源文件 ${size} MB）`);
   }
 
@@ -175,9 +198,11 @@ function main() {
   console.log("=== 结果 ===");
   console.log(`要素总数 : ${features.length}`);
   for (const [k, v] of Object.entries(perType)) console.log(`  ${k.padEnd(11)} ${v}`);
-  console.log("电压分档 :");
-  for (const cls of ["735+", "500-734", "220-499", "<220", "unknown"]) {
-    if (perClass[cls]) console.log(`  ${cls.padEnd(11)} ${perClass[cls]}`);
+  if (Object.keys(perClass).length) {
+    console.log("电压分档（仅电力） :");
+    for (const cls of ["735+", "500-734", "220-499", "<220", "unknown"]) {
+      if (perClass[cls]) console.log(`  ${cls.padEnd(11)} ${perClass[cls]}`);
+    }
   }
   if (dropped) console.log(`剔除非法几何 : ${dropped} 个`);
   if (droppedNoVclass) console.log(`补 vclass=unknown : ${droppedNoVclass} 个（源里缺 voltage 标签）`);

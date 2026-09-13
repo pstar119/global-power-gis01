@@ -103,6 +103,48 @@ CHUNK_WAIT = 2.0
 
 
 # ------------------------------------------------------------------
+# 抓取类别（阶段43）
+# ------------------------------------------------------------------
+# 阶段28~42 只有电力一条路。阶段43 增加铁路与管道两类基础设施。
+# 刻意**复用本脚本**而不是另写一个，理由是把 429 退避、`remark` 铁律、
+# 失败块必须响亮的报错、按 osm_id 跨块去重、断点续抓这些踩过坑的逻辑
+# 复制成第二份 —— 复制出来的那份迟早会与这份不一致，那就是下次丢数据的入口。
+#
+# ⚠️ `kind` 是产出文件的桶名，`ftype` 是写进 GeoJSON 的判别字段（前端按它分图层）。
+#    电力必须沿用历史的 lines/substations/plants 桶名 ——
+#    改了会与已在 data/osm/ 的 7 个区域产物、以及 *progress.json 断点文件对不上，
+#    后果是全部重抓或覆盖失败。
+POWER_KIND_TO_FTYPE = {"lines": "line", "substations": "substation", "plants": "plant"}
+CATEGORY_KINDS: dict[str, list[str]] = {
+    "power": ["lines", "substations", "plants"],
+    "rail": ["railway"],
+    "pipeline": ["pipeline"],
+}
+CATEGORY_LABEL = {"power": "电力设施", "rail": "铁路干线", "pipeline": "油气管道"}
+
+
+def ftype_of(kind: str) -> str:
+    return POWER_KIND_TO_FTYPE.get(kind, kind)
+
+
+def geom_path(out_dir: str, name: str, category: str, kind: str) -> str:
+    """产物路径。电力保持 `<name>_power_<kind>.geojson`（历史产物不能改名）；
+    铁路/管道各自只有一个桶，用 `<name>_rail.geojson` / `<name>_pipeline.geojson`。"""
+    if category == "power":
+        return os.path.join(out_dir, f"{name}_power_{kind}.geojson")
+    return os.path.join(out_dir, f"{name}_{category}.geojson")
+
+
+def meta_path(out_dir: str, name: str, category: str = "power") -> str:
+    """meta 路径。‼️ 必须按类别分开：
+    同一 name 先抓 power 再抓 rail 时，若两者都写 `<name>_power_meta.json`，
+    后者会直接覆盖前者的 bbox / 要素数 / 电压直方图 —— 这属于静默丢数据。"""
+    if category == "power":
+        return os.path.join(out_dir, f"{name}_power_meta.json")
+    return os.path.join(out_dir, f"{name}_{category}_meta.json")
+
+
+# ------------------------------------------------------------------
 # 电压解析
 # ------------------------------------------------------------------
 def parse_voltage_kv(raw: Any) -> int | None:
@@ -275,7 +317,34 @@ def common_props(element: dict[str, Any]) -> dict[str, Any]:
     return props
 
 
+def infra_line_feature(element: dict[str, Any], geom_type: str) -> dict[str, Any] | None:
+    """铁路 / 管道：都是 LineString，且都**不带 vclass**。
+
+    为什么不复用 common_props：那个函数会按 voltage 算出 vclass，
+    而铁路/管道没有电压概念。硬塞一个 'unknown' 会污染前端的电压分档统计，
+    也会让「空 vclass」这个信号失去意义（它本来专门用来标记缺 voltage 的电力要素）。
+    """
+    tags = element.get("tags", {}) or {}
+    coords = way_to_linestring(element)
+    if not coords:
+        return None
+    props: dict[str, Any] = {
+        "osm_id": f"{element.get('type','?')}/{element.get('id','?')}",
+        "name": tags.get("name") or None,
+    }
+    if geom_type == "railway":
+        props["railway_kind"] = tags.get("railway")
+        # usage 区分 main / branch。实测支线只占主线 7.0%，保留它但不做过滤。
+        props["usage"] = tags.get("usage") or None
+    else:
+        props["substance"] = tags.get("substance")
+    return {"type": "Feature", "properties": props, "geometry": {"type": "LineString", "coordinates": coords}}
+
+
 def build_feature(element: dict[str, Any], geom_type: str) -> dict[str, Any] | None:
+    if geom_type in ("railway", "pipeline"):
+        return infra_line_feature(element, geom_type)
+
     props = common_props(element)
     tags = element.get("tags", {}) or {}
 
@@ -346,7 +415,9 @@ def bbox_filter(b: tuple[float, float, float, float]) -> str:
     return f"({s:.6f},{w:.6f},{n:.6f},{e:.6f})"
 
 
-def queries_for(b: tuple[float, float, float, float], count_only: bool = False) -> dict[str, str]:
+def queries_for(
+    b: tuple[float, float, float, float], count_only: bool = False, category: str = "power"
+) -> dict[str, str]:
     f = bbox_filter(b)
     head = "[out:json][timeout:180];"
     # ⚠️ 实测教训（2026-09-13）：`--estimate-only` **不是**廉价探针 —— 它内部仍是 `out geom;`，
@@ -355,6 +426,24 @@ def queries_for(b: tuple[float, float, float, float], count_only: bool = False) 
     #    ⚠️ 但它**不省 Overpass 的空间检索**，所以单块耗时未必显著下降，
     #       具体倍数以 scripts/measure_count_cost.py 的实测为准，不要凭想象断言。
     tail = "out count;" if count_only else "out geom;"
+
+    if category == "rail":
+        # 只取铁路干线。两条口径都是**在服务器端筛掉**，不是抓回来再过滤：
+        #   `service` 存在 = 侧线/站线/场线（编组站里最密的那批）。
+        #   实测（阶段43，长三角 12 格全量、无外推）：侧线占 railway=rail 的
+        #   38.3% 条数、**70% 的坐标点数** —— 不排除的话体积与视觉噪声都大幅上升。
+        #   ‼️ 城市轨道（subway / light_rail / tram / monorail / narrow_gauge / funicular）
+        #   **故意不抓**：用户判定地铁轻轨对电网骨干的视觉干扰大于价值，留作后续独立可选包。
+        #   参考量级：被排除的城市轨道在长三角是 2,999 条 / 73,452 点 / 7,110 km。
+        return {"railway": (f'{head}' f'(way["railway"="rail"]["service"!~"."]{f};);' f"{tail}")}
+
+    if category == "pipeline":
+        # 只取油气管道。`substance` 只认 gas|oil：
+        #   实测长三角全部管道 1,143 条（去重后）里，无 substance 标签 623 条、
+        #   steam 195、heat 101、water 83、hot_water 56 —— 都是市政/供热管网。
+        #   混进来既误导、又会把真正只有 85 条的油气长输淹没掉。
+        return {"pipeline": (f'{head}' f'(way["man_made"="pipeline"]["substance"~"^(gas|oil)$"]{f};);' f"{tail}")}
+
     return {
         "lines": (
             f"{head}"
@@ -400,8 +489,9 @@ def count_from_payload(payload: dict[str, Any]) -> int | None:
 # 产物与真抓**完全隔离**：不写 _power_*.geojson，也不碰 _progress.json。
 # 否则扫描会把格子标成「已抓完」，真抓时就被静默跳过了。
 # ------------------------------------------------------------------
-def scan_path(out_dir: str, name: str) -> str:
-    return os.path.join(out_dir, f"scan_{name}.json")
+def scan_path(out_dir: str, name: str, category: str = "power") -> str:
+    suffix = "" if category == "power" else f"_{category}"
+    return os.path.join(out_dir, f"scan_{name}{suffix}.json")
 
 
 def load_scan(path: str) -> dict[str, dict[str, int]]:
@@ -421,9 +511,11 @@ def save_scan(
     bbox: tuple[float, float, float, float],
     grid: str,
     cells: dict[str, dict[str, int | None]],
+    kinds: list[str] | None = None,
 ) -> None:
+    kinds = kinds or CATEGORY_KINDS["power"]
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    totals = {"lines": 0, "substations": 0, "plants": 0}
+    totals = {k: 0 for k in kinds}
     anomalies = 0
     for v in cells.values():
         bad = False
@@ -469,12 +561,14 @@ def run_count_scan(
     grid: str,
     chunks: list[tuple[float, float, float, float]],
     restart: bool,
+    category: str = "power",
 ) -> int:
-    path = scan_path(out_dir, name)
+    kinds = CATEGORY_KINDS[category]
+    path = scan_path(out_dir, name, category)
     cells = {} if restart else load_scan(path)
     if cells:
         print(f"断点续扫：已有 {len(cells)} 块结果，跳过重扫\n")
-    print(f"=== 覆盖度扫描（out count，只回数量）: {name} ===")
+    print(f"=== 覆盖度扫描（out count，只回数量）: {name} / {CATEGORY_LABEL.get(category, category)} ===")
     print(f"分块   : {len(chunks)} 块 → {path}\n")
 
     t0 = time.time()
@@ -485,7 +579,7 @@ def run_count_scan(
         if kkey in cells:
             continue
         rec: dict[str, int | None] = {}
-        for kind, query in queries_for(chunk, count_only=True).items():
+        for kind, query in queries_for(chunk, count_only=True, category=category).items():
             try:
                 payload = overpass_query(query, verbose=False)
                 rec[kind] = count_from_payload(payload)
@@ -500,17 +594,13 @@ def run_count_scan(
         missing = [k for k, v in rec.items() if v is None]
         total = sum(int(v or 0) for v in rec.values())
         flag = "⚠️ " + "、".join(missing) + " 解析异常" if missing else ("—" if total == 0 else "·")
-        print(
-            f"[{idx}/{len(chunks)}] {cw:.3f},{cs:.3f},{ce:.3f},{cn:.3f}  "
-            f"线 {rec['lines'] if rec['lines'] is not None else '?'!s:>6}  "
-            f"站 {rec['substations'] if rec['substations'] is not None else '?'!s:>5}  "
-            f"厂 {rec['plants'] if rec['plants'] is not None else '?'!s:>5}  {flag}"
-        )
-        save_scan(path, bbox, grid, cells)
+        detail = "  ".join(f"{k} {rec[k] if rec[k] is not None else '?':>7}" for k in kinds)
+        print(f"[{idx}/{len(chunks)}] {cw:.3f},{cs:.3f},{ce:.3f},{cn:.3f}  {detail}  {flag}")
+        save_scan(path, bbox, grid, cells, kinds)
         time.sleep(CHUNK_WAIT)
 
     elapsed = time.time() - t0
-    totals = {"lines": 0, "substations": 0, "plants": 0}
+    totals = {k: 0 for k in kinds}
     anomalies = 0
     for v in cells.values():
         bad = False
@@ -534,7 +624,7 @@ def run_count_scan(
     print(f"空块         : {empty} 个（占 {empty / max(1, len(cells)) * 100:.1f}%）")
     if anomalies:
         print(f"⚠️ 解析异常块 : {anomalies} 个 —— 这些块**必须**按「数据未知」处理，不能当空块跳过")
-    print(f"要素总数     : 线 {totals['lines']}  站 {totals['substations']}  厂 {totals['plants']}")
+    print("要素总数     : " + "  ".join(f"{k} {totals[k]}" for k in kinds))
     nonzero = [sum(int(v.get(k) or 0) for k in totals) for v in cells.values()]
     nonzero = [n for n in nonzero if n > 0]
     if nonzero:
@@ -546,8 +636,11 @@ def run_count_scan(
 # ------------------------------------------------------------------
 # 主流程
 # ------------------------------------------------------------------
-def progress_path(out_dir: str, name: str) -> str:
-    return os.path.join(out_dir, f"{name}_progress.json")
+def progress_path(out_dir: str, name: str, category: str = "power") -> str:
+    """断点文件。⚠️ 电力必须继续用 `<name>_progress.json`：
+    已有的 7 个区域靠它判断「哪块已抓完」，改名等于让它们全部重抓。"""
+    suffix = "" if category == "power" else f"_{category}"
+    return os.path.join(out_dir, f"{name}{suffix}_progress.json")
 
 
 def load_done_chunks(path: str) -> set[tuple[float, ...]]:
@@ -576,13 +669,13 @@ def save_done_chunks(path: str, done: set[tuple[float, ...]]) -> None:
         )
 
 
-def load_checkpoints(out_dir: str, name: str, buckets: dict, seen: dict) -> int:
+def load_checkpoints(
+    out_dir: str, name: str, buckets: dict, seen: dict, category: str = "power"
+) -> int:
     """把已有检查点读回内存，保证续抓时新旧数据累加而不是被覆盖。"""
-    crs = {"type": "name", "properties": {"name": "urn:ogc:def:crs:OGC:1.3:CRS84"}}
-    del crs
     total = 0
     for kind in buckets:
-        path = os.path.join(out_dir, f"{name}_power_{kind}.geojson")
+        path = geom_path(out_dir, name, category, kind)
         if not os.path.exists(path):
             continue
         try:
@@ -600,12 +693,14 @@ def load_checkpoints(out_dir: str, name: str, buckets: dict, seen: dict) -> int:
     return total
 
 
-def print_status(out_dir: str, name: str, chunks: list, done: set) -> int:
+def print_status(
+    out_dir: str, name: str, chunks: list, done: set, category: str = "power"
+) -> int:
     """--status：只读本地文件，不发任何网络请求。"""
-    print(f"=== 抓取进度：{name} ===")
+    print(f"=== 抓取进度：{name} / {CATEGORY_LABEL.get(category, category)} ===")
     print(f"分块    : {len(done)}/{len(chunks)} 已完成")
-    for kind in ("lines", "substations", "plants"):
-        path = os.path.join(out_dir, f"{name}_power_{kind}.geojson")
+    for kind in CATEGORY_KINDS[category]:
+        path = geom_path(out_dir, name, category, kind)
         if os.path.exists(path):
             try:
                 with open(path, encoding="utf-8") as fh:
@@ -633,6 +728,16 @@ def main() -> int:
     )
     ap.add_argument("--preset", default="yrd", choices=sorted(PRESETS), help="预设范围（默认 yrd 长三角）")
     ap.add_argument("--name", help="产物文件名前缀（默认取 preset 名）")
+    ap.add_argument(
+        "--category",
+        default="power",
+        choices=sorted(CATEGORY_KINDS),
+        help=(
+            "抓取类别：power 电力（历史默认）/ "
+            "rail 铁路干线（railway=rail，排除 service 侧线、不含地铁轻轨）/ "
+            "pipeline 油气管道（man_made=pipeline 且 substance=gas|oil）"
+        ),
+    )
     ap.add_argument("--grid", default="4x4", help="把 bbox 切成几块抓，格式 NxM（默认 4x4）")
     ap.add_argument(
         "--sample-step",
@@ -682,10 +787,17 @@ def main() -> int:
     sampled = len(chunks) != total_before
     # 扫描必须排在 --status 之前：它既不读也不写断点文件，与真抓是两条独立的路。
     if args.count_only:
-        return run_count_scan(args.out_dir, name, bbox, f"{nx}x{ny}", chunks, args.restart)
+        return run_count_scan(args.out_dir, name, bbox, f"{nx}x{ny}", chunks, args.restart, args.category)
     if args.status:
-        return print_status(args.out_dir, name, chunks, load_done_chunks(progress_path(args.out_dir, name)))
-    print("=== 阶段28：从 OSM 提取电力设施 ===")
+        return print_status(
+            args.out_dir,
+            name,
+            chunks,
+            load_done_chunks(progress_path(args.out_dir, name, args.category)),
+            args.category,
+        )
+    print(f"=== 从 OSM 提取基础设施：{CATEGORY_LABEL.get(args.category, args.category)} ===")
+    print(f"类别   : {args.category}")
     print(f"范围   : {w},{s},{e},{n}（{'自定义' if args.bbox else args.preset}）")
     if sampled:
         print(f"分块   : {nx}x{ny} = {total_before} 块，抽样 step={args.sample_step} → 实抓 {len(chunks)} 块")
@@ -696,10 +808,11 @@ def main() -> int:
     print(f"产物名 : {name}")
     print()
 
-    buckets: dict[str, list[dict[str, Any]]] = {"lines": [], "substations": [], "plants": []}
+    kinds = CATEGORY_KINDS[args.category]
+    buckets: dict[str, list[dict[str, Any]]] = {k: [] for k in kinds}
     kv_hist: dict[str, int] = {}
     # 同一要素可能横跨两个相邻块（bbox 查询会重复返回），按 osm_id 去重
-    seen: dict[str, set[str]] = {"lines": set(), "substations": set(), "plants": set()}
+    seen: dict[str, set[str]] = {k: set() for k in kinds}
     dup = 0
 
     def checkpoint() -> None:
@@ -714,7 +827,7 @@ def main() -> int:
         os.makedirs(args.out_dir, exist_ok=True)
         crs = {"type": "name", "properties": {"name": "urn:ogc:def:crs:OGC:1.3:CRS84"}}
         for kind, feats in buckets.items():
-            path = os.path.join(args.out_dir, f"{name}_power_{kind}.geojson")
+            path = geom_path(args.out_dir, name, args.category, kind)
             with open(path, "w", encoding="utf-8") as fh:
                 json.dump({"type": "FeatureCollection", "crs": crs, "features": feats}, fh, ensure_ascii=False)
 
@@ -723,15 +836,16 @@ def main() -> int:
 
     # ---- 断点续抓：已抓完的块跳过，已有检查点回读累加 ----
     # 这样随时可以关机，明天重跑同一条命令即可接着抓，而不是从头再来。
-    ppath = progress_path(args.out_dir, name)
+    ppath = progress_path(args.out_dir, name, args.category)
     done_chunks: set[tuple[float, ...]] = set() if args.restart else load_done_chunks(ppath)
     if done_chunks:
         os.makedirs(args.out_dir, exist_ok=True)
-        restored = load_checkpoints(args.out_dir, name, buckets, seen)
+        restored = load_checkpoints(args.out_dir, name, buckets, seen, args.category)
         for kind in buckets:
             for f in buckets[kind]:
-                cls = f["properties"]["vclass"]
-                kv_hist[cls] = kv_hist.get(cls, 0) + 1
+                cls = f["properties"].get("vclass")
+                if cls:
+                    kv_hist[cls] = kv_hist.get(cls, 0) + 1
         print(f"断点续抓：已完成 {len(done_chunks)}/{len(chunks)} 块，回读已有 {restored} 个要素\n")
 
     for idx, chunk in enumerate(chunks, 1):
@@ -743,12 +857,12 @@ def main() -> int:
         print(f"[{idx}/{len(chunks)}] 块 {cw:.3f},{cs:.3f},{ce:.3f},{cn:.3f}")
         chunk_failed = False
         try:
-            for kind, query in queries_for(chunk).items():
+            for kind, query in queries_for(chunk, category=args.category).items():
                 payload = overpass_query(query)
                 elements = payload.get("elements", [])
                 added = 0
                 for el in elements:
-                    feat = build_feature(el, "line" if kind == "lines" else ("substation" if kind == "substations" else "plant"))
+                    feat = build_feature(el, ftype_of(kind))
                     if not feat:
                         continue
                     oid = feat["properties"]["osm_id"]
@@ -758,8 +872,9 @@ def main() -> int:
                     seen[kind].add(oid)
                     buckets[kind].append(feat)
                     added += 1
-                    cls = feat["properties"]["vclass"]
-                    kv_hist[cls] = kv_hist.get(cls, 0) + 1
+                    cls = feat["properties"].get("vclass")
+                    if cls:
+                        kv_hist[cls] = kv_hist.get(cls, 0) + 1
                 print(f"    {kind:12s} 返回 {len(elements):6d} 条，新增 {added:6d} 条")
                 # 块内也要歇 —— 连发是 429 的直接原因
                 time.sleep(QUERY_WAIT)
@@ -792,10 +907,13 @@ def main() -> int:
         print("⚠️" * 30)
     for kind, feats in buckets.items():
         print(f"  {kind:12s} {len(feats):7d} 个要素")
-    print("电压分档分布:")
-    for cls in ("735+", "500-734", "220-499", "<220", "unknown"):
-        if cls in kv_hist:
-            print(f"  {cls:10s} {kv_hist[cls]:7d}")
+    if kv_hist:
+        print("电压分档分布:")
+        for cls in ("735+", "500-734", "220-499", "<220", "unknown"):
+            if cls in kv_hist:
+                print(f"  {cls:10s} {kv_hist[cls]:7d}")
+    else:
+        print("（本类别无电压分档）")
 
     if args.estimate_only:
         print("\n[试算模式] 未写任何文件。")
@@ -805,7 +923,7 @@ def main() -> int:
     crs = {"type": "name", "properties": {"name": "urn:ogc:def:crs:OGC:1.3:CRS84"}}
     written = {}
     for kind, feats in buckets.items():
-        path = os.path.join(args.out_dir, f"{name}_power_{kind}.geojson")
+        path = geom_path(args.out_dir, name, args.category, kind)
         with open(path, "w", encoding="utf-8") as fh:
             json.dump({"type": "FeatureCollection", "crs": crs, "features": feats}, fh, ensure_ascii=False)
         size_mb = os.path.getsize(path) / 1048576
@@ -826,10 +944,10 @@ def main() -> int:
         "attribution": "© OpenStreetMap contributors (ODbL)",
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
-    meta_path = os.path.join(args.out_dir, f"{name}_power_meta.json")
-    with open(meta_path, "w", encoding="utf-8") as fh:
+    meta_path_str = meta_path(args.out_dir, name, args.category)
+    with open(meta_path_str, "w", encoding="utf-8") as fh:
         json.dump(meta, fh, ensure_ascii=False, indent=2)
-    print(f"  → {meta_path}")
+    print(f"  → {meta_path_str}")
     print("\n下一步：node scripts/prepare_osm_geojson.mjs --name <name>，再 node scripts/build_pmtiles.mjs")
     # 有空缺就返回非 0，避免调用方（或 CI）把残缺数据当成成功
     return 1 if failed_chunks else 0
