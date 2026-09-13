@@ -20,7 +20,7 @@
   于是「当前视野里最大的5个电厂」会真的按视野过滤；
   视野移动后旧结果（表格 + 地图高亮）自动清空，不会留下「地图飘走了、表格还停在原处」
 
-![阶段31：地图页查询框按当前视野返回结果](docs/screenshots/phase31-in-viewport-query.png)
+![阶段31：真实大模型按「当前视野」返回结果](docs/screenshots/phase31-llm-in-viewport-query.png)
 
 ![阶段30：图层电压分级开关与当前视野统计](docs/screenshots/phase30-voltage-tiers-and-viewport-stats.png)
 
