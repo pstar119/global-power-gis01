@@ -19,9 +19,20 @@ import { fileURLToPath } from "node:url";
 
 import { PMTiles } from "pmtiles";
 
+import { tileX, tileY } from "./lib/pmtiles-writer.mjs";
+
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const LAYER = "grid";
 const VCLASS_ORDER = ["735+", "500-734", "220-499", "<220", "unknown"];
+/**
+ * 与 run_pipeline.mjs 的默认值保持一致（--max-features-per-tile 20000 / --cap-below-zoom 8）。
+ *
+ * ⚠️ 曾经的断言写成了「至少一个级别必须触碰到 20000」——那是错的：
+ *    华南、东北的瓦片本来就没到 2 万，封顶**没触发**才是期望结果。
+ *    正确的不变量是「低级别瓦片**不超过**上限」，而不是「必须用满上限」。
+ */
+const LOWZOOM_CAP = 20000;
+const LOWZOOM_CAP_FROM = 8;
 
 async function main() {
   const rel = process.argv[2];
@@ -63,13 +74,28 @@ async function main() {
   const results = [];
   for (const z of zooms) {
     const n = 1 << z;
+    /**
+     * ⚠️ 只遍历归档 bbox 覆盖到的瓦片，**不要**全量遍历 4^z。
+     *    全量在 z12 就是 1670 万次查询 —— 我当时真这么写过一版，慢得没法用。
+     *    header 里带了 bounds，直接拿它算 x/y 范围即可。
+     */
+    const clamp = (v) => Math.max(0, Math.min(n - 1, v));
+    const hasBounds = [header.minLon, header.minLat, header.maxLon, header.maxLat].every(
+      (v) => typeof v === "number" && Number.isFinite(v),
+    );
+    const xFrom = hasBounds ? clamp(tileX(header.minLon, z)) : 0;
+    const xTo = hasBounds ? clamp(tileX(header.maxLon, z)) : n - 1;
+    const yFrom = hasBounds ? clamp(tileY(header.maxLat, z)) : 0;
+    const yTo = hasBounds ? clamp(tileY(header.minLat, z)) : n - 1;
+
     let tiles = 0;
     let feats = 0;
     let maxTileFeats = 0;
     let maxTileBytes = 0;
+    let maxAt = "-";
     const hist = {};
-    for (let x = 0; x < n; x++) {
-      for (let y = 0; y < n; y++) {
+    for (let x = xFrom; x <= xTo; x++) {
+      for (let y = yFrom; y <= yTo; y++) {
         let r;
         try {
           r = await pm.getZxy(z, x, y);
@@ -79,7 +105,10 @@ async function main() {
         if (!r) continue;
         tiles++;
         const bytes = r.data.byteLength ?? r.data.length;
-        if (bytes > maxTileBytes) maxTileBytes = bytes;
+        if (bytes > maxTileBytes) {
+          maxTileBytes = bytes;
+          maxAt = `${x}/${y}`;
+        }
         let vt;
         try {
           vt = new VectorTile(new Pbf(new Uint8Array(r.data)));
@@ -97,13 +126,15 @@ async function main() {
         }
       }
     }
-    results.push({ z, tiles, feats, maxTileFeats, maxTileBytes, hist });
+    results.push({ z, tiles, feats, maxTileFeats, maxTileBytes, maxAt, hist });
+    const span = `${xFrom}..${xTo} x ${yFrom}..${yTo}`;
     const dist = VCLASS_ORDER.filter((k) => hist[k]).map((k) => `${k}=${hist[k]}`).join(" ");
     console.log(
       `z${String(z).padEnd(2)} 瓦片 ${String(tiles).padStart(6)}  要素 ${String(feats).padStart(7)}  ` +
-        `最大单瓦片 ${String(maxTileFeats).padStart(6)} 要素 / ${(maxTileBytes / 1024).toFixed(1).padStart(7)} KB`,
+        `最大单瓦片 ${String(maxTileFeats).padStart(6)} 要素 / ${(maxTileBytes / 1024).toFixed(1).padStart(7)} KB ` +
+        `@ ${z}/${maxAt}`,
     );
-    console.log(`      ${dist || "(无)"}`);
+    console.log(`      范围 ${span}   ${dist || "(无)"}`);
   }
 
   // ---- 断言 ----
@@ -151,9 +182,12 @@ async function main() {
   }
 
   checks.push({
-    断言: "低级别瓦片确实被压到上限以内（至少一个级别触碰到 20000）",
-    实测: results.map((r) => `z${r.z}:${r.maxTileFeats}`).join(" "),
-    通过: results.some((r) => r.maxTileFeats >= 20000),
+    断言: `抽样级别 z<${LOWZOOM_CAP_FROM} 的瓦片没有超过封顶上限 ${LOWZOOM_CAP.toLocaleString()} 要素`,
+    实测: results
+      .filter((r) => r.z < LOWZOOM_CAP_FROM)
+      .map((r) => `z${r.z}:${r.maxTileFeats}`)
+      .join(" "),
+    通过: results.filter((r) => r.z < LOWZOOM_CAP_FROM).every((r) => r.maxTileFeats <= LOWZOOM_CAP),
   });
 
   for (const c of checks) {
