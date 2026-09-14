@@ -257,9 +257,18 @@ const OSM_LINES_HIT_WIDTH = 14;
  *    而且它不占用任何一档电压的颜色。
  */
 const OSM_RAILWAY_LAYER_ID = "osm-railways";
-const OSM_RAILWAY_COLOR = "#c9c2b6";
+/**
+ * 铁路展示色：**低饱和中性灰**。
+ * 它必须既能当背景参照物，又绝不能与四档电压色争注意力；配合
+ * `line-dasharray`（见 addRailwayLayer）在低缩放级别下与电压线一眼可分。
+ */
+const OSM_RAILWAY_COLOR = "#9c9c9c";
 const OSM_PIPELINE_LAYER_ID = "osm-pipelines";
-const OSM_PIPELINE_COLOR = "#b98cf5";
+/**
+ * 管道展示色：**低饱和暗紫**。
+ * 与铁路同属「背景基础设施」，刻意避开任何一档电压色，也不使用高亮色。
+ */
+const OSM_PIPELINE_COLOR = "#b98c9f";
 
 /** 面板上的两个开关名。刻意**不并进 `LAYERS`** —— 那个数组同时是「默认可见」清单。 */
 const INFRA_LAYERS = ["铁路", "油气管道"] as const;
