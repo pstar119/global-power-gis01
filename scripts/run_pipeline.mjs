@@ -564,7 +564,16 @@ async function main() {
     const vals = Object.values(f).filter((v) => v && typeof v === "object");
     if (!vals.length) return "—";
     return Object.entries(f)
-      .map(([c, v]) => `${c}:${v?.failedChunks ?? "?"}`)
+      .map(([c, v]) => {
+        if (!v || typeof v !== "object") return `${c}:?`;
+        const fc = v.failedChunks ?? "?";
+        // ‼️ 抓取进程**非零退出**时也必须显示出来。
+        //    那种情况下 meta 往往根本没被写出，`failedChunks` 会取到**上一次**的旧值
+        //    （实测：状态写着 fetch-incomplete，失败块却显示 `rail:0`，
+        //     看起来像"一切正常"，会误导夜间监听）。
+        const ex = v.exit && v.exit !== 0 ? `(exit${v.exit})` : "";
+        return `${c}:${fc}${ex}`;
+      })
       .join(" ");
   };
   const rows = Object.values(report.regions).map((r) => ({
