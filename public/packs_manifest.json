@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-09-13T20:58:10.736Z",
+  "generatedAt": "2026-09-14T11:36:45.925Z",
   "generatedBy": "scripts/gen_packs_manifest.mjs",
   "note": "区域数据包元信息清单。pack 是否已安装需在运行时用 127 字节 Range 探测判定，本文件只描述「有哪些包、覆盖哪里」。",
   "core": {
@@ -27,7 +27,7 @@
       "chunks": 64,
       "features": 168445,
       "sizeMb": 28.92,
-      "maxTileKb": 412.3
+      "maxTileKb": 402.4
     },
     {
       "key": "huazhong",

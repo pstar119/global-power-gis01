@@ -144,6 +144,28 @@ def meta_path(out_dir: str, name: str, category: str = "power") -> str:
     return os.path.join(out_dir, f"{name}_{category}_meta.json")
 
 
+def write_json_atomic(path: str, payload: Any, indent: int | None = None) -> None:
+    """原子写 JSON：先写同目录临时文件，再 `os.replace` 替换。
+
+    🔴 为什么必须这么做（阶段43 真实事故，不是理论风险）：
+       `open(path, "w")` 会**先把文件截断**再写。25 MB 的产物要写几百毫秒，
+       如果进程在这个窗口里被杀（Ctrl-C、管道下游提前退出、关机），
+       结果是一个**被截断的非法 JSON**，而原数据已经没了。
+       更糟的是下一次运行会把「解析失败」当成「没有数据」，
+       然后把空结果写回去 —— 静默丢数据，而且 progress 仍写着「已完成」，
+       重跑也不会重抓。
+       `os.replace` 在同卷上是原子的：要么是旧文件，要么是完整的新文件，没有中间态。
+
+    ⚠️ 为什么用同目录的 `.tmp` 而不是系统临时目录：`os.replace` 要求同卷才能保证原子性。
+    """
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, ensure_ascii=False, indent=indent)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
+
+
 # ------------------------------------------------------------------
 # 电压解析
 # ------------------------------------------------------------------
@@ -532,26 +554,24 @@ def save_scan(
         return sum(int(v.get(k) or 0) for k in totals)
 
     empty = sum(1 for v in cells.values() if cell_sum(v) == 0 and not any(v.get(k) is None for k in totals))
-    with open(path, "w", encoding="utf-8") as fh:
-        json.dump(
-            {
-                "bbox": list(bbox),
-                "grid": grid,
-                "scanned": len(cells),
-                "empty": empty,
-                "anomalies": anomalies,
-                "totals": totals,
-                "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                "note": (
-                    "由 --count-only 生成（out count 只回数量）。与真抓断点隔离，不要用做续抓依据。"
-                    " null = 解析不到数量（异常），**不等于 0**；只有显式 0 才是真空块。"
-                ),
-                "cells": cells,
-            },
-            fh,
-            ensure_ascii=False,
-            indent=2,
-        )
+    write_json_atomic(
+        path,
+        {
+            "bbox": list(bbox),
+            "grid": grid,
+            "scanned": len(cells),
+            "empty": empty,
+            "anomalies": anomalies,
+            "totals": totals,
+            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "note": (
+                "由 --count-only 生成（out count 只回数量）。与真抓断点隔离，不要用做续抓依据。"
+                " null = 解析不到数量（异常），**不等于 0**；只有显式 0 才是真空块。"
+            ),
+            "cells": cells,
+        },
+        indent=2,
+    )
 
 
 def run_count_scan(
@@ -655,18 +675,53 @@ def load_done_chunks(path: str) -> set[tuple[float, ...]]:
         return set()
 
 
+def count_features_in(path: str) -> int:
+    """产物文件里现有的要素数。
+    文件不存在 -> 0（首次抓取，正常）。
+    存在但读不动（被截断/非法 JSON）-> -1（**已损坏**，绝不能当成 0）。
+    """
+    if not os.path.exists(path):
+        return 0
+    try:
+        with open(path, encoding="utf-8") as fh:
+            feats = json.load(fh).get("features")
+        return len(feats) if isinstance(feats, list) else -1
+    except Exception:  # noqa: BLE001
+        return -1
+
+
+def guard_empty_overwrite(path: str, feats: list, preexisting: int) -> None:
+    """🔴 拒绝把「非空产物」覆盖成「空产物」。
+
+    为什么需要这道防线（阶段43 真实事故的**最后一步**）：
+      链条是「写入被中断 -> 文件被截断 -> 下次运行把读不到当成没有 ->
+      用空结果覆盖真数据」。前两步很难完全避免（进程随时可能被杀），
+      但**最后一步是致命的，而且完全可以堵死**。
+      `preexisting < 0` 表示文件已损坏 —— 那种情况更不能覆盖，
+      因为一覆盖连事后抢救的机会都没了。
+    """
+    if feats:
+        return
+    if preexisting == 0:
+        return  # 原本就没有产物，写个空的没问题
+    detail = "已损坏/无法解析" if preexisting < 0 else f"原有 {preexisting} 个要素"
+    raise RuntimeError(
+        f"拒绝把非空产物覆盖成空：{path}（本次内存里 0 个要素，{detail}）。\n"
+        f"    这通常意味着回读或抓取出了问题。请勿直接重试，先人工确认该文件；\n"
+        f"    确实要重新抓取请加 --restart（它会重建断点与产物）。"
+    )
+
+
 def save_done_chunks(path: str, done: set[tuple[float, ...]]) -> None:
-    with open(path, "w", encoding="utf-8") as fh:
-        json.dump(
-            {
-                "done": [list(b) for b in sorted(done)],
-                "count": len(done),
-                "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            },
-            fh,
-            ensure_ascii=False,
-            indent=2,
-        )
+    write_json_atomic(
+        path,
+        {
+            "done": [list(b) for b in sorted(done)],
+            "count": len(done),
+            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        },
+        indent=2,
+    )
 
 
 def load_checkpoints(
@@ -677,13 +732,26 @@ def load_checkpoints(
     for kind in buckets:
         path = geom_path(out_dir, name, category, kind)
         if not os.path.exists(path):
-            continue
+            continue  # 首次抓取，没有旧产物，正常
         try:
             with open(path, encoding="utf-8") as fh:
                 fc = json.load(fh)
-        except Exception:  # noqa: BLE001
-            continue
-        for feat in fc.get("features", []):
+        except Exception as exc:  # noqa: BLE001
+            # 🔴 阶段43 修复：原来这里是 `continue`（静默吞掉）。
+            #    那个写法把「文件存在但读不动」当成了「没有旧数据」，
+            #    于是主流程拿一个空 buckets 跑完（断点说已完成，全部跳过），
+            #    再把空结果写回去 —— 直接把已有产物清空。实测损失过 25 MB / 7.4 万条。
+            #    文件存在但解析失败 = 数据已损坏，必须**响亮失败**，绝不能继续跑。
+            raise RuntimeError(
+                f"断点回读失败：{path} 存在但无法解析（{exc}）。\n"
+                f"    这通常意味着上次写入被中断（该文件是写坏的半成品）。\n"
+                f"    请先人工确认该文件；确实要重抓请加 --restart，"
+                f"    但**不要**让空结果把它覆盖掉。"
+            ) from exc
+        feats = fc.get("features")
+        if not isinstance(feats, list):
+            raise RuntimeError(f"断点回读失败：{path} 里没有 features 数组（不是合法的 FeatureCollection）")
+        for feat in feats:
             oid = (feat.get("properties") or {}).get("osm_id")
             if not oid or oid in seen[kind]:
                 continue
@@ -810,6 +878,15 @@ def main() -> int:
 
     kinds = CATEGORY_KINDS[args.category]
     buckets: dict[str, list[dict[str, Any]]] = {k: [] for k in kinds}
+    # 🔴 阶段43：先记下各产物**当前**的要素数（只读一次）。
+    #    用于后续每一步落盘前拒绝「非空 -> 空」的覆盖。
+    preexisting: dict[str, int] = {
+        k: count_features_in(geom_path(args.out_dir, name, args.category, k)) for k in kinds
+    }
+    for k, n in preexisting.items():
+        if n < 0:
+            print(f"⚠️ 已有产物无法解析（可能是上次写入被中断）：{geom_path(args.out_dir, name, args.category, k)}")
+            print("   → 本次会拒绝用空结果覆盖它；确定要重抓请加 --restart。")
     kv_hist: dict[str, int] = {}
     # 同一要素可能横跨两个相邻块（bbox 查询会重复返回），按 osm_id 去重
     seen: dict[str, set[str]] = {k: set() for k in kinds}
@@ -828,8 +905,10 @@ def main() -> int:
         crs = {"type": "name", "properties": {"name": "urn:ogc:def:crs:OGC:1.3:CRS84"}}
         for kind, feats in buckets.items():
             path = geom_path(args.out_dir, name, args.category, kind)
-            with open(path, "w", encoding="utf-8") as fh:
-                json.dump({"type": "FeatureCollection", "crs": crs, "features": feats}, fh, ensure_ascii=False)
+            # ‼️ 每块都过一道「禁止空覆盖」——因为 checkpoint 发生在最终守卫**之前**，
+            #    阶段43 实测：就是它先把损坏文件覆盖成了空。
+            guard_empty_overwrite(path, feats, preexisting.get(kind, 0))
+            write_json_atomic(path, {"type": "FeatureCollection", "crs": crs, "features": feats})
 
     t0 = time.time()
     failed_chunks: list[list[float]] = []
@@ -921,11 +1000,21 @@ def main() -> int:
 
     os.makedirs(args.out_dir, exist_ok=True)
     crs = {"type": "name", "properties": {"name": "urn:ogc:def:crs:OGC:1.3:CRS84"}}
+    # 🔴 阶段43 事故的正面防护：断点说「全部抓完」但内存里一条都没有，
+    #    这必定是回读出了问题（或旧产物被人为清空），绝不能把空结果写回去。
+    #    宁可失败退出，也不能静默地把真数据覆盖成空文件。
+    if done_chunks and not any(buckets[k] for k in kinds):
+        raise RuntimeError(
+            f"断点记录显示已完成 {len(done_chunks)} 块，但回读到 0 个要素。\n"
+            f"    拒绝写入 —— 否则会把已有产物覆盖成空文件（阶段43 真实发生过，损失 7.4 万条）。\n"
+            f"    请检查 {geom_path(args.out_dir, name, args.category, kinds[0])}；"
+            f"    确认要重抓请加 --restart。"
+        )
     written = {}
     for kind, feats in buckets.items():
         path = geom_path(args.out_dir, name, args.category, kind)
-        with open(path, "w", encoding="utf-8") as fh:
-            json.dump({"type": "FeatureCollection", "crs": crs, "features": feats}, fh, ensure_ascii=False)
+        guard_empty_overwrite(path, feats, preexisting.get(kind, 0))
+        write_json_atomic(path, {"type": "FeatureCollection", "crs": crs, "features": feats})
         size_mb = os.path.getsize(path) / 1048576
         written[kind] = {"file": path, "features": len(feats), "size_mb": round(size_mb, 2)}
         print(f"  → {path}  ({len(feats)} 要素, {size_mb:.2f} MB)")
@@ -945,8 +1034,7 @@ def main() -> int:
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
     meta_path_str = meta_path(args.out_dir, name, args.category)
-    with open(meta_path_str, "w", encoding="utf-8") as fh:
-        json.dump(meta, fh, ensure_ascii=False, indent=2)
+    write_json_atomic(meta_path_str, meta, indent=2)
     print(f"  → {meta_path_str}")
     print("\n下一步：node scripts/prepare_osm_geojson.mjs --name <name>，再 node scripts/build_pmtiles.mjs")
     # 有空缺就返回非 0，避免调用方（或 CI）把残缺数据当成成功
