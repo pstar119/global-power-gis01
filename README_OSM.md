@@ -964,6 +964,167 @@ dev 日志出现 `⚠️ 视野统计超过 50ms 护栏`。我没有假设是自
 若 1 秒级停顿仍出现，则需查 `queryRenderedFeatures` 在大范围低缩放下的行为
 （例如统计运行期间加计时分段，区分"渲染查询"与"SQL 往返"—— 现有日志已经拆了这两段）。
 
+---
+
+## 十七、阶段43：铁路 + 油气管道（2026-09-14）
+
+### 抓取口径（都是实测定的，不是猜的）
+
+| 类别 | Overpass 过滤 | 为什么 |
+|---|---|---|
+| `power`（默认） | `power=line/minor_line/cable`、`substation`、`plant` | 沿历史口径，产物路径**逐字未变** |
+| `rail` | `way[railway=rail]["service"!~"."]` | 排除侧线/站线/场线。实测侧线占 `railway=rail` 的 **38.3% 条数、70% 的坐标点数**；城市轨道（subway/light_rail/tram…）**不入库** |
+| `pipeline` | `way[man_made=pipeline]["substance"~"^(gas\|oil)$"]` | 排除水/污水/供热。实测长三角全部管道 1,143 条里，无 substance 623、steam 195、heat 101、water 83、hot_water 56 |
+
+三类**共用同一个脚本**（`scripts/fetch_osm_power.py`），靠 `--category` 区分 ——
+刻意不另写一份，否则 429 退避、`remark` 铁律、失败块报错、跨块去重、断点续抓
+这些踩过坑的逻辑会出现第二个副本，迟早不一致。
+
+### 分类隔离：产物 / 断点 / meta 三套文件完全分开
+
+| 类别 | 几何产物 | 断点 | meta |
+|---|---|---|---|
+| power | `<name>_power_{lines,substations,plants}.geojson` | `<name>_progress.json` | `<name>_power_meta.json` |
+| rail | `<name>_rail.geojson` | `<name>_rail_progress.json` | `<name>_rail_meta.json` |
+| pipeline | `<name>_pipeline.geojson` | `<name>_pipeline_progress.json` | `<name>_pipeline_meta.json` |
+
+电力那三条路径**必须保持历史命名**：已有 7 个区域的数据与断点靠它识别。
+
+**隔离性已用 SHA256 实测**（不是靠读代码推断）：只重跑 `--category rail` 时，
+`power` 类与 `pipeline` 类的**全部文件哈希完全一致**。
+
+### 交付数据（2026-09-14）
+
+| 产物 | 要素 | 体积 | 最大单瓦片 |
+|---|---:|---:|---:|
+| 核心区归档 `osm_grid.pmtiles`（不封顶） | 25,611 → **43,014** | 5.56 → **7.49 MB** | 238.6 → **398.6 KB** |
+| 华东可选包 `osm-huadong.pmtiles`（封顶 20000） | 93,559 → **168,445** | 20.77 → **28.92 MB** | 400.7 → **402.4 KB** |
+
+铁路：华东 74,743 条 / 核心区 17,318 条；管道：华东 143 条 / 核心区 85 条。
+两者抓取均 **0 失败块**，且数字与探针实测**完全一致**（独立交叉验证）。
+
+### 🟠 已知视觉差异：铁路在低级别「看得到」与「看不到」的**准确**边界
+
+⚠️ 不要写成「区域包 z<8 铁路被裁剪」—— 实测比这复杂，取决于**该瓦片是否触发封顶**。
+`pickForLowZoom` 只在瓦片要素数**严格大于** `--max-features-per-tile` 时才触发，
+触发后按「电压由高→低、点优先于线」排序，**无 `vclass` 的铁路/管道排在最后、被优先丢弃**。
+
+直接解码华东包瓦片的实测结果：
+
+| 级别 | 采样点 | 瓦片 | 要素数 | 其中铁路 | 封顶 |
+|---|---|---:|---:|---:|---|
+| z4 | 山东/苏北/福建 | 13/6 | 20,000 | **0** | 触发 → 铁路全丢 |
+| z5 | 山东/苏北 | 26/12 | 20,000 | **0** | 触发 → 铁路全丢 |
+| z6 | 山东 117.5,36.5 | 52/25 | 20,000 | **5,101** | **未触发**（源瓦片恰好 20,000，`>` 不成立） |
+| z6 | 苏北 119,34 | 53/25 | 12,753 | 4,126 | 未触发 |
+| z7 | 山东 117.0,36.0 | 105/50 | 8,158 | 3,327 | 未触发 |
+
+应用内实测（华东包，铁路开关打开）：**z6 渲染 11,972 条 / z7 渲染 8,802 条**。
+
+**结论**：`z4/z5` 铁路与管道**完全不可见**；`z6` 起**视瓦片而定**（多数瓦片未触发封顶，
+能看到 2,000~5,000 条）。核心区归档不封顶，因此**所有级别都能看到**。
+
+`z<6` 时区域包根本不加载（`PACK_MIN_ZOOM = 6`），所以 `z4` 那些已封顶瓦片
+应用**不会请求** —— 它们只在极端情况下（未来放宽 `PACK_MIN_ZOOM`）才有影响。
+
+**这是体积与性能权衡的结果，不打算改代码**；如需铁路在低级别也全量可见，
+只能取消封顶，但那会让低级别单瓦片冲到近 1 MB（阶段38 实测 922.9 KB）。
+
+### 挂机运行指南（全国其余 6 个区域）
+
+```powershell
+# 建议：只补新增的两类，完全不碰已完成的电力数据
+node scripts/run_pipeline.mjs --regions huazhong,huanan,huabei,dongbei,xinan,xibei --category rail,pipeline
+```
+
+**先把参数格式说清楚**（避免用错）：
+
+| 想要 | 正确写法 | 不支持的写法 |
+|---|---|---|
+| 指定批次 | `--regions huazhong,huanan`（逗号分隔） | ~~`--all-regions`~~（无此参数；省略 `--regions` 即全部 7 个） |
+| 指定类别 | `--category rail,pipeline`（逗号分隔） | ~~`--category railway pipeline`~~（无空格分隔；类别名是 `rail` 不是 `railway`） |
+
+**预估耗时**（按华东实测 13 秒/块 + 8 秒礼貌间隔）：
+
+| 类别 | 块数 | 预计 |
+|---|---:|---:|
+| `rail` | 742（华中42＋华南52＋华北32＋东北112＋西南216＋西北288） | **约 4~5 小时** |
+| `pipeline` | 24（粗网格，单块 ≤84 deg²） | 约 20 分钟 |
+
+> 管道刻意**不用 1x1**：Overpass 单次上限 180 秒，西北 bbox 有 669 deg²，
+> 按华东实测（147 deg² / 57 秒）外推会超时 → 产生失败块 → 闸门拒绝出包。
+> 粗网格的边长由 `COARSE_CHUNK_DEG = 9` 控制。
+
+#### 断点续传
+
+- 每块抓完立刻落盘（产物 + 断点文件），**随时中断、重跑同一条命令即续抓**，不会从头再来
+- 只有**整块成功**才记断点；失败的块下次自动重抓
+- 三类各有独立的断点文件，互不影响
+
+#### 隔离检查（跑完就能自查）
+
+```powershell
+# 1) 三类文件是否都在、各自多大
+Get-ChildItem data\osm -Filter "huazhong_*" | Select-Object Name, Length
+
+# 2) 本次只动了 rail/pipeline？电力文件的最后写入时间应该还是很久以前
+Get-ChildItem data\osm -Filter "*_power_*.geojson" | Select-Object Name, LastWriteTime
+
+# 3) 每类的完整性（期望 complete=true、failed_chunks 为空）
+Get-Content data\osm\huazhong_rail_meta.json     -Raw | ConvertFrom-Json | Select-Object complete, failed_chunks
+Get-Content data\osm\huazhong_pipeline_meta.json -Raw | ConvertFrom-Json | Select-Object complete, failed_chunks
+```
+
+#### 🔴 三层数据防护（任何中断都不会静默丢数据）
+
+阶段43 发生过一次**真实的 25 MB / 74,743 条数据丢失**，触发者是「往写入窗口里发了中断」。
+根因是三个缺陷叠加，现已全部修掉：
+
+| 防线 | 作用 |
+|---|---|
+| `write_json_atomic()` | 先写同目录 `.tmp` + `fsync`，再 `os.replace()`（同卷原子）。覆盖产物 / meta / 断点 / 扫描文件**四处**写入 |
+| `load_checkpoints` 不再吞错 | 文件存在但解析失败 → **直接抛错退出**，绝不 `continue`（原先会把「损坏」当成「没有旧数据」） |
+| `guard_empty_overwrite()` | 拒绝把非空产物覆盖成空。加在 `checkpoint()`（每块落盘）**与**最终写入两条路径 |
+
+`run_pipeline.mjs` 自身的报表写入也改成了原子写 —— 否则中断会把
+`pipeline_report.json` 留成非法 JSON，下次启动当成「没有报表」，
+**已跑完批次的记录全丢**（数据还在，但清单里的要素数/体积会变 null）。
+
+**反向验证方法**（建议挂机前自己跑一遍，约 1 分钟）：
+故意写一个截断的 JSON + 一个声称已完成的断点，跑一次 fetch，期望
+「报错退出 + 损坏文件哈希不变」。阶段43 的实测结果正是如此。
+
+### 本阶段发现并修的 4 个 Bug（都值得记）
+
+1. **🔴 `vclass: undefined` 会让 MapLibre 整片放弃解析**。低级别标签收敛硬写
+   `{ ftype, vclass }`，铁路/管道没有 vclass → vt-pbf 写出**空值消息** →
+   MapLibre 报 `unknown feature value` 并**整张瓦片不渲染**。
+   我当时的推理缺口：只读了 vt-pbf 的**写入侧**（确认不抛错），没验证**读取侧**。
+   修法：只在 vclass 真实存在时才写该键（**不改切片行为**）。
+2. **🔴 数据截断 + 断点误标记**（上面那三层防护修的就是它）。
+3. **🔴 区域包卸载时 source 泄漏**。`removePackLayers` 手写枚举图层 id，
+   新增 railways/pipelines 时忘了同步 → `Source ... cannot be removed while layer ... is using it`
+   → source 与其缓存瓦片永远留着。区域包随视口反复增删，等于持续泄漏。
+   修法：改为遍历 `packLayerIds()` 的全部字段，**以后加图层不需要再改这里**。
+   ⚠️ 这个错误只在切视野时出现、地图看起来完全正常，极易忽略。
+4. **`verify_pack.mjs` 的两个假设错误**：
+   - 无条件断言「z<8 每片 ≤ 20000」，把**构建参数当成了不变量** ——
+     核心区归档按设计不封顶，铁路进来后 z6 到 20,207，报了个与真实风险无关的假失败。
+     现用 `--expect-cap 0` 显式表达前提。
+   - 新增断言「属性值无 undefined/null」。**这条是关键**：`@mapbox/vector-tile`
+     比 MapLibre 宽松，会把空值解成 null 而不报错，所以不加这条则 Bug 依然「全部通过」。
+     它就是靠这条抓出「华东包也带同一个 Bug」的。
+
+### 教训（与第 十五、十六 节同类，第三次了）
+
+> **不要把「某个分支会救我们」当成结论，必须用断言实测。**
+
+我在华东包上先后错过两次，都是靠"推断某个机制会兜住"而不是测量：
+- 先推断「华东包有封顶 → 铁路在 z<8 被丢光 → 所以不受 vclass 空值影响」——
+  **错**，某个 z4/z6 瓦片恰好没触发封顶，管道带着空值进了瓦片。
+- 再推断「区域包 z<8 铁路全被裁剪」—— **又过于笼统**，实测 z6/z7 大部分瓦片能看到。
+
+
 
 
 

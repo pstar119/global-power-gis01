@@ -1871,11 +1871,32 @@ function removePackLayers(map: MapLibreMap, key: string): void {
     }
     packCursorHandlers.delete(key);
   }
-  for (const lid of [...ids.lines, ids.substations, ids.plants, ids.hit]) {
+  //
+  // 🔴 阶段43 修复：这里原先手写枚举 `[...ids.lines, ids.substations, ids.plants, ids.hit]`，
+  //    新增 railways/pipelines 两个图层时**忘了同步加进来**，于是卸载区域包时
+  //    MapLibre 抛 `Source "osm-pack-<key>" cannot be removed while layer
+  //    "osm-railways--<key>" is using it` —— source 与其缓存的瓦片永远留着，
+  //    而区域包是随视口反复增删的，等于**持续泄漏**。
+  //    ⚠️ 这个错误只在切视野时出现、且地图看起来正常，极易被忽略。
+  //    现在改为**直接遍历 `packLayerIds()` 的全部字段**：
+  //    以后再加图层，只要它出现在 packLayerIds 里就自动被卸载，不需要改这里。
+  const allLayerIds = Object.values(ids).flat();
+  for (const lid of allLayerIds) {
     if (map.getLayer(lid)) map.removeLayer(lid);
   }
   const sourceId = packSourceId(key);
-  if (map.getSource(sourceId)) map.removeSource(sourceId);
+  if (map.getSource(sourceId)) {
+    try {
+      map.removeSource(sourceId);
+    } catch (err) {
+      // 不该发生。响亮报错而不是让 source 静默留着 —— 提示去检查 packLayerIds。
+      console.error(
+        `[MapPage] ⚠️ 卸载区域包 ${key} 时 source 仍被图层引用；` +
+          `请检查是否有新增图层没登记进 packLayerIds()。`,
+        err,
+      );
+    }
+  }
 }
 
 /** 清空高亮（保留图层，避免反复增删） */

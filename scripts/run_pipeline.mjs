@@ -19,7 +19,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -229,6 +229,24 @@ function readJson(p) {
   } catch {
     return null;
   }
+}
+
+/**
+ * 原子写 JSON：先写同目录 `.tmp`，再 `rename` 替换。
+ *
+ * 🔴 阶段43：与 `fetch_osm_power.py` 的 `write_json_atomic` 同一个理由。
+ *    报表每批结束都会重写，而这个驱动要串行跑 7 个区域、可能十几个小时 ——
+ *    被中断正好落在写入窗口的概率并不低。
+ *    `writeFileSync` 会**先截断再写**，一旦被打断就留下非法 JSON；
+ *    下次启动的 `readJson` 读出 null，会被当成「没有报表」从零开始 ——
+ *    **已经跑完的批次记录全丢**（原始数据与包都还在，但清单里的要素数/体积会变 null）。
+ *    `rename` 在同卷上是原子的，不存在中间态。
+ */
+function writeJsonAtomic(p, payload) {
+  const tmp = `${p}.tmp`;
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(tmp, JSON.stringify(payload, null, 2), "utf8");
+  renameSync(tmp, p);
 }
 
 function sizeMb(p) {
@@ -523,12 +541,15 @@ async function main() {
       const rec = await processRegion(region, cfg, report);
       // 每批结束立刻落盘：中途中断也不会丢掉已完成的批次记录
       report.updatedAt = new Date().toISOString();
-      mkdirSync(dirname(reportPath), { recursive: true });
-      writeFileSync(reportPath, JSON.stringify(report, null, 2), "utf8");
+      writeJsonAtomic(reportPath, report);
       if (rec.status !== "ok") console.warn(`⚠️ 批次 ${region.label} 状态：${rec.status}`);
     } catch (err) {
       console.error(`\n⛔ 批次 ${region.label} 异常终止：${err.message}`);
       report.regions[region.key] = { key: region.key, status: "error", error: String(err.message) };
+      // ‼️ 异常也要落盘 —— 否则这一批的失败信息只存在于内存，
+      //    下一批成功写盘时它就不在里面了，事后完全看不出哪批失败过。
+      report.updatedAt = new Date().toISOString();
+      writeJsonAtomic(reportPath, report);
     }
   }
 
