@@ -3,9 +3,21 @@ import react from "@vitejs/plugin-react";
 // @ts-expect-error type error without @types/node package
 import process from "node:process";
 // @ts-expect-error type error without @types/node package
-import { readFileSync } from "node:fs";
+import {
+  readFileSync,
+  readdirSync,
+  statSync,
+  mkdirSync,
+  copyFileSync,
+  existsSync,
+} from "node:fs";
+// @ts-expect-error type error without @types/node package
+import { join, dirname } from "node:path";
 
 const host = process.env.TAURI_DEV_HOST;
+
+/** public/ 目录名（dev 由 Vite 内置能力服务，build 由下面的插件精确拷贝） */
+const PUBLIC_DIR = "public";
 
 /**
  * MapLibre v6 在运行时用 `new URL(`./${name}`, import.meta.url)` 拼出 Worker 脚本地址，
@@ -35,9 +47,79 @@ function maplibreWorkerAssets(): Plugin {
   };
 }
 
+/**
+ * `public/osm/` 里混着两类完全不同的东西：
+ *   1. **运行时资产** —— 只有 `smoketest_power.geojson`（前端加载失败时的回退小样本）
+ *   2. **构建中间产物** —— `<name>_power.geojson` / `<name>_power_meta.json`，
+ *      是 prepare_osm_geojson.mjs 的产出、build_pmtiles.mjs 的输入；
+ *      运行时**完全用不到**（应用读的是 pmtiles 包）
+ *
+ * Vite 默认把整个 public/ 原样拷进 dist/：实测那 8 个中间产物共 **359.9 MB**，
+ * 让 dist 从 ~5 MB 膨胀到 264 MB，再被 tauri 的 frontendDist 打进安装包。
+ *
+ * 这里改成「按排除规则精确拷贝」。用**排除**而非白名单 —— 将来往 public/
+ * 添加运行时资产（如新的 fonts/、清单文件）不会静默漏拷。
+ */
+const OSM_RUNTIME_KEEP = new Set([
+  "smoketest_power.geojson",
+  "smoketest_power_meta.json",
+]);
+
+function copyPublicRuntimeAssets(): Plugin {
+  let outDir = "dist";
+  let copiedFiles = 0;
+  let skippedBytes = 0;
+
+  const isBuildIntermediate = (rel: string) =>
+    rel.startsWith("osm/") && !OSM_RUNTIME_KEEP.has(rel.slice("osm/".length));
+
+  const walk = (relDir: string) => {
+    const abs = join(PUBLIC_DIR, relDir);
+    if (!existsSync(abs)) return;
+    for (const ent of readdirSync(abs, { withFileTypes: true })) {
+      const rel = relDir ? `${relDir}/${ent.name}` : ent.name;
+      if (ent.isDirectory()) {
+        walk(rel);
+      } else if (isBuildIntermediate(rel)) {
+        skippedBytes += statSync(join(PUBLIC_DIR, rel)).size;
+      } else {
+        const dest = join(outDir, rel);
+        mkdirSync(dirname(dest), { recursive: true });
+        copyFileSync(join(PUBLIC_DIR, rel), dest);
+        copiedFiles++;
+      }
+    }
+  };
+
+  return {
+    name: "gpg-copy-public-runtime-assets",
+    apply: "build",
+
+    configResolved(config) {
+      outDir = config.build.outDir;
+    },
+
+    closeBundle() {
+      walk("");
+      const skippedMb = (skippedBytes / 1048576).toFixed(1);
+      console.log(
+        `\n  public/ → ${outDir}/ ：拷贝 ${copiedFiles} 个运行时资产` +
+          (skippedBytes
+            ? `，跳过 ${skippedMb} MB 构建中间产物（osm/*_power.geojson）`
+            : ""),
+      );
+    },
+  };
+}
+
 // https://vite.dev/config/
-export default defineConfig(() => ({
-  plugins: [react(), maplibreWorkerAssets()],
+export default defineConfig(({ command }) => ({
+  // dev：需要 Vite 内置的 publicDir 能力来服务 /fonts/、/packs_manifest.json。
+  // build：关掉整体拷贝（否则会把 360 MB 构建中间产物带进 dist），
+  //        改由 copyPublicRuntimeAssets() 按规则精确拷贝。
+  publicDir: command === "serve" ? PUBLIC_DIR : false,
+
+  plugins: [react(), maplibreWorkerAssets(), copyPublicRuntimeAssets()],
 
   // maplibre-gl 不能交给依赖预打包：预打包后 import.meta.url 会变成
   // .vite/deps/maplibre-gl.js，而该目录下并不存在 maplibre-gl-worker.mjs，
