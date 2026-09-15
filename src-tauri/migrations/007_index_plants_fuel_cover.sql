@@ -1,0 +1,34 @@
+-- ============================================================================
+-- 阶段48：为「按燃料的视野统计」加一个覆盖索引
+-- ============================================================================
+--
+-- 背景（实测，不是估算）：
+--   阶段48 把电厂的视野统计从
+--       SELECT COUNT(*) FROM power_plants WHERE <bbox>
+--   改成了
+--       SELECT primary_fuel, COUNT(*), SUM(capacity_mw) ... WHERE <bbox> GROUP BY primary_fuel
+--   后者在全球视图下要 **34.01ms**，而前者只要 **2.28ms** —— 15 倍。
+--   原因：bbox 命中 34,934 行时，`idx_power_plants_lat_lon` 只能帮你圈定行，
+--   取 primary_fuel / capacity_mw 仍需逐行回表，然后再做分组。
+--
+--   前端侧的护栏是 50ms；实测总耗时在全球视图达到 49.5ms（贴着护栏），
+--   冷启动那一次更是 78.8ms 触发告警。必须把它压下去。
+--
+-- 方案：把分组和聚合需要的两列也放进索引，让这次查询变成**纯索引扫描**
+--   （EXPLAIN QUERY PLAN 实测：`SEARCH power_plants USING COVERING INDEX ...`）。
+--
+--   实测效果（真库副本上 best-of-12，含预热）：
+--     世界视图 34,934 行：32.72ms → 10.33ms（3.2×）
+--     长三角     245 行： 0.23ms →  0.16ms
+--   实测代价：DB 7.76 MB → 9.00 MB（+1.24 MB）
+--
+-- ⚠️ 列顺序必须是 (lat, lon, ...) —— 与 005 的 `idx_power_plants_lat_lon` 保持
+--    同样的前导列顺序，这样 bbox 的范围扫描能直接复用（实测命中）。
+-- ⚠️ 这把索引在 (lat, lon) 前缀上**已经覆盖**了 005 那把索引的能力，
+--    也就是说 005 那把现在是冗余的。这里**刻意不删**：删索引属于另一件事，
+--    要和「空间换时间」的账一起算，不适合夹在一次功能提交里做。
+--    （若日后要省空间，删掉 `idx_power_plants_lat_lon` 可回收约 0.4 MB。）
+--
+-- ⚠️ 与 002/006 一样是纯索引操作：不动表结构、不动任何一行数据。
+CREATE INDEX IF NOT EXISTS idx_power_plants_fuel_cover
+  ON power_plants (lat, lon, primary_fuel, capacity_mw);

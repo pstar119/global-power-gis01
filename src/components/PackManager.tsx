@@ -14,259 +14,44 @@
  * 下载成功后必须广播 `emitPackInstalled` —— 地图页据此失效归档缓存并重挂图层。
  * 少了这一步的症状是「提示下载成功，但地图上依然没有数据」。
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Channel, invoke } from "@tauri-apps/api/core";
+import { useMemo } from "react";
 
-import { emitPackInstalled } from "../lib/packEvents";
+import { usePackDownloads } from "../hooks/usePackDownloads";
+import { DEV_BASE_URL_OVERRIDE, mb } from "../lib/packs";
 import styles from "./PackManager.module.css";
 
-const MANIFEST_URL = "/packs_manifest.json";
-
 /**
- * 开发/验证用的**运行时覆盖**。
+ * 阶段48：原先内联在本文件里的「下载运行时覆盖 / 清单类型 / 错误翻译 / mb」
+ * 以及整套下载状态机，已搬到 `src/lib/packs.ts` 与
+ * `src/hooks/usePackDownloads.ts` —— 因为首次启动的「欢迎向导」需要
+ * **完全相同**的这一套，绝不能抄第二份。
  *
- * ‼️ 两个名字都读，但语义相同 —— `vite.config.ts` 里设了
- *    `envPrefix: ["VITE_", "PACKS_"]`，所以同一个环境变量既能被
- *    `gen_packs_manifest.mjs`（生成清单时）读到，也能被这里（运行时）读到。
- *    这样就不存在「设了变量却因为忘了重新生成清单而不生效」这种坑了。
- *
- * ```text
- * $env:PACKS_BASE_URL = "http://127.0.0.1:8099"
- * npm run tauri dev
- * ```
- *
- * 它在界面上会显示为「本地覆盖」，一看就知道生效了没有。
- *
- * 🔴 阶段46：**生产构建里这个值恒为 null**（下面的 `DEV` 判断）。
- *
- *    原因是实测出来的一个会让分发**静默全灭**的坑：
- *    `vite.config.ts` 的 envPrefix 里有 `PACKS_`，而 Vite 会把**构建时 shell 环境里**
- *    匹配前缀的变量原样内联进产物。于是「本地联调完、shell 里还留着
- *    `PACKS_BASE_URL=http://127.0.0.1:8099`，直接 `tauri build` 发版」，
- *    就会把 localhost 写进安装包 —— 而它的优先级**高于清单**，
- *    结果**所有用户**的下载都指向自己的机器、100% 失败。
- *    最恶劣的是它完全静默：代码正常、清单正常、只是下载全挂。
- *
- *    实测证据（2026-09-15）：带该变量跑 `npm run build`，
- *    `dist/assets/index-*.js` 里能搜到 `127.0.0.1:9999`。
- *
- *    ⇒ 这里加 DEV 判断（第二道保险），且 `vite.config.ts` 的 build 侧
- *      已**不再注入 `PACKS_` 前缀**（第一道），两道叠加后生产包安全。
- *      需要在生产模式临时改地址时，走清单那条路（唯一配置点）：
- *        $env:PACKS_BASE_URL="http://127.0.0.1:8099"; node scripts/gen_packs_manifest.mjs
+ * 本组件现在只负责**渲染**：把 hook 的状态画出来，并显示进度/错误。
  */
-const VITE_BASE_URL = (() => {
-  // ⚠️ 这一行不能删，理由见上。`import.meta.env.DEV` 在 build 时为 false。
-  if (!import.meta.env.DEV) return null;
-  const env = import.meta.env as unknown as Record<string, string | undefined>;
-  const raw = env.VITE_PACKS_BASE_URL ?? env.PACKS_BASE_URL;
-  const trimmed = raw?.trim().replace(/\/+$/, "");
-  return trimmed ? trimmed : null;
-})();
-
-interface PackEntry {
-  key: string;
-  label: string;
-  provinces: string;
-  file: string;
-  sizeMb: number | null;
-  features: number | null;
-  /** 阶段44：下载所需；本机没有该包时为 null */
-  downloadUrl: string | null;
-  sha256: string | null;
-  bytes: number | null;
-}
-
-interface PacksManifest {
-  packs: PackEntry[];
-  release?: { baseUrl: string; note?: string };
-}
-
-interface PackFileStatus {
-  file: string;
-  exists: boolean;
-  bytes: number;
-  partBytes: number;
-}
-
-interface DownloadProgress {
-  file: string;
-  received: number;
-  total: number;
-  percent: number;
-}
-
-type Phase = "idle" | "downloading" | "done" | "error";
-
-/** 把 Rust 回传的类型化错误码翻译成人话。 */
-function friendlyError(raw: string): string {
-  const msg = raw.replace(/^.*?(?:Error:\s*)?/, "");
-  if (raw.includes("CHECKSUM_MISMATCH")) return "文件损坏，请重试下载";
-  if (raw.includes("SIZE_MISMATCH")) return "文件大小不符，请重试下载";
-  if (raw.includes("TIMEOUT")) return "网络超时（断点已保留，可继续）";
-  if (raw.includes("NETWORK_ERROR")) return "网络错误（断点已保留，可继续）";
-  if (raw.includes("HTTP_ERROR")) return "服务器返回错误（404：该地址上没有这个文件）";
-  if (raw.includes("RANGE_NOT_SATISFIABLE")) return "服务器拒绝续传请求，请重试下载";
-  if (raw.includes("CANCELLED")) return "已取消（断点已保留）";
-  if (raw.includes("BAD_FILE_NAME")) return "文件名非法";
-  if (raw.includes("BUSY")) return "该数据包正在下载中";
-  if (raw.includes("DIR_ERROR")) return "无法创建数据目录";
-  return msg || "下载失败";
-}
-
-function mb(bytes: number): string {
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-}
 
 function PackManager() {
-  const [manifest, setManifest] = useState<PacksManifest | null>(null);
-  const [manifestErr, setManifestErr] = useState<string | null>(null);
-  const [statuses, setStatuses] = useState<Record<string, PackFileStatus>>({});
-  const [progress, setProgress] = useState<Record<string, DownloadProgress>>({});
-  const [phases, setPhases] = useState<Record<string, Phase>>({});
-  const [errors, setErrors] = useState<Record<string, string>>({});
-  /** 非 Tauri 环境（纯浏览器打开 dev server）下所有命令都会失败，明确提示而不是静默。 */
-  const [bridgeOk, setBridgeOk] = useState(true);
-  const mountedRef = useRef(true);
+  const {
+    manifestErr,
+    packs,
+    files,
+    effectiveBase,
+    statuses,
+    progress,
+    phases,
+    errors,
+    bridgeOk,
+    downloadUrlOf,
+    download,
+    cancel,
+    remove,
+  } = usePackDownloads();
 
-  useEffect(() => {
-    mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-    };
-  }, []);
-
-  const packs = manifest?.packs ?? [];
-  const files = useMemo(() => packs.map((p) => p.file.split("/").pop() ?? ""), [packs]);
-
-  /** 实际生效的基址：本地覆盖优先，其次清单里的正式地址。 */
-  const effectiveBase = VITE_BASE_URL ?? manifest?.release?.baseUrl ?? null;
   /**
-   * 某个包的下载地址。
-   * ‼️ 基址存在时**由基址重新拼**，而不是直接用清单里的 `downloadUrl` ——
-   *    否则本地覆盖对已经写死完整 URL 的条目无效。
+   * 每行的文件名。
+   * ⚠️ hook 已返回同序的 `files`，这里仍用 useMemo 包一层只为写法一致 ——
+   *    不要改成 `packs.map(...)` 内联，那会在每次渲染建新数组。
    */
-  const urlOf = useCallback(
-    (pack: PackEntry): string | null => {
-      const name = pack.file.split("/").pop() ?? "";
-      if (effectiveBase) return `${effectiveBase}/${name}`;
-      return pack.downloadUrl;
-    },
-    [effectiveBase],
-  );
-
-  const refresh = useCallback(async (list: string[]) => {
-    if (!list.length) return;
-    try {
-      const rows = await invoke<PackFileStatus[]>("pack_status", { files: list });
-      if (!mountedRef.current) return;
-      const next: Record<string, PackFileStatus> = {};
-      for (const r of rows) next[r.file] = r;
-      setStatuses(next);
-      setBridgeOk(true);
-      // 已存在的包不保留错误态
-      setErrors((prev) => {
-        const copy = { ...prev };
-        for (const r of rows) if (r.exists) delete copy[r.file];
-        return copy;
-      });
-    } catch (err) {
-      console.warn("[PackManager] pack_status 失败（可能不是 Tauri 环境）", err);
-      if (mountedRef.current) setBridgeOk(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        const res = await fetch(MANIFEST_URL);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = (await res.json()) as PacksManifest;
-        if (cancelled) return;
-        setManifest(data);
-        void refresh(data.packs.map((p) => p.file.split("/").pop() ?? ""));
-      } catch (err) {
-        if (!cancelled) setManifestErr(String(err));
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [refresh]);
-
-  const download = useCallback(
-    async (pack: PackEntry, file: string) => {
-      const url = urlOf(pack);
-      if (!url || !pack.bytes) {
-        setErrors((p) => ({ ...p, [file]: "清单里缺少该包的下载地址或大小（本机没有对应文件）" }));
-        setPhases((p) => ({ ...p, [file]: "error" }));
-        return;
-      }
-      setErrors((p) => {
-        const c = { ...p };
-        delete c[file];
-        return c;
-      });
-      setPhases((p) => ({ ...p, [file]: "downloading" }));
-
-      const channel = new Channel<DownloadProgress>();
-      channel.onmessage = (p) => {
-        if (!mountedRef.current) return;
-        setProgress((prev) => ({ ...prev, [p.file]: p }));
-      };
-
-      try {
-        await invoke("pack_download", {
-          req: {
-            file,
-            url,
-            sha256: pack.sha256 ?? "",
-            bytes: pack.bytes,
-          },
-          onProgress: channel,
-        });
-        if (!mountedRef.current) return;
-        setPhases((p) => ({ ...p, [file]: "done" }));
-        await refresh([file]);
-        // ‼️ 关键一步：通知地图页失效缓存并重挂图层。
-        emitPackInstalled(file);
-      } catch (err) {
-        if (!mountedRef.current) return;
-        setPhases((p) => ({ ...p, [file]: "error" }));
-        setErrors((p) => ({ ...p, [file]: friendlyError(String(err)) }));
-        await refresh([file]);
-      }
-    },
-    [refresh, urlOf],
-  );
-
-  const cancel = useCallback(async (file: string) => {
-    try {
-      await invoke("pack_cancel", { file });
-    } catch (err) {
-      console.warn("[PackManager] 取消失败", err);
-    }
-  }, []);
-
-  const remove = useCallback(
-    async (file: string) => {
-      try {
-        await invoke("pack_remove", { file });
-        setPhases((p) => ({ ...p, [file]: "idle" }));
-        setProgress((p) => {
-          const c = { ...p };
-          delete c[file];
-          return c;
-        });
-        await refresh([file]);
-        emitPackInstalled(file); // 让地图页把该包拆掉（现在文件已不存在）
-      } catch (err) {
-        setErrors((p) => ({ ...p, [file]: friendlyError(String(err)) }));
-      }
-    },
-    [refresh],
-  );
+  const fileList = useMemo(() => files, [files]);
 
   if (manifestErr) {
     return (
@@ -293,7 +78,7 @@ function PackManager() {
 
       <ul className={styles.list}>
         {packs.map((pack, i) => {
-          const file = files[i];
+          const file = fileList[i];
           const st = statuses[file];
           const phase = phases[file] ?? "idle";
           const pr = progress[file];
@@ -302,7 +87,7 @@ function PackManager() {
           const busy = phase === "downloading";
           const resumable = !st?.exists && (st?.partBytes ?? 0) > 0;
           const sizeText = pack.bytes ? mb(pack.bytes) : pack.sizeMb ? `${pack.sizeMb} MB` : "—";
-          const url = urlOf(pack);
+          const url = downloadUrlOf(pack);
 
           return (
             <li key={pack.key} className={styles.row}>
@@ -333,7 +118,7 @@ function PackManager() {
                   <button
                     type="button"
                     className={styles.btn}
-                    onClick={() => void download(pack, file)}
+                    onClick={() => void download(pack)}
                     disabled={!url}
                     title={url ?? "清单里没有该包的下载地址"}
                   >
@@ -369,8 +154,8 @@ function PackManager() {
 
       <p className={styles.note}>
         下载地址：<code className={styles.code}>{effectiveBase ?? "—"}</code>
-        <span className={VITE_BASE_URL ? styles.badgePart : styles.badgeIdle}>
-          {VITE_BASE_URL ? "本地覆盖（环境变量）" : "来自清单 packs_manifest.json"}
+        <span className={DEV_BASE_URL_OVERRIDE ? styles.badgePart : styles.badgeIdle}>
+          {DEV_BASE_URL_OVERRIDE ? "本地覆盖（环境变量）" : "来自清单 packs_manifest.json"}
         </span>
       </p>
     </section>

@@ -1,0 +1,353 @@
+/* ==========================================================
+   阶段48：首次启动「欢迎向导」
+
+   视觉语言沿用应用现有面板：同一套 `--gpg-*` 变量、同样的圆角/边框，
+   强调色用地图侧一直在用的 #4daafc。不引入任何 UI 库。
+   ========================================================== */
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  /* 必须压过应用里所有浮动面板（地图侧最高是 z-index: 10 的弹窗） */
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  background-color: rgba(0, 0, 0, 0.55);
+  -webkit-backdrop-filter: blur(3px);
+  backdrop-filter: blur(3px);
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  width: min(92vw, 720px);
+  max-height: 82vh;
+  border: 1px solid var(--gpg-border);
+  border-radius: 8px;
+  background-color: #252526;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.6);
+  color: var(--gpg-text);
+  font-size: 0.8rem;
+}
+
+.head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1.125rem 0.875rem;
+  border-bottom: 1px solid var(--gpg-border);
+}
+
+.title {
+  margin: 0 0 0.375rem;
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+
+.sub {
+  margin: 0;
+  max-width: 34rem;
+  color: var(--gpg-muted);
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
+
+.close {
+  flex: 0 0 auto;
+  padding: 0.2rem 0.45rem;
+  border: 1px solid var(--gpg-border);
+  border-radius: 4px;
+  background-color: transparent;
+  box-shadow: none;
+  color: var(--gpg-muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+/* ⚠️ App.css 的 `button:hover`(0,1,1) 优先级高于单类名(0,1,0)，必须显式覆盖 */
+.close:hover,
+.close:active {
+  border-color: var(--gpg-border);
+  background-color: var(--gpg-hover);
+  box-shadow: none;
+  color: var(--gpg-text);
+}
+
+/* ---------- 步骤条 ---------- */
+
+.steps {
+  display: flex;
+  gap: 1.25rem;
+  margin: 0;
+  padding: 0.625rem 1.125rem;
+  border-bottom: 1px solid var(--gpg-border);
+  list-style: none;
+  font-size: 0.72rem;
+}
+
+.steps li {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+}
+
+.stepNum {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 17px;
+  height: 17px;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+  font-size: 0.65rem;
+}
+
+.stepOn {
+  color: #4daafc;
+  font-weight: 600;
+}
+
+.stepDone {
+  color: #5ee39b;
+}
+
+.stepOff {
+  color: var(--gpg-muted);
+  opacity: 0.7;
+}
+
+/* ---------- 区域列表 ---------- */
+
+.list {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.row {
+  padding: 0.5rem 1.125rem;
+  border-bottom: 1px solid rgba(60, 60, 60, 0.5);
+}
+
+.row:last-child {
+  border-bottom: none;
+}
+
+.pickLabel {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  cursor: pointer;
+}
+
+.check {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  accent-color: #4daafc;
+}
+
+.name {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: baseline;
+  gap: 0.625rem;
+  min-width: 0;
+}
+
+.prov {
+  overflow: hidden;
+  color: var(--gpg-muted);
+  font-size: 0.7rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.size {
+  flex: 0 0 auto;
+  color: var(--gpg-muted);
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.progressRow {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+}
+
+.stateText {
+  flex: 0 0 auto;
+  color: #4daafc;
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- 进度条 ---------- */
+
+.barOuter {
+  position: relative;
+  margin-top: 0.375rem;
+  height: 16px;
+  overflow: hidden;
+  border-radius: 3px;
+  background-color: rgba(255, 255, 255, 0.08);
+}
+
+.barInner {
+  height: 100%;
+  background-color: #094771;
+  transition: width 0.2s ease;
+}
+
+.barText {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--gpg-text);
+  font-size: 0.65rem;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
+.err {
+  margin: 0.3rem 0 0;
+  color: #ff8a8a;
+  font-size: 0.7rem;
+}
+
+.warn {
+  margin: 0;
+  padding: 0.5rem 1.125rem;
+  color: #ffd24a;
+  font-size: 0.72rem;
+}
+
+/* ---------- 完成态 ---------- */
+
+.doneBox {
+  flex: 1 1 auto;
+  padding: 1.5rem 1.125rem;
+}
+
+.doneTitle {
+  margin: 0 0 0.375rem;
+  color: #5ee39b;
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.doneSub {
+  margin: 0;
+  color: var(--gpg-muted);
+  font-size: 0.75rem;
+  line-height: 1.6;
+}
+
+/* ---------- 底部操作区 ---------- */
+
+.foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.625rem;
+  padding: 0.75rem 1.125rem;
+  border-top: 1px solid var(--gpg-border);
+}
+
+.footInfo {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--gpg-muted);
+  font-size: 0.72rem;
+}
+
+.primaryBtn,
+.ghostBtn {
+  padding: 0.3rem 0.9rem;
+  border-radius: 4px;
+  font: inherit;
+  font-size: 0.75rem;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.primaryBtn {
+  border: 1px solid #4daafc;
+  background-color: #4daafc;
+  box-shadow: none;
+  color: #101418;
+  font-weight: 600;
+}
+
+.primaryBtn:hover,
+.primaryBtn:active {
+  border-color: #7cc0ff;
+  background-color: #7cc0ff;
+  box-shadow: none;
+}
+
+.primaryBtn:disabled {
+  border-color: var(--gpg-border);
+  background-color: transparent;
+  color: var(--gpg-muted);
+  cursor: not-allowed;
+}
+
+.ghostBtn {
+  border: 1px solid var(--gpg-border);
+  background-color: transparent;
+  box-shadow: none;
+  color: var(--gpg-muted);
+}
+
+.ghostBtn:hover,
+.ghostBtn:active {
+  border-color: var(--gpg-border);
+  background-color: var(--gpg-hover);
+  box-shadow: none;
+  color: var(--gpg-text);
+}
+
+.linkBtn {
+  padding: 0 0.2rem;
+  border: none;
+  background: none;
+  box-shadow: none;
+  color: #4daafc;
+  font: inherit;
+  font-size: 0.7rem;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.linkBtn:hover,
+.linkBtn:active {
+  border: none;
+  background: none;
+  box-shadow: none;
+  color: #7cc0ff;
+}
+
+.tip {
+  margin: 0;
+  padding: 0 1.125rem 0.875rem;
+  color: var(--gpg-muted);
+  font-size: 0.68rem;
+  line-height: 1.5;
+}
+
+.tip code {
+  color: var(--gpg-text);
+}

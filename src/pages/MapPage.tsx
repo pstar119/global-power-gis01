@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type RefObject } from "react";
+import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import Database from "@tauri-apps/plugin-sql";
 // 阶段47：把「数据来源」链接交给系统默认浏览器打开。
 // ⚠️ 这不是新增依赖：插件早已接线（lib.rs 已 init、capabilities 里的 opener:default
@@ -227,6 +227,12 @@ const OSM_LINE_TIERS_BOTTOM_UP: readonly (typeof OSM_LINE_TIERS)[number][] = [
  */
 const STATS_DEBOUNCE_MS = 350;
 const STATS_SLOW_MS = 80;
+
+/**
+ * 阶段48：左侧「当前视野」列表里单独列出的燃料种类数，其余归并为「其他 N 类」。
+ * 与看板的「只显示最常用的 6 类」同一个思路：长尾不占版面。
+ */
+const TOP_FUEL_ROWS = 5;
 const STATS_SLOW_DEBOUNCE_MS = 900;
 const OSM_SUBSTATION_LAYER_ID = "osm-substations";
 const OSM_PLANT_LAYER_ID = "osm-plants";
@@ -772,6 +778,18 @@ function formatLngLat([lon, lat]: [number, number]): string {
   return `${Math.abs(lon).toFixed(4)}°${ew}, ${Math.abs(lat).toFixed(4)}°${ns}`;
 }
 
+/**
+ * MW → GW 文本，固定一位小数。
+ * ⚠️ 口径必须与 `StatsDashboard.tsx` 里的 `formatGw` 一致，否则同一个数字
+ *    在两个面板里显示成不同精度，用户会以为其中之一算错了。
+ */
+function formatGw(mw: number): string {
+  return `${(mw / 1000).toLocaleString("zh-CN", {
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 1,
+  })} GW`;
+}
+
 // ==========================================================
 // 阶段41：OSM 点要素（变电站 / 电厂）的 Popup 与统一点击处理
 // ==========================================================
@@ -1023,35 +1041,72 @@ function showOsmPointOrLine(
  * 先 Database.load() 确保插件的连接池已建立，再 db.select(...)。
  */
 
+/** 单种燃料在当前视野内的统计 */
+interface FuelStat {
+  fuel: string | null;
+  count: number;
+  /** 该燃料的容量合计（MW）。**全部缺失时为 null**，而不是 0 */
+  capacityMw: number | null;
+}
+
+interface PlantStatsInBox {
+  total: number;
+  totalCapacityMw: number;
+  /** 因容量缺失而**未计入合计**的座数（要在界面上如实标注） */
+  missingCapacity: number;
+  byFuel: FuelStat[];
+}
+
 /**
- * 阶段30：统计**当前视野**内的电厂数量（精确）。
+ * 阶段48：统计当前视野内**按燃料分组的**电厂座数与装机容量。
  *
- * 为什么不和线路/变电站一样用 queryRenderedFeatures 求和：
- * 电厂是**聚合**（cluster）图层，图层查询拿到的是聚合体（带 point_count），
- * 求和会把聚合内的电厂重复计数；同一个电厂还可能落在多张瓦片的缓冲区里。
- * 数据库一句 COUNT 就是精确值，而且它是只读 SELECT，不触碰「前端只读」红线。
+ * ‼️ 为什么是 SQL 而不是 `queryRenderedFeatures`：
+ *    电厂走的是 **cluster 数据源**，低缩放下 `queryRenderedFeatures` 只能拿到
+ *    聚合圆（带 `point_count`），既看不到单个电厂，更**无法按燃料求和容量** ——
+ *    聚合体只给一个计数，求和必然错。线路/变电站仍走 `queryRenderedFeatures`
+ *    （它们没有聚合），本条只针对电厂。
+ *
+ * ✅ 一条 GROUP BY 同时给出：分类明细 + 总数 + 总容量 + 缺失容量的座数，
+ *    相比原来「一次 COUNT」**往返次数没有增加**。
+ * ✅ 走 `idx_power_plants_lat_lon` 索引（实测同类 bbox 查询 0.07ms）。
+ * ✅ `SUM()` 天然跳过 NULL —— 正是「容量缺失不纳入求和」的要求，不需要额外分支。
  *
  * ⚠️ 边界值直接插进 SQL：取值来自 `map.getBounds()` 并经 `Number()` 强转，
- *    是纯数字而非用户输入，没有注入面。比依赖占位符语法（`?` / `$1`）在
- *    tauri-plugin-sql 上的具体行为更稳妥。
+ *    是纯数字而非用户输入，没有注入面。
  */
-async function loadPlantCountInBox(
+async function loadPlantStatsInBox(
   west: number,
   south: number,
   east: number,
   north: number,
-): Promise<number> {
+): Promise<PlantStatsInBox> {
   const db = await Database.load(DB_URL);
   const w = Number(west);
   const s = Number(south);
   const e = Number(east);
   const n = Number(north);
   const rows = (await db.select(
-    "SELECT COUNT(*) AS c FROM power_plants " +
+    "SELECT primary_fuel AS fuel, COUNT(*) AS c, SUM(capacity_mw) AS cap, " +
+      "SUM(CASE WHEN capacity_mw IS NULL THEN 1 ELSE 0 END) AS miss " +
+      "FROM power_plants " +
       "WHERE lat IS NOT NULL AND lon IS NOT NULL " +
-      `AND lon BETWEEN ${w} AND ${e} AND lat BETWEEN ${s} AND ${n}`,
-  )) as Array<{ c: number }>;
-  return rows[0]?.c ?? 0;
+      `AND lon BETWEEN ${w} AND ${e} AND lat BETWEEN ${s} AND ${n} ` +
+      "GROUP BY primary_fuel",
+  )) as Array<{ fuel: string | null; c: number; cap: number | null; miss: number }>;
+
+  let total = 0;
+  let totalCapacityMw = 0;
+  let missingCapacity = 0;
+  const byFuel: FuelStat[] = [];
+  for (const r of rows) {
+    const count = Number(r.c) || 0;
+    const cap = r.cap == null ? null : Number(r.cap);
+    total += count;
+    totalCapacityMw += cap ?? 0;
+    missingCapacity += Number(r.miss) || 0;
+    byFuel.push({ fuel: r.fuel, count, capacityMw: cap });
+  }
+  return { total, totalCapacityMw, missingCapacity, byFuel };
 }
 
 async function loadPlantsGeoJson(): Promise<FeatureCollection> {
@@ -2182,9 +2237,24 @@ function boundsFromCamera(
   };
 }
 
+/**
+ * 阶段48：把镜头移到某个区域（首次启动向导完成后用）。
+ *
+ * ‼️ 单独一个类型，**不复用 `MapCommand`**：那条通道的载荷是 `ParsedQuery`，
+ *    它是自然语言查询的契约（intent/fuel/country/limit），
+ *    把「飞到一个 bbox」塞进去会污染 AI 那层的语义。
+ */
+export interface MapFlyTo {
+  bbox: [number, number, number, number];
+  /** 自增序号：同一个对象重复渲染不应反复移动地图 */
+  seq: number;
+}
+
 interface MapPageProps {
   /** 来自设置页「在地图上查看」的指令；null 表示没有待执行的指令 */
   command?: MapCommand | null;
+  /** 阶段48：向导完成后的镜头初始化请求 */
+  flyTo?: MapFlyTo | null;
   /**
    * 阶段31：地图视野上下文的**唯一写入点**（AppLayout 持有，AI 面板只读）。
    * 用 ref 而不是 state：拖拽时 moveend 每秒触发多次，不能让整个应用跟着重渲染。
@@ -2207,6 +2277,7 @@ interface MapPageProps {
 
 function MapPage({
   command = null,
+  flyTo = null,
   viewportRef,
   onResultsStale,
   onViewOnMap,
@@ -2239,20 +2310,22 @@ function MapPage({
   const [fuelMenuOpen, setFuelMenuOpen] = useState(false);
 
   /**
-   * 阶段46 静态原型：能源细分的勾选状态（**纯本地视觉状态**）。
+   * 阶段48：「统计筛选」的勾选状态。
    *
-   * ‼️ 它刻意**不驱动地图**。这不是偷懒，而是因为它目前做不对：
-   *    电厂走的是 cluster 数据源，聚合体的 point_count 是**数据源级**算好的，
-   *    在图层上加 filter 只能藏掉散点，聚合圆里的数字照样把被过滤的电站算进去
-   *    —— 结果会是「关掉煤电，聚合圆还写着 500」，比不做更让人困惑。
-   *    要真做对必须改数据源（重建 GeoJSON / 或在 SQL 层加 WHERE primary_fuel），
-   *    那属于阶段47 的范围。所以这里如实标为「原型」，绝不假装它能过滤。
+   * ‼️ 它**只过滤左侧看板的统计数字，不改地图渲染** —— 用户拍板的方案。
+   *
+   *    原因：电厂是 cluster（聚合）数据源，聚合体的 `point_count` 是**数据源级**
+   *    算好的，在图层上加 filter 只能藏掉散点，聚合圆里的数字照样把被过滤的
+   *    电站算进去 —— 会得到「关掉煤电、聚合圆还写着 500」，做半套比不做更误导。
+   *
+   *    而统计走的是 SQL，过滤它既精确又零成本（结果集 ≤15 行，前端过滤即可），
+   *    所以「只过滤统计」不是妥协，而是唯一能**做对**的那一半。
    */
-  const [protoFuels, setProtoFuels] = useState<readonly string[]>(() =>
+  const [statFuels, setStatFuels] = useState<readonly string[]>(() =>
     FUEL_LEGEND.map(([fuel]) => fuel),
   );
-  const toggleProtoFuel = (fuel: string) =>
-    setProtoFuels((prev) =>
+  const toggleStatFuel = (fuel: string) =>
+    setStatFuels((prev) =>
       prev.includes(fuel) ? prev.filter((f) => f !== fuel) : [...prev, fuel],
     );
 
@@ -2307,7 +2380,71 @@ function MapPage({
     lines: number;
     substations: number;
     exact: boolean;
+    /** 阶段48：视野内按燃料的**原始**统计（尚未套「统计筛选」） */
+    fuels: FuelStat[];
+    totalCapacityMw: number;
+    missingCapacity: number;
   } | null>(null);
+
+  /** 阶段48：左侧面板顶部「当前视野」区块的展开 / 折叠 */
+  const [viewOpen, setViewOpen] = useState(true);
+
+  /**
+   * 阶段48：把原始燃料统计套上「统计筛选」，并整理成可直接渲染的形状。
+   *
+   * ‼️ 过滤放在**前端**（结果集 ≤15 行），而不是往 SQL 里拼 `IN (...)`：
+   *    少一个拼接面、零注入风险，也更好读。
+   * ‼️ 合计（座数与容量）都由**过滤后**的集合重算 —— 否则用户看到
+   *    「分项总和 ≠ 合计」会以为是 bug。
+   */
+  const fuelView = useMemo(() => {
+    if (!viewStats) return null;
+    const on = new Set(statFuels);
+    const kept = viewStats.fuels.filter((f) => !!f.fuel && on.has(f.fuel));
+    const dropped = viewStats.fuels.filter((f) => !f.fuel || !on.has(f.fuel));
+    // 按容量降序（容量缺失的排最后）；与看板「按容量排序更能反映电力结构」的判断一致
+    const rows = [...kept].sort((a, b) => (b.capacityMw ?? -1) - (a.capacityMw ?? -1));
+    const top = rows.slice(0, TOP_FUEL_ROWS);
+    const rest = rows.slice(TOP_FUEL_ROWS);
+    return {
+      count: rows.reduce((s, f) => s + f.count, 0),
+      cap: rows.reduce((s, f) => s + (f.capacityMw ?? 0), 0),
+      top,
+      restKinds: rest.length,
+      restCount: rest.reduce((s, f) => s + f.count, 0),
+      restCap: rest.reduce((s, f) => s + (f.capacityMw ?? 0), 0),
+      hasRest: rest.length > 0,
+      hiddenCount: dropped.reduce((s, f) => s + f.count, 0),
+      missingCapacity: viewStats.missingCapacity,
+    };
+  }, [viewStats, statFuels]);
+
+  /**
+   * 阶段48：响应向导的镜头初始化请求。
+   *
+   * ⚠️ 用 `fitBounds(..., { duration: 0 })` 而**不是 `flyTo`**：
+   *    `flyTo` 的动画在 WebView2 里会中途停住（阶段32 实测），还得靠 moveend 校准。
+   *    向导场景不需要动画，“直接到位”反而更好。
+   * ⚠️ `maxZoom` 必须给：只装了一个小区域包时 fitBounds 会把地图放到极大。
+   */
+  const appliedFlySeqRef = useRef(-1);
+  useEffect(() => {
+    if (!flyTo) return;
+    if (appliedFlySeqRef.current === flyTo.seq) return;
+    // 地图未就绪就先不动；`mapReady` 在依赖里，就绪后本效果会自己重跑
+    if (!mapReady) return;
+    const map = mapRef.current;
+    if (!map) return;
+    appliedFlySeqRef.current = flyTo.seq;
+    const [w, s, e, n] = flyTo.bbox;
+    map.fitBounds(
+      [
+        [w, s],
+        [e, n],
+      ],
+      { padding: 40, duration: 0, maxZoom: 9 },
+    );
+  }, [flyTo, mapReady]);
 
   /**
    * 阶段39：区域数据包。
@@ -3581,12 +3718,17 @@ function MapPage({
       const tRender = performance.now();
 
       const b = map.getBounds();
-      const plantsPromise = on("电厂")
-        ? loadPlantCountInBox(b.getWest(), b.getSouth(), b.getEast(), b.getNorth())
-        : Promise.resolve(0);
+      const plantStatsPromise = on("电厂")
+        ? loadPlantStatsInBox(b.getWest(), b.getSouth(), b.getEast(), b.getNorth())
+        : Promise.resolve<PlantStatsInBox>({
+            total: 0,
+            totalCapacityMw: 0,
+            missingCapacity: 0,
+            byFuel: [],
+          });
 
-      void plantsPromise
-        .then((plants) => {
+      void plantStatsPromise
+        .then((stats) => {
           if (cancelled) return;
           const ms = performance.now() - t0;
           lastCostMs = ms;
@@ -3594,14 +3736,22 @@ function MapPage({
           console.debug(
             `[MapPage] 视野统计 ${ms.toFixed(1)}ms（渲染查询 ${msRender.toFixed(1)}ms + 数据库 ${(ms - msRender).toFixed(1)}ms，` +
               `z=${zoom.toFixed(2)}，${exact ? "按 osm_id 去重" : "低级别按源统计"}）：` +
-              `电厂 ${plants} / 线路段 ${lines} / 变电站 ${substations}`,
+              `电厂 ${stats.total}（${stats.byFuel.length} 类）/ 线路段 ${lines} / 变电站 ${substations}`,
           );
           if (ms > 50) {
             console.warn(`[MapPage] ⚠️ 视野统计超过 50ms 护栏：${ms.toFixed(1)}ms`);
           }
           // 与统计数字放在同一次状态更新里，避免每帧多渲一次
           setViewportInfo(publishViewport());
-          setViewStats({ plants, lines, substations, exact });
+          setViewStats({
+            plants: stats.total,
+            lines,
+            substations,
+            exact,
+            fuels: stats.byFuel,
+            totalCapacityMw: stats.totalCapacityMw,
+            missingCapacity: stats.missingCapacity,
+          });
         })
         .catch((err: unknown) => {
           console.error("[MapPage] 视野统计失败", err);
@@ -3672,8 +3822,104 @@ function MapPage({
 
       {/* 左上角：图层控制 */}
       <section className={styles.layerPanel} aria-label="数据看板与图层控制">
-        {/* 阶段46：数据看板（静态原型）—— 放在面板最上方，优先于图层开关。
-            用户先看到「有多少、装了多少」，再决定开哪些图层。 */}
+        {/* 阶段48：当前视野统计 —— 用户要求放**面板最上方**。
+            原先是左下角独立的 `.statsPanel`，现合并到这里：
+            ① 同一类信息不再占两处；② 左下角让出来后本面板可用高度多出约 84px。 */}
+        <section className={styles.viewPanel} aria-label="当前视野统计" aria-live="polite">
+          <button
+            type="button"
+            className={styles.viewHeader}
+            aria-expanded={viewOpen}
+            aria-controls="viewport-stats-body"
+            onClick={() => setViewOpen((v) => !v)}
+          >
+            <span className={styles.viewTitle}>当前视野</span>
+            <span className={styles.viewHeadRight}>
+              <span className={styles.viewTotal}>
+                {fuelView ? `${fuelView.count.toLocaleString()} 座` : "—"}
+              </span>
+              <span className={styles.chevron} aria-hidden="true">
+                {viewOpen ? "▼" : "▶"}
+              </span>
+            </span>
+          </button>
+
+          <div id="viewport-stats-body" className={styles.viewBody} hidden={!viewOpen}>
+            {!viewStats || !fuelView ? (
+              <p className={styles.viewNote}>正在统计…</p>
+            ) : fuelView.count === 0 ? (
+              <p className={styles.viewNote}>
+                {viewStats.plants > 0
+                  ? "当前视野内的电厂都被「统计筛选」排除了"
+                  : "当前视野内没有电厂"}
+              </p>
+            ) : (
+              <>
+                <p className={styles.viewCap}>
+                  装机合计 <b>{formatGw(fuelView.cap)}</b>
+                </p>
+                <ul className={styles.fuelStats}>
+                  {fuelView.top.map((f) => (
+                    <li key={f.fuel ?? "none"} className={styles.fuelStatRow}>
+                      <span
+                        className={styles.fuelStatSwatch}
+                        style={{ backgroundColor: fuelColor(f.fuel) }}
+                        aria-hidden="true"
+                      />
+                      <span className={styles.fuelStatName}>{fuelLabel(f.fuel)}</span>
+                      <span className={styles.fuelStatCount}>
+                        {f.count.toLocaleString()}
+                      </span>
+                      <span className={styles.fuelStatCap}>
+                        {f.capacityMw == null ? "--" : formatGw(f.capacityMw)}
+                      </span>
+                    </li>
+                  ))}
+                  {fuelView.hasRest && (
+                    <li className={styles.fuelStatRow}>
+                      <span
+                        className={styles.fuelStatSwatch}
+                        style={{ backgroundColor: "#6b6b6b" }}
+                        aria-hidden="true"
+                      />
+                      <span className={styles.fuelStatName}>
+                        其他 {fuelView.restKinds} 类
+                      </span>
+                      <span className={styles.fuelStatCount}>
+                        {fuelView.restCount.toLocaleString()}
+                      </span>
+                      <span className={styles.fuelStatCap}>
+                        {formatGw(fuelView.restCap)}
+                      </span>
+                    </li>
+                  )}
+                </ul>
+
+                <p className={styles.viewNote}>
+                  线路段 {viewStats.exact ? "" : "≈"}
+                  {viewStats.lines.toLocaleString()} · 变电站{" "}
+                  {viewStats.exact ? "" : "≈"}
+                  {viewStats.substations.toLocaleString()}
+                  {viewStats.exact ? "（z≥8 已去重）" : "（z<8 按源统计）"}
+                </p>
+
+                {/* 口径必须写清，否则用户看到「分项和 ≠ 合计」会以为是算错了 */}
+                {(fuelView.hiddenCount > 0 || fuelView.missingCapacity > 0) && (
+                  <p className={styles.viewWarn}>
+                    {fuelView.hiddenCount > 0 &&
+                      `已被统计筛选排除 ${fuelView.hiddenCount.toLocaleString()} 座`}
+                    {fuelView.hiddenCount > 0 && fuelView.missingCapacity > 0 && "；"}
+                    {fuelView.missingCapacity > 0 &&
+                      `容量缺失 ${fuelView.missingCapacity.toLocaleString()} 座未计入合计`}
+                  </p>
+                )}
+              </>
+            )}
+          </div>
+        </section>
+
+        {/* 阶段46：数据看板（静态原型）—— **全局**口径，与上面的「当前视野」区分开。
+            默认折叠（展开后内容较高，会拉长面板）。 */}
         <StatsDashboard />
 
         <button
@@ -3770,10 +4016,11 @@ function MapPage({
                         </ul>
                       </div>
 
-                      {/* 阶段46：第三层折叠 —— 按能源细分。
-                          同一套样式（.tierGroup / .tierItem / .tierCheck）
-                          构成第三层，靠**缩进**而不是新分隔线区分层级。
-                          ⚠️ 静态原型：勾选暂不影响地图渲染，原因见 protoFuels 的注释。 */}
+                      {/* 阶段48：第三层折叠 —— 「统计筛选」
+                          （阶段46 时叫「按能源细分」并标为原型，现已生效为真实过滤）。
+                          同一套样式构成第三层，靠**缩进**而不是新分隔线区分层级。
+                          ⚠️ 勾选**只过滤左侧看板的统计数字**，不改地图渲染 ——
+                             原因见 statFuels 的注释（cluster 数据源过滤不了）。 */}
                       <div className={styles.tierGroup}>
                         <button
                           type="button"
@@ -3782,10 +4029,7 @@ function MapPage({
                           aria-controls="fuel-sub-menu"
                           onClick={() => setFuelMenuOpen((v) => !v)}
                         >
-                          <span>
-                            按能源细分
-                            <span className={styles.protoTag}>原型</span>
-                          </span>
+                          <span>统计筛选</span>
                           <span className={styles.chevron} aria-hidden="true">
                             {fuelMenuOpen ? "▼" : "▶"}
                           </span>
@@ -3802,8 +4046,8 @@ function MapPage({
                                 <input
                                   type="checkbox"
                                   className={styles.tierCheck}
-                                  checked={protoFuels.includes(fuel)}
-                                  onChange={() => toggleProtoFuel(fuel)}
+                                  checked={statFuels.includes(fuel)}
+                                  onChange={() => toggleStatFuel(fuel)}
                                 />
                                 <span
                                   className={styles.layerSwatch}
@@ -3916,58 +4160,6 @@ function MapPage({
 
       {/* 地图指令的执行结果提示（如「已高亮 N 个匹配的电厂」） */}
       {mapNotice && <p className={styles.mapNotice}>{mapNotice}</p>}
-
-      {/* 阶段30：当前视野数据统计。
-          放左下角、比例尺上方 —— 左上是图层面板、右上是缩放、右下是版权、底部中间是提示，
-          只剩这个位置不会碰撞。`pointer-events: none` 保证它不挡地图拖拽。 */}
-      <section
-        className={styles.statsPanel}
-        aria-label="当前视野数据统计"
-        aria-live="polite"
-      >
-        <p className={styles.statsTitle}>本视野</p>
-        <ul className={styles.statsList}>
-          <li>
-            电厂{" "}
-            <b
-              key={viewStats ? viewStats.plants : "none"}
-              className={styles.statValue}
-            >
-              {viewStats ? viewStats.plants.toLocaleString() : "—"}
-            </b>{" "}
-            座
-          </li>
-          <li>
-            线路段{" "}
-            <b
-              key={viewStats ? `${viewStats.lines}-${viewStats.exact}` : "none-l"}
-              className={styles.statValue}
-            >
-              {viewStats
-                ? `${viewStats.exact ? "" : "≈"}${viewStats.lines.toLocaleString()}`
-                : "—"}
-            </b>{" "}
-            段
-          </li>
-          <li>
-            变电站{" "}
-            <b
-              key={viewStats ? `${viewStats.substations}-${viewStats.exact}` : "none-s"}
-              className={styles.statValue}
-            >
-              {viewStats
-                ? `${viewStats.exact ? "" : "≈"}${viewStats.substations.toLocaleString()}`
-                : "—"}
-            </b>{" "}
-            座
-          </li>
-        </ul>
-        <p className={styles.statsNote}>
-          {viewStats && !viewStats.exact
-            ? "z<8 为按源统计（含瓦片边缘重复）"
-            : "z≥8 已按 osm_id 去重"}
-        </p>
-      </section>
     </div>
   );
 }

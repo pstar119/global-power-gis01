@@ -1,9 +1,11 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Sidebar, { MENU_ITEMS, type MenuKey } from "./Sidebar";
 import TopBar from "./TopBar";
-import MapPage from "../pages/MapPage";
+import MapPage, { type MapFlyTo } from "../pages/MapPage";
 import StatsPage from "../pages/StatsPage";
 import SettingsPage from "../pages/SettingsPage";
+import WelcomeWizard, { WIZARD_FLAG_KEY } from "./WelcomeWizard";
+import { usePackDownloads } from "../hooks/usePackDownloads";
 import type {
   ConversationTurn,
   MapCommand,
@@ -32,6 +34,55 @@ function AppLayout() {
    */
   const [mapCommand, setMapCommand] = useState<MapCommand | null>(null);
   const commandSeq = useRef(0);
+
+  /**
+   * 阶段48：把地图镜头移到某个区域（首次启动向导完成后用）。
+   *
+   * ‼️ 刻意**不复用** `mapCommand` 通道：那条通道的载荷是 `ParsedQuery`，
+   *    它是**自然语言查询的契约**（intent/fuel/country/limit）。
+   *    把「飞到一个 bbox」塞进去会污染 AI 那层的语义，还得改 nlq.ts 的类型与校验。
+   *    单独一条只有相机信息的通道反而更干净、互不影响。
+   */
+  const [flyTo, setFlyTo] = useState<MapFlyTo | null>(null);
+  const flySeq = useRef(0);
+
+  /**
+   * 阶段48：数据包探测与首次启动向导。
+   *
+   * ‼️ hook 放在这里而不是向导内部：向导是**条件渲染**的（未装包才弹），
+   *    若由它自己持有 hook，弹之前就无法判断「到底该不该弹」。
+   *    放在 AppLayout 也保证全应用只一份状态（与设置页那份互不影响，不同时可见）。
+   */
+  const packApi = usePackDownloads();
+  const [wizardOpen, setWizardOpen] = useState(false);
+  /** 已走过一次向导（完成或跳过）就不再自动弹，否则每启动一次弹一次 */
+  const [wizardSeen, setWizardSeen] = useState(
+    () => localStorage.getItem(WIZARD_FLAG_KEY) === "1",
+  );
+
+  useEffect(() => {
+    if (wizardSeen || wizardOpen) return;
+    // 清单没读到 / 不是 Tauri 环境 → 一律不弹。
+    // 宁可没有引导，也不能因为一个探测失败让用户卡在门口。
+    if (!packApi.manifest || !packApi.bridgeOk) return;
+    // ⚠️ 探测还没回来时 statuses 是空对象 —— 此时**不能**推断「一个包都没装」，
+    //    那样会在每次启动时闪一下向导。
+    if (Object.keys(packApi.statuses).length === 0) return;
+    if (Object.values(packApi.statuses).some((s) => s.exists)) return;
+    setWizardOpen(true);
+  }, [packApi.manifest, packApi.statuses, packApi.bridgeOk, wizardSeen, wizardOpen]);
+
+  /** 结束向导：写标记、切回地图页、并把镜头移到已就绪区域 */
+  const handleWizardFinish = (bbox: [number, number, number, number] | null) => {
+    localStorage.setItem(WIZARD_FLAG_KEY, "1");
+    setWizardSeen(true);
+    setWizardOpen(false);
+    setActiveKey("map");
+    if (bbox) {
+      flySeq.current += 1;
+      setFlyTo({ bbox, seq: flySeq.current });
+    }
+  };
 
   /**
    * 阶段31：地图视野上下文（供 AI 解析「当前视野」类问题）。
@@ -132,6 +183,7 @@ function AppLayout() {
           <div className={styles.pageSlot} hidden={activeKey !== "map"}>
             <MapPage
               command={mapCommand}
+              flyTo={flyTo}
               viewportRef={viewportRef}
               onResultsStale={handleResultsStale}
               onViewOnMap={handleViewOnMap}
@@ -162,6 +214,11 @@ function AppLayout() {
           </div>
         </section>
       </div>
+
+      {/* 阶段48：首次启动向导。放在最外层（fixed 遮罩），盖住侧边栏与所有面板 */}
+      {wizardOpen && (
+        <WelcomeWizard api={packApi} onFinish={handleWizardFinish} />
+      )}
     </div>
   );
 }
