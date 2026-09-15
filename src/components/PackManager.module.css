@@ -1,0 +1,207 @@
+/* ==========================================================
+   阶段44：数据包管理面板
+   颜色全部取自 App.css 的 --gpg-* 深色令牌，与设置页其余卡片一致。
+   ========================================================== */
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  box-sizing: border-box;
+  padding: 1rem 1.25rem;
+  border: 1px solid var(--gpg-border);
+  border-radius: 8px;
+  background-color: var(--gpg-panel-bg);
+}
+
+.title {
+  margin: 0;
+  color: var(--gpg-text);
+  font-size: 0.9rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.note {
+  margin: 0;
+  color: var(--gpg-muted);
+  font-size: 0.75rem;
+  line-height: 1.6;
+}
+
+.code {
+  padding: 0 4px;
+  border-radius: 3px;
+  background-color: #3c3c3c;
+  color: var(--gpg-text);
+  font-size: 0.72rem;
+  word-break: break-all;
+}
+
+.error {
+  margin: 0;
+  color: #f48771;
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
+
+/* ---------- 列表 ---------- */
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--gpg-border);
+  border-radius: 6px;
+  background-color: var(--gpg-bg);
+}
+
+.head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.name {
+  color: var(--gpg-text);
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+
+.prov {
+  margin-left: 8px;
+  color: var(--gpg-muted);
+  font-size: 0.72rem;
+  font-weight: 400;
+}
+
+.size {
+  flex: none;
+  color: var(--gpg-muted);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.statusLine {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* ---------- 状态徽标 ---------- */
+
+.badgeIdle,
+.badgeBusy,
+.badgeDone,
+.badgePart {
+  flex: none;
+  min-width: 92px;
+  padding: 2px 8px;
+  border: 1px solid var(--gpg-border);
+  border-radius: 10px;
+  font-size: 0.72rem;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.badgeIdle {
+  color: var(--gpg-muted);
+}
+
+.badgeBusy {
+  border-color: var(--gpg-accent);
+  color: #ffffff;
+  background-color: var(--gpg-accent);
+}
+
+.badgeDone {
+  border-color: #3fb950;
+  color: #3fb950;
+}
+
+.badgePart {
+  border-color: #d7ba7d;
+  color: #d7ba7d;
+}
+
+/* ---------- 按钮 ---------- */
+
+.btn,
+.btnDanger {
+  padding: 3px 10px;
+  border: 1px solid var(--gpg-border);
+  border-radius: 4px;
+  background-color: #3c3c3c;
+  color: var(--gpg-text);
+  font: inherit;
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+
+.btn:hover {
+  border-color: var(--gpg-accent);
+  background-color: var(--gpg-hover);
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.btnDanger {
+  color: #f48771;
+}
+
+.btnDanger:hover {
+  border-color: #f48771;
+  background-color: var(--gpg-hover);
+}
+
+/* ---------- 进度条 ---------- */
+
+.barOuter {
+  position: relative;
+  height: 16px;
+  overflow: hidden;
+  border: 1px solid var(--gpg-border);
+  border-radius: 8px;
+  background-color: #3c3c3c;
+}
+
+.barInner {
+  height: 100%;
+  background-color: var(--gpg-accent);
+  transition: width 0.15s linear;
+}
+
+/* 文字压在进度条之上，保证无论填充多宽都可读 */
+.barText {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #ffffff;
+  font-size: 0.7rem;
+  font-variant-numeric: tabular-nums;
+  text-shadow: 0 1px 2px rgb(0 0 0 / 70%);
+}
+
+@media (max-width: 620px) {
+  .head {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+  }
+}

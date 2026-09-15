@@ -1,6 +1,7 @@
 import type { RefObject } from "react";
 import AiQueryPanel from "../components/AiQueryPanel";import DbSelfCheck from "../components/DbSelfCheck";
 import GreetSelfCheck from "../components/GreetSelfCheck";
+import PackManager from "../components/PackManager";
 import type { ConversationTurn, ParsedQuery, PlantFocus, QueryContext } from "../lib/nlq";
 import styles from "./SettingsPage.module.css";
 
@@ -88,6 +89,11 @@ function SettingsPage({
           </div>
         ))}
       </div>
+
+      {/* 阶段44：区域数据包下载 / 断点续传 / SHA256 校验。
+          单独成组件：它有独立的状态机（未下载/下载中/已下载/失败），
+          与上面那几组静态占位选项不是一回事。 */}
+      <PackManager />
 
       <GreetSelfCheck />
 

@@ -3,7 +3,8 @@ import Database from "@tauri-apps/plugin-sql";
 // 阶段26：读取随安装包分发的离线底图。
 // convertFileSrc 把本地绝对路径转成 `asset://localhost/...`（实现了真正的 HTTP Range）；
 // resolveResource 把相对资源路径解析成绝对路径（随安装包分发的 $RESOURCE 目录）。
-import { convertFileSrc } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { onPackInstalled, packKeyFromFile } from "../lib/packEvents";
 import { resolveResource } from "@tauri-apps/api/path";
 import type { FeatureCollection, LineString, Point } from "geojson";
 // 仅用命名导入：maplibre-gl 的类型声明不提供 default export
@@ -1285,6 +1286,57 @@ let pmtilesProtocol: Protocol | null = null;
 /** 同一份归档只解析一次（StrictMode 下 effect 会跑两遍） */
 const archivePromises = new Map<string, Promise<ArchiveHandle | null>>();
 
+/**
+ * 阶段44：**下载完成后必须显式失效归档缓存。**
+ *
+ * ‼️ `archivePromises` 是按 `resource` 字符串缓存的 —— 同一个路径换了文件内容，
+ *    缓存会继续返回**旧归档**，地图上什么都看不到。这是本阶段最容易漏的一步，
+ *    而且症状是「明明下载成功了，地图还是没数据」，极难定位。
+ */
+function invalidateArchive(resource: string) {
+  const had = archivePromises.delete(resource);
+  console.info(`[MapPage] 归档缓存失效：${resource}${had ? "" : "（本来就没有缓存）"}`);
+}
+
+/**
+ * 阶段44：用户可写的数据包目录（Rust 侧 `app_data_dir()/packs`）。
+ *
+ * ‼️ 不自己在前端算这个路径 —— Rust 侧是唯一真源。两边各算一遍的话，
+ *    只要一边改了命名（比如加个子目录）就会「文件明明存在却探测不到」。
+ */
+let packsDirPromise: Promise<string | null> | null = null;
+function getPacksDir(): Promise<string | null> {
+  packsDirPromise ??= invoke<string>("pack_dir").catch((err) => {
+    console.warn("[MapPage] 无法获取数据包目录（非 Tauri 环境？）", err);
+    return null;
+  });
+  return packsDirPromise;
+}
+
+/**
+ * 阶段44：一个 resource 可能有多个物理位置。
+ *
+ * 顺序很重要：**用户目录优先**（那是下载得到的、可能是新版本），
+ * 其次才是资源目录（dev 的 `target/debug/packs`、或随安装包分发的兼容位置）。
+ * 探测失败会继续试下一个候选，全失败才判定「未安装」。
+ */
+async function candidatePaths(resource: string): Promise<string[]> {
+  const out: string[] = [];
+  if (resource.startsWith("packs/")) {
+    const dir = await getPacksDir();
+    if (dir) {
+      out.push(`${dir.replace(/[\\/]+$/, "")}\\${resource.slice("packs/".length)}`);
+    }
+  }
+  try {
+    const resolved = await resolveResource(resource);
+    if (!out.includes(resolved)) out.push(resolved);
+  } catch (err) {
+    if (!out.length) throw err;
+  }
+  return out;
+}
+
 /** 协议注册表是全局的，而且只能注册一次 —— 这里做幂等 */
 function ensurePmtilesProtocol(): Protocol {
   if (!pmtilesProtocol) {
@@ -1314,57 +1366,72 @@ function ensurePmtilesArchive(
 
   const task = (async (): Promise<ArchiveHandle | null> => {
     const protocol = ensurePmtilesProtocol();
-    try {
-      const absPath = await resolveResource(resource);
-      const url = convertFileSrc(absPath);
+    const candidates = await candidatePaths(resource);
+    let lastErr: unknown = null;
 
-      // ---- 首选：让 pmtiles 自己按需发 Range 请求 ----
-      const probe = await fetch(url, { headers: { Range: "bytes=0-126" } });
-      if (probe.status === 206) {
-        assertPmtilesMagic(new Uint8Array(await probe.arrayBuffer()));
-        const archive = new PMTiles(url);
+    for (const absPath of candidates) {
+      const url = convertFileSrc(absPath);
+      try {
+        // ---- 首选：让 pmtiles 自己按需发 Range 请求 ----
+        const probe = await fetch(url, { headers: { Range: "bytes=0-126" } });
+
+        // 该候选不存在（或不在 assetProtocol 作用域内）→ 安静地试下一个。
+        // ‼️ 404/403 不能走下面的 warn 分支，否则「用户目录没有、资源目录有」
+        //    这种完全正常的情况会每次都刷一条告警。
+        if (probe.status === 404 || probe.status === 403) {
+          lastErr = new Error(`HTTP ${probe.status}`);
+          continue;
+        }
+
+        if (probe.status === 206) {
+          assertPmtilesMagic(new Uint8Array(await probe.arrayBuffer()));
+          const archive = new PMTiles(url);
+          protocol.add(archive);
+          const header = await archive.getHeader();
+          console.info(
+            `[MapPage] ${label}就绪（Range 读取）：${absPath}，z${header.minZoom}-${header.maxZoom}，` +
+              `${header.numAddressedTiles} 个瓦片，Content-Range=${probe.headers.get("content-range") ?? "-"}`,
+          );
+          return {
+            key: url,
+            resource,
+            minZoom: header.minZoom,
+            maxZoom: header.maxZoom,
+            mode: "range",
+          };
+        }
+
+        // ---- 退化：协议不支持 Range，只能整包读进内存 ----
+        console.warn(
+          `[MapPage] ${label}未按 Range 返回（HTTP ${probe.status}，期望 206），退回整包读取。` +
+            "这不会出错，但说明 asset 协议没生效，大文件会白占内存。",
+        );
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`读取归档失败：HTTP ${res.status}`);
+        const buffer = await res.arrayBuffer();
+        assertPmtilesMagic(new Uint8Array(buffer, 0, 7));
+        const archive = new PMTiles(new MemorySource(buffer, resource));
         protocol.add(archive);
         const header = await archive.getHeader();
-        console.info(
-          `[MapPage] ${label}就绪（Range 读取）：${absPath}，z${header.minZoom}-${header.maxZoom}，` +
-            `${header.numAddressedTiles} 个瓦片，Content-Range=${probe.headers.get("content-range") ?? "-"}`,
-        );
         return {
-          key: url,
+          key: resource,
           resource,
           minZoom: header.minZoom,
           maxZoom: header.maxZoom,
-          mode: "range",
+          mode: "memory",
         };
+      } catch (err) {
+        lastErr = err;
+        console.info(`[MapPage] ${label}候选路径不可用，继续尝试下一个：${absPath}`, err);
       }
-
-      // ---- 退化：协议不支持 Range，只能整包读进内存 ----
-      console.warn(
-        `[MapPage] ${label}未按 Range 返回（HTTP ${probe.status}，期望 206），退回整包读取。` +
-          "这不会出错，但说明 asset 协议没生效，大文件会白占内存。",
-      );
-      const res = await fetch(url);
-      if (!res.ok) throw new Error(`读取归档失败：HTTP ${res.status}`);
-      const buffer = await res.arrayBuffer();
-      assertPmtilesMagic(new Uint8Array(buffer, 0, 7));
-      const archive = new PMTiles(new MemorySource(buffer, resource));
-      protocol.add(archive);
-      const header = await archive.getHeader();
-      return {
-        key: resource,
-        resource,
-        minZoom: header.minZoom,
-        maxZoom: header.maxZoom,
-        mode: "memory",
-      };
-    } catch (err) {
-      if (quiet) {
-        console.info(`[MapPage] ${label}未安装（属于正常情况）：${resource}`);
-      } else {
-        console.warn(`[MapPage] ${label}不可用。${missingHint}`, err);
-      }
-      return null;
     }
+
+    if (quiet) {
+      console.info(`[MapPage] ${label}未安装（属于正常情况）：${resource}`);
+    } else {
+      console.warn(`[MapPage] ${label}不可用。${missingHint}`, lastErr);
+    }
+    return null;
   })();
 
   archivePromises.set(resource, task);
@@ -3003,6 +3070,43 @@ function MapPage({
     return () => {
       cancelled = true;
     };
+  }, []);
+
+  /**
+   * 阶段44：数据包下载完成后，把地图上的该包**换掉**。
+   *
+   * 三件事缺一不可：
+   *   1. **失效归档缓存** —— 否则 `archivePromises` 继续返回旧归档，
+   *      症状是「提示下载成功但地图上依然没数据」，极难定位
+   *   2. 拆掉旧的 source/layer —— 否则 source 泄漏，且新文件不会被读取
+   *   3. 重新探测并纳入可加载集合
+   * 之后由下面那个「按视口激活」的 effect 在合适时机重新挂上。
+   */
+  useEffect(() => {
+    return onPackInstalled((file) => {
+      const key = packKeyFromFile(file);
+      const resource = `packs/${file}`;
+      invalidateArchive(resource);
+
+      const map = mapRef.current;
+      if (map?.getSource(packSourceId(key))) {
+        removePackLayers(map, key);
+        console.info(`[MapPage] 区域包 ${key} 文件已变化，拆掉旧图层等重挂`);
+      }
+
+      // 先摘掉，避免拆掉 source 后 packsAvailable 还声称它可用
+      setPacksAvailable((prev) => prev.filter((k) => k !== key));
+
+      void ensurePmtilesArchive(resource, {
+        label: `${key} 区域包`,
+        missingHint: `${file} 尚未下载完成`,
+        quiet: true,
+      }).then((handle) => {
+        if (!handle) return;
+        setPacksAvailable((prev) => (prev.includes(key) ? prev : [...prev, key]));
+        console.info(`[MapPage] 区域包 ${key} 已重新可用`);
+      });
+    });
   }, []);
 
   /**

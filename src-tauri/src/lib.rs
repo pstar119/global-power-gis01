@@ -4,6 +4,8 @@ use tauri::path::BaseDirectory;
 use tauri::{AppHandle, Manager};
 use tauri_plugin_sql::{Migration, MigrationKind};
 
+mod packs;
+
 /// 本地 SQLite 数据库。
 /// 路径相对 `BaseDirectory::AppConfig`，即 Windows 上的
 /// `%APPDATA%\<identifier>\global_power_gis.db`；文件不存在时由 SQLite 自动创建。
@@ -133,7 +135,14 @@ pub fn run() {
             }
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![greet])
+        .invoke_handler(tauri::generate_handler![
+            greet,
+            packs::pack_dir,
+            packs::pack_status,
+            packs::pack_download,
+            packs::pack_cancel,
+            packs::pack_remove
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
