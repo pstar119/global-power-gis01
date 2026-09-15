@@ -36,8 +36,28 @@ const MANIFEST_URL = "/packs_manifest.json";
  * ```
  *
  * 它在界面上会显示为「本地覆盖」，一看就知道生效了没有。
+ *
+ * 🔴 阶段46：**生产构建里这个值恒为 null**（下面的 `DEV` 判断）。
+ *
+ *    原因是实测出来的一个会让分发**静默全灭**的坑：
+ *    `vite.config.ts` 的 envPrefix 里有 `PACKS_`，而 Vite 会把**构建时 shell 环境里**
+ *    匹配前缀的变量原样内联进产物。于是「本地联调完、shell 里还留着
+ *    `PACKS_BASE_URL=http://127.0.0.1:8099`，直接 `tauri build` 发版」，
+ *    就会把 localhost 写进安装包 —— 而它的优先级**高于清单**，
+ *    结果**所有用户**的下载都指向自己的机器、100% 失败。
+ *    最恶劣的是它完全静默：代码正常、清单正常、只是下载全挂。
+ *
+ *    实测证据（2026-09-15）：带该变量跑 `npm run build`，
+ *    `dist/assets/index-*.js` 里能搜到 `127.0.0.1:9999`。
+ *
+ *    ⇒ 这里加 DEV 判断（第二道保险），且 `vite.config.ts` 的 build 侧
+ *      已**不再注入 `PACKS_` 前缀**（第一道），两道叠加后生产包安全。
+ *      需要在生产模式临时改地址时，走清单那条路（唯一配置点）：
+ *        $env:PACKS_BASE_URL="http://127.0.0.1:8099"; node scripts/gen_packs_manifest.mjs
  */
 const VITE_BASE_URL = (() => {
+  // ⚠️ 这一行不能删，理由见上。`import.meta.env.DEV` 在 build 时为 false。
+  if (!import.meta.env.DEV) return null;
   const env = import.meta.env as unknown as Record<string, string | undefined>;
   const raw = env.VITE_PACKS_BASE_URL ?? env.PACKS_BASE_URL;
   const trimmed = raw?.trim().replace(/\/+$/, "");
@@ -85,7 +105,7 @@ function friendlyError(raw: string): string {
   if (raw.includes("SIZE_MISMATCH")) return "文件大小不符，请重试下载";
   if (raw.includes("TIMEOUT")) return "网络超时（断点已保留，可继续）";
   if (raw.includes("NETWORK_ERROR")) return "网络错误（断点已保留，可继续）";
-  if (raw.includes("HTTP_ERROR")) return "服务器返回错误（若是 404，说明下载地址还不可匿名访问）";
+  if (raw.includes("HTTP_ERROR")) return "服务器返回错误（404：该地址上没有这个文件）";
   if (raw.includes("RANGE_NOT_SATISFIABLE")) return "服务器拒绝续传请求，请重试下载";
   if (raw.includes("CANCELLED")) return "已取消（断点已保留）";
   if (raw.includes("BAD_FILE_NAME")) return "文件名非法";

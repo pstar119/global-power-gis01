@@ -112,6 +112,50 @@ function copyPublicRuntimeAssets(): Plugin {
   };
 }
 
+/**
+ * 该把哪些前缀的环境变量注入前端代码。
+ *
+ * ‼️ 目的：让 `PACKS_BASE_URL` **一个名字**同时管两件事，消除混淆：
+ *   - `node scripts/gen_packs_manifest.mjs` 读它（决定清单里写哪个地址）
+ *   - `vite dev` 注入它（决定前端运行时用哪个地址）
+ *     → 于是 `$env:PACKS_BASE_URL="http://127.0.0.1:8099"; npm run tauri dev`
+ *       就能直接生效，**不需要重新生成清单**。
+ *
+ * 🔴 阶段46：**build 时刻意不再注入 `PACKS_`**。
+ *
+ *   原因是实测出来的一个会让分发**静默全灭**的坑（已验证，不是假想）：
+ *   Vite 会把构建时 shell 环境里匹配 envPrefix 的变量**原样内联进产物**，
+ *   而 `PACKS_BASE_URL` 在前端里的优先级**高于清单** ——
+ *   于是「本地联调完、shell 里还留着 `PACKS_BASE_URL=http://127.0.0.1:8099`，
+ *   直接 `tauri build` 发版」就会把 localhost 写进安装包，
+ *   所有用户的下载都指向自己的机器、100% 失败，而代码与清单看起来都完全正常。
+ *
+ *   实测证据（2026-09-15）：带 `PACKS_BASE_URL=http://127.0.0.1:9999` 跑 `npm run build`，
+ *   `dist/assets/index-*.js` 里确实能搜到 `127.0.0.1:9999`。
+ *
+ *   ⇒ build 下不注入该前缀，字符串连进都进不了产物；
+ *     前端侧还有第二道保险（`import.meta.env.DEV` 判断，见 PackManager.tsx）。
+ *     要在生产模式改地址，走**清单这唯一配置点**：
+ *       $env:PACKS_BASE_URL="http://127.0.0.1:8099"; node scripts/gen_packs_manifest.mjs
+ *
+ * ⚠️ 即使是 dev，也不要用这个前缀放密钥：注入的变量会原样进产物。
+ *    `PACKS_BASE_URL` 是公开下载地址，不敏感。
+ */
+function resolveEnvPrefix(command: string): string[] {
+  if (command === "build") {
+    if (process.env.PACKS_BASE_URL) {
+      console.warn(
+        `\n⚠️ [vite] 构建时检测到 PACKS_BASE_URL=${process.env.PACKS_BASE_URL}\n` +
+          "   生产构建**刻意不注入**该变量（否则会把本地联调地址打进发行包）。\n" +
+          "   本次构建的下载地址取自 public/packs_manifest.json。\n" +
+          "   要改它：node scripts/gen_packs_manifest.mjs\n",
+      );
+    }
+    return ["VITE_"];
+  }
+  return ["VITE_", "PACKS_"];
+}
+
 // https://vite.dev/config/
 export default defineConfig(({ command }) => ({
   // dev：需要 Vite 内置的 publicDir 能力来服务 /fonts/、/packs_manifest.json。
@@ -119,19 +163,8 @@ export default defineConfig(({ command }) => ({
   //        改由 copyPublicRuntimeAssets() 按规则精确拷贝。
   publicDir: command === "serve" ? PUBLIC_DIR : false,
 
-  /**
-   * 把 `PACKS_` 前缀的变量也暴露给前端代码。
-   *
-   * ‼️ 目的：让 `PACKS_BASE_URL` **一个名字**同时管两件事，消除混淆：
-   *   - `node scripts/gen_packs_manifest.mjs` 读它（决定清单里写哪个地址）
-   *   - `vite dev` 注入它（决定前端运行时用哪个地址）
-   *     → 于是 `$env:PACKS_BASE_URL="http://127.0.0.1:8099"; npm run tauri dev`
-   *       就能直接生效，**不需要重新生成清单**。
-   *
-   * ⚠️ 代价：任何 `PACKS_*` 环境变量都会进前端产物。因此**不要**用这个前缀放密钥。
-   *    `PACKS_BASE_URL` 是公开下载地址，不敏感。
-   */
-  envPrefix: ["VITE_", "PACKS_"],
+  // `PACKS_` 前缀只在 dev 下暴露 —— 理由见 resolveEnvPrefix 的注释（实测确认的坑）
+  envPrefix: resolveEnvPrefix(command),
 
   plugins: [react(), maplibreWorkerAssets(), copyPublicRuntimeAssets()],
 
