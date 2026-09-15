@@ -30,7 +30,17 @@ export interface PackEntry {
 
 export interface PacksManifest {
   packs: PackEntry[];
-  release?: { baseUrl: string; note?: string };
+  release?: {
+    baseUrl: string;
+    /**
+     * 阶段48：**预留字段，当前只读不用**（用户拍板：降级逻辑先不做）。
+     *
+     * 值是 GitHub 直连基址（不经镜像）。真正做自动降级时，
+     * 只需在镜像下载失败后用 `effectiveBaseOf()` 传入这个地址重试一次。
+     */
+    directBaseUrl?: string | null;
+    note?: string;
+  };
 }
 
 export interface PackFileStatus {

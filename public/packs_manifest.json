@@ -1,10 +1,11 @@
 {
-  "generatedAt": "2026-09-15T12:47:38.953Z",
+  "generatedAt": "2026-09-15T14:59:18.581Z",
   "generatedBy": "scripts/gen_packs_manifest.mjs",
   "note": "区域数据包元信息清单。pack 是否已安装需在运行时用 127 字节 Range 探测判定，本文件只描述「有哪些包、覆盖哪里」。",
   "release": {
     "baseUrl": "https://gh-proxy.com/https://github.com/pstar119/global-power-gis01/releases/download/v1.0-packs",
-    "note": "数据包托管在 GitHub Release，默认经国内加速镜像（gh-proxy.com）分发。仓库已转公开，直连地址同样可用。⚠️ 换托管只需改 gen_packs_manifest.mjs 的 DEFAULT_BASE_URL 并重跑本脚本。"
+    "directBaseUrl": "https://github.com/pstar119/global-power-gis01/releases/download/v1.0-packs",
+    "note": "数据包托管在 GitHub Release，默认经国内加速镜像（gh-proxy.com）分发。仓库已转公开，直连地址同样可用。⚠️ 换托管只需改 gen_packs_manifest.mjs 的 DEFAULT_BASE_URL 并重跑本脚本。directBaseUrl 是阶段48 的预留字段（当前无代码读取）：镜像失效时可作为降级重试的备用基址。"
   },
   "core": {
     "label": "核心区（长三角 + 浙江）",
