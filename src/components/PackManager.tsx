@@ -25,19 +25,21 @@ const MANIFEST_URL = "/packs_manifest.json";
 /**
  * 开发/验证用的**运行时覆盖**。
  *
- * ❗ 为什么需要它：仅靠「改环境变量 + 重新生成清单」两步太容易漏掉一步。
- *    这个变量在 `vite dev` 启动时就被注入，不需要重新生成任何文件：
+ * ‼️ 两个名字都读，但语义相同 —— `vite.config.ts` 里设了
+ *    `envPrefix: ["VITE_", "PACKS_"]`，所以同一个环境变量既能被
+ *    `gen_packs_manifest.mjs`（生成清单时）读到，也能被这里（运行时）读到。
+ *    这样就不存在「设了变量却因为忘了重新生成清单而不生效」这种坑了。
  *
  * ```text
- * $env:VITE_PACKS_BASE_URL = "http://127.0.0.1:8099"
+ * $env:PACKS_BASE_URL = "http://127.0.0.1:8099"
  * npm run tauri dev
  * ```
  *
- * 它在界面上会显示为「来源：本地覆盖」，一看就知道生效了没有。
- * （`PACKS_BASE_URL` 是**生成清单时**用的，用于正式部署换托管，两者不要混淆。）
+ * 它在界面上会显示为「本地覆盖」，一看就知道生效了没有。
  */
 const VITE_BASE_URL = (() => {
-  const raw = import.meta.env.VITE_PACKS_BASE_URL as string | undefined;
+  const env = import.meta.env as unknown as Record<string, string | undefined>;
+  const raw = env.VITE_PACKS_BASE_URL ?? env.PACKS_BASE_URL;
   const trimmed = raw?.trim().replace(/\/+$/, "");
   return trimmed ? trimmed : null;
 })();
@@ -348,7 +350,7 @@ function PackManager() {
       <p className={styles.note}>
         下载地址：<code className={styles.code}>{effectiveBase ?? "—"}</code>
         <span className={VITE_BASE_URL ? styles.badgePart : styles.badgeIdle}>
-          {VITE_BASE_URL ? "本地覆盖 VITE_PACKS_BASE_URL" : "来自清单 packs_manifest.json"}
+          {VITE_BASE_URL ? "本地覆盖（环境变量）" : "来自清单 packs_manifest.json"}
         </span>
       </p>
     </section>

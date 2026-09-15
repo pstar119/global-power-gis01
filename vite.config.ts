@@ -119,6 +119,20 @@ export default defineConfig(({ command }) => ({
   //        改由 copyPublicRuntimeAssets() 按规则精确拷贝。
   publicDir: command === "serve" ? PUBLIC_DIR : false,
 
+  /**
+   * 把 `PACKS_` 前缀的变量也暴露给前端代码。
+   *
+   * ‼️ 目的：让 `PACKS_BASE_URL` **一个名字**同时管两件事，消除混淆：
+   *   - `node scripts/gen_packs_manifest.mjs` 读它（决定清单里写哪个地址）
+   *   - `vite dev` 注入它（决定前端运行时用哪个地址）
+   *     → 于是 `$env:PACKS_BASE_URL="http://127.0.0.1:8099"; npm run tauri dev`
+   *       就能直接生效，**不需要重新生成清单**。
+   *
+   * ⚠️ 代价：任何 `PACKS_*` 环境变量都会进前端产物。因此**不要**用这个前缀放密钥。
+   *    `PACKS_BASE_URL` 是公开下载地址，不敏感。
+   */
+  envPrefix: ["VITE_", "PACKS_"],
+
   plugins: [react(), maplibreWorkerAssets(), copyPublicRuntimeAssets()],
 
   // maplibre-gl 不能交给依赖预打包：预打包后 import.meta.url 会变成
