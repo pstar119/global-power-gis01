@@ -121,6 +121,60 @@
   display: none;
 }
 
+/* ---------- 阶段45：可折叠分组 ---------- */
+
+.layerGroups {
+  display: flex;
+  flex-direction: column;
+}
+
+/* 同 .layerList：[hidden] 必须显式写，否则作者样式的 display:flex 会赢过 UA 样式 */
+.layerGroups[hidden] {
+  display: none;
+}
+
+/* 组与组之间加分隔线，但**第一个不加** —— 它上面已经是面板标题栏 */
+.layerGroup + .layerGroup {
+  border-top: 1px solid var(--gpg-border);
+}
+
+.groupHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 8px 12px;
+  border: 0;
+  background: none;
+  color: var(--gpg-text);
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+.groupHeader:hover,
+.groupHeader:active {
+  background-color: var(--gpg-hover);
+}
+
+.groupBody {
+  padding: 0 12px 8px;
+}
+
+.groupBody[hidden] {
+  display: none;
+}
+
+.groupPlaceholder {
+  margin: 0;
+  padding: 4px 0 2px;
+  color: var(--gpg-muted);
+  font-size: 0.72rem;
+  line-height: 1.6;
+}
+
 /* ---------- 阶段30：电压分级复选框 ---------- */
 
 .tierGroup {

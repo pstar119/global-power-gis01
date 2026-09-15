@@ -279,6 +279,35 @@ const INFRA_SWATCH: Record<string, string> = {
 };
 
 /**
+ * 阶段45：图层面板的**分组制**。
+ *
+ * ❗ 折叠是**纯 UI 行为** —— 收起一个组不会改变任何图层的可见性。
+ *    否则用户收起「基础设施」时铁路会跟着消失，看起来像 bug。
+ *
+ * ⚠️ 用户描述里说「四个组」但只列了三个（电力设施 / 基础设施 / 环境与底图），
+ *    这里按**实际列出的三个**实现。电压分级被归入「电力设施」组内，
+ *    因为它本来就是输电线路的子项，单独成组会与主开关重复。
+ */
+interface LayerGroupDef {
+  id: string;
+  label: string;
+  /** 默认是否展开 */
+  defaultOpen: boolean;
+  /** 预留分组：只显示说明文字，不含真实开关 */
+  placeholder?: string;
+}
+const LAYER_GROUPS: readonly LayerGroupDef[] = [
+  { id: "power", label: "电力设施", defaultOpen: true },
+  { id: "infra", label: "基础设施", defaultOpen: false },
+  {
+    id: "env",
+    label: "环境与底图",
+    defaultOpen: false,
+    placeholder: "后续接入：洪水风险区、数据中心等上下文图层。",
+  },
+];
+
+/**
  * 阶段39：区域数据包（可选包）—— 按视口动态加载。
  *
  * 背景：全国 7 个大区被切成 7 个独立归档（`data/packs/osm-<region>.pmtiles`，共 116 MB），
@@ -2083,6 +2112,15 @@ function MapPage({
   // 图层控制面板的展开 / 折叠
   const [panelOpen, setPanelOpen] = useState(true);
 
+  /** 阶段45：各分组的展开状态。默认只展开「电力设施」。 */
+  const [openGroups, setOpenGroups] = useState<readonly string[]>(() =>
+    LAYER_GROUPS.filter((g) => g.defaultOpen).map((g) => g.id),
+  );
+  const toggleGroup = (id: string) =>
+    setOpenGroups((prev) =>
+      prev.includes(id) ? prev.filter((g) => g !== id) : [...prev, id],
+    );
+
   /** 阶段33：AI 工作台展开 / 折叠。展开时把左侧的图层控制与视野统计面板右推，避免抢空间 */
   const [benchOpen, setBenchOpen] = useState(true);
 
@@ -3500,7 +3538,7 @@ function MapPage({
           type="button"
           className={styles.panelToggle}
           aria-expanded={panelOpen}
-          aria-controls="map-layer-list"
+          aria-controls="map-layer-groups"
           onClick={() => setPanelOpen((open) => !open)}
         >
           <span>图层控制</span>
@@ -3509,89 +3547,124 @@ function MapPage({
           </span>
         </button>
 
-        <ul id="map-layer-list" className={styles.layerList} hidden={!panelOpen}>
-          {LAYERS.map((name) => {
-            // 「输电线路」是总开关：状态 = 任一电压档开启；点击 = 全开 / 全关
-            const isVisible =
-              name === "输电线路" ? anyTierOn : visibleLayers.includes(name);
-
+        {/* 阶段45：分组制的图层控制。
+            折叠仅隐藏内容，**不改变图层可见性**（收起「基础设施」不会让铁路消失）。 */}
+        <div id="map-layer-groups" className={styles.layerGroups} hidden={!panelOpen}>
+          {LAYER_GROUPS.map((group) => {
+            const open = openGroups.includes(group.id);
+            const bodyId = `layer-group-${group.id}`;
             return (
-              <li key={name}>
+              <section key={group.id} className={styles.layerGroup}>
                 <button
                   type="button"
-                  className={styles.layerBtn}
-                  aria-pressed={isVisible}
-                  onClick={() =>
-                    name === "输电线路" ? toggleAllTiers() : toggleLayer(name)
-                  }
+                  className={styles.groupHeader}
+                  aria-expanded={open}
+                  aria-controls={bodyId}
+                  onClick={() => toggleGroup(group.id)}
                 >
-                  <span
-                    className={styles.layerSwatch}
-                    style={{ background: LAYER_SWATCH[name] }}
-                    aria-hidden="true"
-                  />
-                  {name}
+                  <span>{group.label}</span>
+                  <span className={styles.chevron} aria-hidden="true">
+                    {open ? "▼" : "▶"}
+                  </span>
                 </button>
-              </li>
+
+                <div id={bodyId} className={styles.groupBody} hidden={!open}>
+                  {/* ---------- 电力设施：三个总开关 + 电压分级 ---------- */}
+                  {group.id === "power" && (
+                    <>
+                      <ul className={styles.layerList}>
+                        {LAYERS.map((name) => {
+                          // 「输电线路」是总开关：状态 = 任一电压档开启；点击 = 全开 / 全关
+                          const isVisible =
+                            name === "输电线路" ? anyTierOn : visibleLayers.includes(name);
+
+                          return (
+                            <li key={name}>
+                              <button
+                                type="button"
+                                className={styles.layerBtn}
+                                aria-pressed={isVisible}
+                                onClick={() =>
+                                  name === "输电线路" ? toggleAllTiers() : toggleLayer(name)
+                                }
+                              >
+                                <span
+                                  className={styles.layerSwatch}
+                                  style={{ background: LAYER_SWATCH[name] }}
+                                  aria-hidden="true"
+                                />
+                                {name}
+                              </button>
+                            </li>
+                          );
+                        })}
+                      </ul>
+
+                      {/* 阶段30：输电线路按电压分级。
+                          用原生 `<input type="checkbox">`：语义与无障碍最好，也不必为「选中态」自造样式。
+                          色块取自与地图**同一份** `OSM_LINE_TIERS[].color`，所以开关本身就是图例，
+                          永远不会和地图上的颜色脱节。 */}
+                      <div className={styles.tierGroup}>
+                        <p className={styles.legendTitle}>输电线路（按电压分级）</p>
+                        <ul className={styles.tierList}>
+                          {OSM_LINE_TIERS.map((tier) => (
+                            <li key={tier.vclass}>
+                              <label className={styles.tierItem}>
+                                <input
+                                  type="checkbox"
+                                  className={styles.tierCheck}
+                                  checked={visibleLayers.includes(tier.vclass)}
+                                  onChange={() => toggleTier(tier.vclass)}
+                                />
+                                <span
+                                  className={styles.layerSwatch}
+                                  style={{ background: tier.color }}
+                                  aria-hidden="true"
+                                />
+                                {TIER_LABEL[tier.vclass] ?? tier.vclass}
+                              </label>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    </>
+                  )}
+
+                  {/* ---------- 基础设施：默认关闭的背景参照 ---------- */}
+                  {group.id === "infra" && (
+                    <div className={styles.tierGroup}>
+                      <p className={styles.legendTitle}>默认关闭（背景参照）</p>
+                      <ul className={styles.tierList}>
+                        {INFRA_LAYERS.map((name) => (
+                          <li key={name}>
+                            <label className={styles.tierItem}>
+                              <input
+                                type="checkbox"
+                                className={styles.tierCheck}
+                                checked={visibleLayers.includes(name)}
+                                onChange={() => toggleLayer(name)}
+                              />
+                              <span
+                                className={styles.layerSwatch}
+                                style={{ background: INFRA_SWATCH[name] }}
+                                aria-hidden="true"
+                              />
+                              {name}
+                            </label>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {/* ---------- 环境与底图：预留占位 ---------- */}
+                  {group.placeholder && (
+                    <p className={styles.groupPlaceholder}>{group.placeholder}</p>
+                  )}
+                </div>
+              </section>
             );
           })}
-        </ul>
-
-        {/* 阶段30：输电线路按电压分级。
-            用原生 `<input type="checkbox">`：语义与无障碍最好，也不必为「选中态」自造样式。
-            色块取自与地图**同一份** `OSM_LINE_TIERS[].color`，所以开关本身就是图例，
-            永远不会和地图上的颜色脱节。 */}
-        <div className={styles.tierGroup} hidden={!panelOpen}>
-          <p className={styles.legendTitle}>输电线路（按电压分级）</p>
-          <ul className={styles.tierList}>
-            {OSM_LINE_TIERS.map((tier) => (
-              <li key={tier.vclass}>
-                <label className={styles.tierItem}>
-                  <input
-                    type="checkbox"
-                    className={styles.tierCheck}
-                    checked={visibleLayers.includes(tier.vclass)}
-                    onChange={() => toggleTier(tier.vclass)}
-                  />
-                  <span
-                    className={styles.layerSwatch}
-                    style={{ background: tier.color }}
-                    aria-hidden="true"
-                  />
-                  {TIER_LABEL[tier.vclass] ?? tier.vclass}
-                </label>
-              </li>
-            ))}
-          </ul>
-        </div>
-
-        {/* 阶段43：其他基础设施（默认关闭）。
-            做成独立分组而不是并进上面三个总开关，是因为它们属于「背景参照」：
-            默认视图里不应该与电网骨干争夺注意力。
-            复用 `.tierGroup/.tierItem` 那套样式，色块取自与地图**同一份**颜色常量，
-            所以开关本身就是图例，不会与地图配色脱节。 */}
-        <div className={styles.tierGroup} hidden={!panelOpen}>
-          <p className={styles.legendTitle}>其他基础设施（默认关闭）</p>
-          <ul className={styles.tierList}>
-            {INFRA_LAYERS.map((name) => (
-              <li key={name}>
-                <label className={styles.tierItem}>
-                  <input
-                    type="checkbox"
-                    className={styles.tierCheck}
-                    checked={visibleLayers.includes(name)}
-                    onChange={() => toggleLayer(name)}
-                  />
-                  <span
-                    className={styles.layerSwatch}
-                    style={{ background: INFRA_SWATCH[name] }}
-                    aria-hidden="true"
-                  />
-                  {name}
-                </label>
-              </li>
-            ))}
-          </ul>
         </div>
 
         {/* 燃料类型图例：纯 DOM + CSS，色块颜色取自与地图同一份 FUEL_COLORS，
