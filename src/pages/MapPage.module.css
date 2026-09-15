@@ -566,6 +566,38 @@
   border-radius: 2px;
 }
 
+/* 阶段47：可点击的「数据来源」链接。
+   ⚠️ 它是 <button> 而不是 <a>（点 <a> 会让 WebView 自己导航走，
+      详见 MapPage.tsx 里 buildPopupFrame 的注释），所以必须把 button 的默认外观彻底抹平，
+      让它看起来就是一个链接。同样要**显式**覆盖 :hover/:active ——
+      App.css 的 `button:hover`(0,1,1) 优先级高于本类 (0,1,0)。 */
+.popupLink {
+  padding: 0;
+  border: none;
+  background: none;
+  box-shadow: none;
+  color: #4daafc;
+  font: inherit;
+  text-align: left;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.popupLink:hover,
+.popupLink:active {
+  border: none;
+  background: none;
+  box-shadow: none;
+  color: #7cc0ff;
+}
+
+.popupLink:focus-visible {
+  outline: 2px solid #4daafc;
+  outline-offset: 2px;
+}
+
 /* 阶段34：弱化的元信息（如 OSM ID），放 Popup 最底部，不与主信息抢注意力。
    用户拍板：0.75rem + #888。数字等宽，便于逐位比对。 */
 .popupMeta {

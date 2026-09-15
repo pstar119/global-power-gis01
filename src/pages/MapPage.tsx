@@ -1,5 +1,9 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
 import Database from "@tauri-apps/plugin-sql";
+// 阶段47：把「数据来源」链接交给系统默认浏览器打开。
+// ⚠️ 这不是新增依赖：插件早已接线（lib.rs 已 init、capabilities 里的 opener:default
+//    已含 allow-open-url + allow-default-urls，npm 包也一直在 package.json 里）。
+import { openUrl } from "@tauri-apps/plugin-opener";
 // 阶段26：读取随安装包分发的离线底图。
 // convertFileSrc 把本地绝对路径转成 `asset://localhost/...`（实现了真正的 HTTP Range）；
 // resolveResource 把相对资源路径解析成绝对路径（随安装包分发的 $RESOURCE 目录）。
@@ -459,6 +463,8 @@ type PlantProperties = {
   year?: number | null;
   owner?: string | null;
   source?: string | null;
+  /** 阶段47：该条记录的原始出处链接（用于渲染可点击的「数据来源」） */
+  url?: string | null;
 };
 
 /** 变电站要素的属性。voltage 参与半径分级，缺失时为 0（落在 step 第一档）。 */
@@ -513,6 +519,21 @@ function formatLineKind(kind?: string): string {
 const MISSING = "--";
 
 /**
+ * 阶段47：只有 http/https 才允许变成可点击链接。
+ *
+ * `url` 来自外部数据集（WRI 的 CSV），**必须当作不可信输入**：
+ * 上游被污染或录入错误时可能混进 `javascript:` / `file:` 这类协议。
+ * Tauri 的 opener 插件本身有 `allow-default-urls` 兜底（只放行 mailto/tel/http/https），
+ * 但**在渲染层再挡一道** —— 这样即使将来为了别的功能放宽插件权限，
+ * 这里也不会变成一个漏洞。校验不过就退回纯文本，不报错、不丢字段。
+ */
+function safeSourceUrl(url: string | null | undefined): string | undefined {
+  if (!url) return undefined;
+  const trimmed = url.trim();
+  return /^https?:\/\//i.test(trimmed) ? trimmed : undefined;
+}
+
+/**
  * 用原生 DOM 构建 Popup 内容。
  *
  * ⚠️ 刻意**不用 `setHTML()`**：电厂名称来自外部数据集，拼 HTML 字符串会有
@@ -553,10 +574,16 @@ function buildPlantPopup(
         label: "坐标",
         value: point ? formatLngLat(point as [number, number]) : MISSING,
       },
+      // 阶段47：数据来源做成**可点击链接**（交给系统默认浏览器打开）。
+      // 专业 GIS 的溯源能力：看到一条数据要能一路点回原始出处。
+      // 这也正是 WRI 的 CC BY 4.0 署名要求落到界面上的形态。
+      // ⚠️ 取不到合法 URL 时只渲染纯文本，不会变成一个点不动的死链接。
+      {
+        label: "数据来源",
+        value: props.source || MISSING,
+        link: safeSourceUrl(props.url),
+      },
     ],
-    // 阶段46：溯源信息放最底部（与 OSM ID 同一层级），不与主信息抢注意力。
-    // 专业 GIS 里「这条数据哪来的」是刚需，也是 CC BY 4.0 署名的一部分。
-    props.source ? `数据来源 ${props.source}` : undefined,
   );
 }
 
@@ -645,8 +672,11 @@ function buildLinePopup(
     props.osm_id ? `OSM ID ${props.osm_id}` : undefined,
   );
 }
-/** Popup 的一行：标签 + 值，可选的色块用于与图例呼应 */
-type PopupRow = { label: string; value: string; swatch?: string };
+/**
+ * Popup 的一行：标签 + 值，可选的色块用于与图例呼应。
+ * 阶段47：新增 `link` —— 该行会渲染成一个可点击按钮，点击后交给系统浏览器打开。
+ */
+type PopupRow = { label: string; value: string; swatch?: string; link?: string };
 
 /**
  * 三种要素（电厂 / 变电站 / 输电线路）共用的 Popup 骨架。
@@ -678,7 +708,33 @@ function buildPopupFrame(
     dt.textContent = row.label;
 
     const dd = document.createElement("dd");
-    dd.textContent = row.value;
+
+    if (row.link) {
+      // 阶段47：可点击的溯源链接。
+      //
+      // ⚠️ 为什么用 <button> 而**不是** <a href>：
+      //    Tauri 的 WebView 里点 <a href="https://…"> 会让 **WebView 自己导航过去**
+      //    （整个窗口变成那个网页，应用等于挂了）。而这里要做的是「交给系统浏览器打开」
+      //    —— 那是一个**动作**，不是导航，所以语义上本来就该是 button。
+      //    正文只显示短名（避免长 URL 撑破弹窗），完整 URL 放进 title 供悬停查看。
+      const link = document.createElement("button");
+      link.type = "button";
+      link.className = styles.popupLink;
+      link.textContent = `${row.value} ↗`;
+      link.title = `在默认浏览器中打开：${row.link}`;
+      link.addEventListener("click", (ev) => {
+        // 阻断冒泡与默认行为：弹窗与地图同层，不阻断的话这次点击
+        // 会再触发一遍地图的 click 处理（弹窗被换成另一个要素）。
+        ev.preventDefault();
+        ev.stopPropagation();
+        void openUrl(row.link!).catch((err: unknown) => {
+          console.error("[MapPage] 打开来源链接失败", err);
+        });
+      });
+      dd.appendChild(link);
+    } else {
+      dd.textContent = row.value;
+    }
 
     if (row.swatch) {
       const swatch = document.createElement("span");
@@ -1004,7 +1060,7 @@ async function loadPlantsGeoJson(): Promise<FeatureCollection> {
   // 只取有坐标的记录：经纬度缺失的行无法在地图上定位
   const rows = (await db.select(
     "SELECT name, lat, lon, country, capacity_mw, primary_fuel, " +
-      "commissioning_year, owner, source FROM power_plants " +
+      "commissioning_year, owner, source, url FROM power_plants " +
       "WHERE lat IS NOT NULL AND lon IS NOT NULL",
   )) as Array<{
     name: string;
@@ -1017,6 +1073,7 @@ async function loadPlantsGeoJson(): Promise<FeatureCollection> {
     commissioning_year: number | null;
     owner: string | null;
     source: string | null;
+    url: string | null;
   }>;
 
   return {
@@ -1036,6 +1093,8 @@ async function loadPlantsGeoJson(): Promise<FeatureCollection> {
         year: r.commissioning_year,
         owner: r.owner,
         source: r.source,
+        // 阶段47：溯源链接（弹窗里的「数据来源」可点）
+        url: r.url,
       },
       geometry: { type: "Point", coordinates: [r.lon, r.lat] },
     })),
@@ -3797,43 +3856,26 @@ function MapPage({
           })}
         </div>
 
-        {/* 燃料类型图例：纯 DOM + CSS，色块颜色取自与地图同一份 FUEL_COLORS，
-            不引入任何图表 / 配色库。随图层面板一同折叠。 */}
-        <div className={styles.legend} hidden={!panelOpen}>
-          <p className={styles.legendTitle}>燃料类型</p>
-          <ul className={styles.legendList}>
-            {FUEL_LEGEND.map(([fuel, label]) => (
-              <li key={fuel} className={styles.legendItem}>
-                <span
-                  className={styles.legendSwatch}
-                  style={{ backgroundColor: fuelColor(fuel) }}
-                  aria-hidden="true"
-                />
-                {label}
-              </li>
-            ))}
-          </ul>
+        {/* 图例：纯 DOM + CSS，不引入任何图表 / 配色库。随图层面板一同折叠。
 
-          {/* 阶段21：电网基础设施的视觉约定。颜色与上面的图层开关、
-              以及 MapPage.tsx 顶部的 SUBSTATION_COLOR / LINE_COLOR 保持一致。 */}
-          <p className={styles.legendTitle}>基础设施</p>
+            ⚠️ 阶段47：这块图例被**两次**去重，目的都是消掉左面板的长滚动条
+               （实测：面板可视高度硬上限只有 609px，而去重前内容高达 1722px）。
+
+               1. 「燃料类型」（15 类、两列网格，约 300px）→ 删除。
+                  新的「数据看板」已完整呈现同样 15 类的色块 + 中文名，且信息更多
+                  （还带座数与容量）。同一屏维护两份一模一样的图例没有意义。
+               2. 「变电站 / 输电线路」（约 64px）→ 删除。
+                  这两项与上方图层开关左侧的色块**逐字节相同**
+                  （LAYER_SWATCH.变电站 === SUBSTATION_COLOR === "#3fd0c9"、
+                    LAYER_SWATCH.输电线路 === LINE_COLOR === "#8b96a8"），
+                  而 .layerList 的注释早就写明「让开关本身充当图例」——
+                  再列一遍就是纯重复。
+
+            只保留**不重复**的部分：查询高亮（图层开关里没有它）与下方的视觉约定说明。
+            去重后折叠态的溢出从 56px 降为负数 —— 面板不再需要滚动。 */}
+        <div className={styles.legend} hidden={!panelOpen}>
+          <p className={styles.legendTitle}>图例</p>
           <ul className={styles.legendList}>
-            <li className={styles.legendItem}>
-              <span
-                className={styles.legendSwatch}
-                style={{ backgroundColor: SUBSTATION_COLOR }}
-                aria-hidden="true"
-              />
-              变电站
-            </li>
-            <li className={styles.legendItem}>
-              <span
-                className={styles.legendLine}
-                style={{ backgroundColor: LINE_COLOR }}
-                aria-hidden="true"
-              />
-              输电线路
-            </li>
             <li className={styles.legendItem}>
               <span
                 className={styles.legendSwatch}

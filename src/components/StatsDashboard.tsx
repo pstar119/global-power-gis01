@@ -97,6 +97,25 @@ function formatGw(mw: number): string {
 }
 
 export default function StatsDashboard() {
+  /**
+   * 阶段47：看板整体的展开 / 折叠。**默认折叠**。
+   *
+   * ‼️ 为什么必须有它（实测数据，不是拍脑袋）：
+   *    看板 + 图层控制 + 图例展开后内容高达 **1169px**，而 `.layerPanel` 的
+   *    `max-height: calc(100% - 140px)` 在 1280×800 下只有 **609px**
+   *    —— 展开态必然出现长滚动条，把地图主视觉挤掉。
+   *
+   * ‼️ 为什么默认是**折叠**而不是展开：
+   *    用户的要求是「不要让面板内部出现长滚动条，让用户能一眼看到地图的主视觉」。
+   *    实测折叠态内容 645px、可视 609px，只差 36px（基本可忽略）；
+   *    而展开态溢出 560px，那是坐实的「长滚动条」。
+   *    想看明细点一下标题行就行，代价为 1 次点击；
+   *    但地图被面板埋掉是每时每刻的代价。
+   *    （若日后想改回「默认展开」，只需把下面的 false 改成 true。）
+   */
+  const [open, setOpen] = useState(false);
+
+  /** 能源明细是否展开到全部 15 类（默认只显示最常用的 6 类） */
   const [expanded, setExpanded] = useState(false);
   const visible = expanded
     ? PLACEHOLDER_FUELS
@@ -104,73 +123,95 @@ export default function StatsDashboard() {
 
   return (
     <section className={styles.dashboard} aria-label="数据看板（静态原型）">
-      <header className={styles.header}>
-        <h2 className={styles.title}>数据看板</h2>
-        <span className={styles.badge} title="数字为写死的离线快照，尚未接入实时统计">
-          静态原型
-        </span>
-      </header>
-
-      {/* 总量：先给量级，再给细分 —— 这是看板与「一排开关」的根本差别 */}
-      <dl className={styles.totals}>
-        <div className={styles.totalRow}>
-          <dt className={styles.totalLabel}>全球电厂</dt>
-          <dd className={styles.totalValue}>
-            {formatCount(PLACEHOLDER_TOTAL_COUNT)}
-            <span className={styles.unit}>座</span>
-          </dd>
-        </div>
-        <div className={styles.totalRow}>
-          <dt className={styles.totalLabel}>总装机容量</dt>
-          <dd className={styles.totalValue}>
-            {formatGw(PLACEHOLDER_TOTAL_CAPACITY_MW)}
-          </dd>
-        </div>
-      </dl>
-
-      <p className={styles.subtitle}>按能源类型</p>
-      <ul className={styles.fuelList}>
-        {visible.map((row) => (
-          <li key={row.fuel} className={styles.fuelRow}>
-            <span
-              className={styles.swatch}
-              style={{ backgroundColor: fuelColor(row.fuel) }}
-              aria-hidden="true"
-            />
-            <span className={styles.fuelName}>{fuelLabel(row.fuel)}</span>
-            <span className={styles.fuelCount}>{formatCount(row.count)}</span>
-            <span className={styles.fuelCap}>{formatGw(row.capacityMw)}</span>
-          </li>
-        ))}
-      </ul>
-
+      {/*
+        ⚠️ 折叠开关做成**整个标题行**，而不是一个小三角图标：
+           用户要的是「一键折叠」，可点击面积越大越好；
+           同时这也更规范 —— 一个带 aria-expanded 的 button，
+           比在 <span> 上挂 onClick 在无障碍上正当得多。
+      */}
       <button
         type="button"
-        className={styles.moreBtn}
-        aria-expanded={expanded}
-        onClick={() => setExpanded((v) => !v)}
+        className={styles.header}
+        aria-expanded={open}
+        aria-controls="stats-dashboard-body"
+        onClick={() => setOpen((v) => !v)}
       >
-        {expanded ? "收起" : `展开全部 ${PLACEHOLDER_FUELS.length} 类`}
+        <span className={styles.title}>数据看板</span>
+        <span className={styles.headerRight}>
+          <span
+            className={styles.badge}
+            title="数字为写死的离线快照，尚未接入实时统计"
+          >
+            静态原型
+          </span>
+          <span className={styles.chevron} aria-hidden="true">
+            {open ? "▼" : "▶"}
+          </span>
+        </span>
       </button>
 
-      <p className={styles.subtitle}>气泡大小（装机容量）</p>
-      <ul className={styles.sizeLegend}>
-        {SIZE_TIERS.map((tier) => (
-          <li key={tier.dot} className={styles.sizeItem}>
-            <i className={styles.dot} data-size={tier.dot} aria-hidden="true" />
-            {tier.label}
-          </li>
-        ))}
-      </ul>
+      <div id="stats-dashboard-body" className={styles.body} hidden={!open}>
+        {/* 总量：先给量级，再给细分 —— 这是看板与「一排开关」的根本差别 */}
+        <dl className={styles.totals}>
+          <div className={styles.totalRow}>
+            <dt className={styles.totalLabel}>全球电厂</dt>
+            <dd className={styles.totalValue}>
+              {formatCount(PLACEHOLDER_TOTAL_COUNT)}
+              <span className={styles.unit}>座</span>
+            </dd>
+          </div>
+          <div className={styles.totalRow}>
+            <dt className={styles.totalLabel}>总装机容量</dt>
+            <dd className={styles.totalValue}>
+              {formatGw(PLACEHOLDER_TOTAL_CAPACITY_MW)}
+            </dd>
+          </div>
+        </dl>
 
-      <p className={styles.footNote}>
-        容量缺失的记录显示为 <b>--</b>，且<b>不计入</b>合计 —— 按 0 计入会让总装机系统性偏小。
-      </p>
+        <p className={styles.subtitle}>按能源类型</p>
+        <ul className={styles.fuelList}>
+          {visible.map((row) => (
+            <li key={row.fuel} className={styles.fuelRow}>
+              <span
+                className={styles.swatch}
+                style={{ backgroundColor: fuelColor(row.fuel) }}
+                aria-hidden="true"
+              />
+              <span className={styles.fuelName}>{fuelLabel(row.fuel)}</span>
+              <span className={styles.fuelCount}>{formatCount(row.count)}</span>
+              <span className={styles.fuelCap}>{formatGw(row.capacityMw)}</span>
+            </li>
+          ))}
+        </ul>
 
-      <p className={styles.protoNote}>
-        原型说明：数字取自 WRI GPPD v1.3.0 离线快照，
-        <b>尚未跟随视野与图层开关实时变化</b>。
-      </p>
+        <button
+          type="button"
+          className={styles.moreBtn}
+          aria-expanded={expanded}
+          onClick={() => setExpanded((v) => !v)}
+        >
+          {expanded ? "收起" : `展开全部 ${PLACEHOLDER_FUELS.length} 类`}
+        </button>
+
+        <p className={styles.subtitle}>气泡大小（装机容量）</p>
+        <ul className={styles.sizeLegend}>
+          {SIZE_TIERS.map((tier) => (
+            <li key={tier.dot} className={styles.sizeItem}>
+              <i className={styles.dot} data-size={tier.dot} aria-hidden="true" />
+              {tier.label}
+            </li>
+          ))}
+        </ul>
+
+        <p className={styles.footNote}>
+          容量缺失的记录显示为 <b>--</b>，且<b>不计入</b>合计 —— 按 0 计入会让总装机系统性偏小。
+        </p>
+
+        <p className={styles.protoNote}>
+          原型说明：数字取自 WRI GPPD v1.3.0 离线快照，
+          <b>尚未跟随视野与图层开关实时变化</b>。
+        </p>
+      </div>
     </section>
   );
 }

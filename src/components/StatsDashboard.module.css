@@ -19,11 +19,58 @@
   font-size: 0.72rem;
 }
 
+/* 折叠开关。它是整个标题行（用户要「一键折叠」，可点击面积越大越好）。
+
+   ⚠️ 是 <button>，必须把默认外观彻底抹平，并**显式**写 :hover/:active ——
+   App.css 的 `button:hover` 是 (0,1,1)，优先级高于本类 (0,1,0)。 */
 .header {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
   gap: 0.5rem;
+  width: 100%;
+  padding: 0.1rem 0.2rem;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background-color: transparent;
+  box-shadow: none;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.header:hover,
+.header:active {
+  border-color: transparent;
+  background-color: var(--gpg-hover);
+  box-shadow: none;
+}
+
+.headerRight {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.chevron {
+  color: var(--gpg-muted);
+  font-size: 0.6rem;
+  line-height: 1;
+}
+
+/* 可折叠的主体。
+   ⚠️ 同 .layerList：作者样式 `display:flex` 会盖掉 UA 的 `[hidden]{display:none}`，
+      不补 `.body[hidden]` 则根本折不上。 */
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.body[hidden] {
+  display: none;
 }
 
 .title {
