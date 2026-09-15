@@ -2290,8 +2290,22 @@ function MapPage({
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
 
-  // 图层控制面板的展开 / 折叠
-  const [panelOpen, setPanelOpen] = useState(true);
+  /**
+   * 图层控制面板的展开 / 折叠。
+   *
+   * ‼️ 阶段47：**默认折叠**（用户拍板）。
+   *    理由：首次启动向导刚走完时，用户的注意力应当全在地图上，不该一上来就被
+   *    一长列图层开关占满视线；折叠态更「干净、不杂乱」。
+   *
+   *    实测收益（1280×800）：面板内可视高度约 695px，而展开时内容约 914px
+   *    ⇒ 原本**溢出 219px、必须内部滚动**。折叠后 `.layerGroups`（约 454px）与
+   *    同一开关控制的 `.legend`（约 88px）一起收起，内容降到约 372px ⇒ **不再滚动**。
+   *
+   *    ⚠️ 折叠**只隐藏内容，不删除任何东西**：分组标题（电力设施 / 基础设施 /
+   *       环境与底图）、按电压分级、按能源细分、图例与视觉约定说明全部原样保留，
+   *       展开后立刻回到原位。也**不改变任何图层的可见性**。
+   */
+  const [panelOpen, setPanelOpen] = useState(false);
 
   /** 阶段45：各分组的展开状态。默认只展开「电力设施」。 */
   const [openGroups, setOpenGroups] = useState<readonly string[]>(() =>
@@ -4100,7 +4114,16 @@ function MapPage({
           })}
         </div>
 
-        {/* 图例：纯 DOM + CSS，不引入任何图表 / 配色库。随图层面板一同折叠。
+        {/* 图例：纯 DOM + CSS，不引入任何图表 / 配色库。
+
+            ‼️ 阶段47：**刻意与「图层控制」开关解耦**（不再写 `hidden={!panelOpen}`）。
+               用户拍板「图层控制默认折叠」的同时又要求「视觉说明必须保留，它是
+               产品专业度的体现」—— 两者要同时成立，就不能共用一个开关：
+               共用的结果是折叠图层开关时连视觉约定一起消失。
+               解耦后首屏仍能看到查询高亮 + 口径说明，而一长列图层开关收起。
+
+               实测（1280×800）：折叠态面板 367px（溢出 0）→ 保留本块后 455px，
+               仍远低于可视高度 695px，**不会因此产生滚动条**。
 
             ⚠️ 阶段47：这块图例被**两次**去重，目的都是消掉左面板的长滚动条
                （实测：面板可视高度硬上限只有 609px，而去重前内容高达 1722px）。
@@ -4117,7 +4140,7 @@ function MapPage({
 
             只保留**不重复**的部分：查询高亮（图层开关里没有它）与下方的视觉约定说明。
             去重后折叠态的溢出从 56px 降为负数 —— 面板不再需要滚动。 */}
-        <div className={styles.legend} hidden={!panelOpen}>
+        <div className={styles.legend}>
           <p className={styles.legendTitle}>图例</p>
           <ul className={styles.legendList}>
             <li className={styles.legendItem}>
