@@ -45,6 +45,36 @@ use sha2::{Digest, Sha256};
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager};
 
+/// 构造带**显式 TLS provider** 的 Agent。
+///
+/// 🔴 这个函数存在的唯一原因是一个极易中招的陷阱（我用真机测试才撞到）：
+///
+/// `ureq` 的 `TlsProvider` 枚举默认值是 `Rustls`，而这个默认值
+/// **与启用哪些 feature 完全无关** —— 它的文档注释原文是：
+/// ```text
+/// Requires the feature flag **native-tls** and that using an Agent with this
+/// config option set in the TlsConfig.
+/// The setting is never picked up automatically.
+/// ```
+/// 也就是说：只写 `features = ["native-tls"]` 而**不显式设置 provider**，
+/// 运行时会走到「provider 是 Rustls，但 rustls feature 没启用」的校验分支，
+/// 直接 panic：
+/// ```text
+/// uri scheme is https, provider is Rustls but feature is not enabled: rustls
+/// ```
+/// ⚠️ 这个错误**只在真正发起 HTTPS 请求时**才暴露 —— 用 `http://` 的本地
+/// 测试服务器验证是**抓不到**的（我当时就是这么漏掉的）。
+/// 下面的 `tls_provider_is_native_tls` 测试就是为了把这个洞封死。
+fn build_agent() -> ureq::Agent {
+    let tls = ureq::tls::TlsConfig::builder()
+        .provider(ureq::tls::TlsProvider::NativeTls)
+        .build();
+    ureq::Agent::config_builder()
+        .tls_config(tls)
+        .build()
+        .into()
+}
+
 /// 每块读取大小。1 MB 在「系统调用次数」与「单次阻塞时长」之间取平衡。
 const CHUNK: usize = 1024 * 1024;
 
@@ -314,8 +344,10 @@ where
     progress(file, offset, total, true);
 
     if offset < req.bytes || req.bytes == 0 {
+        let agent = build_agent();
         let range = format!("bytes={offset}-");
-        let resp = ureq::get(&req.url)
+        let resp = agent
+            .get(&req.url)
             .header("Range", &range)
             .call()
             .map_err(|e| describe_ureq_error(&file, offset, e))?;
@@ -356,7 +388,8 @@ where
             offset = 0;
             hasher = Sha256::new();
             // 重下一次：这次不带 Range，等价于从 0 开始
-            let retry = ureq::get(&req.url)
+            let retry = build_agent()
+                .get(&req.url)
                 .call()
                 .map_err(|e| describe_ureq_error(file, 0, e))?;
             let st = retry.status().as_u16();
@@ -736,6 +769,90 @@ mod tests {
             assert!(err.starts_with("BAD_FILE_NAME"), "{bad} 的错误码应为 BAD_FILE_NAME，实际：{err}");
         }
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 🔴 回归防护：断言我们**显式**把 TLS provider 设成了 NativeTls。
+    ///
+    /// 这个断言存在的理由：ureq 的 `TlsProvider` 默认值是 `Rustls`，而该默认值
+    /// **不随 feature 变化**。只启用 `native-tls` feature 而不显式设置 provider，
+    /// 真正发 HTTPS 时会 panic（`provider is Rustls but feature is not enabled`）。
+    ///
+    /// ‼️ 这个断言能挡住「忘记显式设置」，但挡不住「设置错了后端」——
+    ///    那种只能靠下面的 HTTPS 冒烟测试。
+    #[test]
+    fn tls_provider_is_explicitly_native_tls() {
+        let agent = build_agent();
+        assert_eq!(
+            agent.config().tls_config().provider(),
+            ureq::tls::TlsProvider::NativeTls,
+            "必须显式设置 provider=NativeTls（ureq 默认是 Rustls，且不随 feature 变化）"
+        );
+    }
+
+    /// 真发一次 HTTPS。默认 `#[ignore]`，**手动执行**：
+    ///
+    /// ```text
+    /// cargo test --lib packs::tests::https_smoke -- --ignored --nocapture
+    /// ```
+    ///
+    /// ‼️ 为什么需要一个「真的联网」的测试：上面那条断言只证明**配置写对了**，
+    ///    证明不了 TLS 后端真能建立连接。而这个 bug 的症状恰好是
+    ///    **只在发起 HTTPS 请求时才暴露** —— 用 http:// 的本地服务器
+    ///    做端到端验证是抓不到的（我第一轮验证就是这么漏掉的）。
+    ///    默认 ignore 是为了不给 CI / 离线环境引入网络依赖。
+    #[test]
+    #[ignore = "需要外网；手动验证 TLS 后端是否真的能建立 HTTPS 连接"]
+    fn https_smoke_reaches_server() {
+        let agent = build_agent();
+        match agent.get("https://api.github.com/").call() {
+            Ok(r) => assert_eq!(r.status().as_u16(), 200, "GitHub API 应当返回 200"),
+            // 能拿到 HTTP 状态码本身就说明 TLS 握手已成功
+            Err(ureq::Error::StatusCode(code)) => {
+                assert!(code > 0, "收到 HTTP {code} 说明 TLS 已建立，仅状态码非 200");
+            }
+            Err(e) => panic!("HTTPS 请求失败（TLS 后端很可能没配置好）: {e:?}"),
+        }
+    }
+
+    /// 真·公网 HTTPS **且带 Range** 的冒烟（手动执行）：
+    ///
+    /// ```text
+    /// cargo test --lib packs::tests::public_https -- --ignored --nocapture
+    /// ```
+    ///
+    /// 🔴 这条测试补的是一个**具体的验证盲点**：我第一轮用本地 `http://` 服务器
+    /// 做端到端验证时，HTTPS 分支**从未被执行过**，所以 TLS 配置错误不可能被发现。
+    /// 本测试把「HTTPS + 206 + Content-Range 解析」这条真实组合固定下来。
+    ///
+    /// 用的资产已实测支持 Range（`Accept-Ranges: bytes`、响应 206）。
+    /// 只取前 100 字节，不下载整个文件。默认 `#[ignore]`，避免给 CI 引入外网依赖。
+    #[test]
+    #[ignore = "需要外网；手动验证 HTTPS + Range 的真实组合"]
+    fn public_https_range_download_works() {
+        const URL: &str = "https://github.com/protomaps/go-pmtiles/releases/download/v1.31.2/go-pmtiles-1.31.2_Darwin_arm64.zip";
+        let agent = build_agent();
+        let resp = agent
+            .get(URL)
+            .header("Range", "bytes=0-99")
+            .call()
+            .expect("公网 HTTPS + Range 请求失败（TLS 或重定向有问题）");
+
+        assert_eq!(
+            resp.status().as_u16(),
+            206,
+            "服务器应当返回 206 Partial Content（GitHub Release 资产支持 Range）"
+        );
+        let cr = resp
+            .headers()
+            .get("content-range")
+            .and_then(|v| v.to_str().ok())
+            .expect("响应应带 Content-Range");
+        assert_eq!(
+            parse_content_range_start(cr),
+            Some(0),
+            "Content-Range 起点应为 0，实际 {cr}"
+        );
+        println!("[packs] 公网 HTTPS + Range 冒烟通过：Content-Range={cr}");
     }
 }
 

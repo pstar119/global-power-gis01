@@ -22,6 +22,26 @@ import styles from "./PackManager.module.css";
 
 const MANIFEST_URL = "/packs_manifest.json";
 
+/**
+ * 开发/验证用的**运行时覆盖**。
+ *
+ * ❗ 为什么需要它：仅靠「改环境变量 + 重新生成清单」两步太容易漏掉一步。
+ *    这个变量在 `vite dev` 启动时就被注入，不需要重新生成任何文件：
+ *
+ * ```text
+ * $env:VITE_PACKS_BASE_URL = "http://127.0.0.1:8099"
+ * npm run tauri dev
+ * ```
+ *
+ * 它在界面上会显示为「来源：本地覆盖」，一看就知道生效了没有。
+ * （`PACKS_BASE_URL` 是**生成清单时**用的，用于正式部署换托管，两者不要混淆。）
+ */
+const VITE_BASE_URL = (() => {
+  const raw = import.meta.env.VITE_PACKS_BASE_URL as string | undefined;
+  const trimmed = raw?.trim().replace(/\/+$/, "");
+  return trimmed ? trimmed : null;
+})();
+
 interface PackEntry {
   key: string;
   label: string;
@@ -97,6 +117,22 @@ function PackManager() {
   const packs = manifest?.packs ?? [];
   const files = useMemo(() => packs.map((p) => p.file.split("/").pop() ?? ""), [packs]);
 
+  /** 实际生效的基址：本地覆盖优先，其次清单里的正式地址。 */
+  const effectiveBase = VITE_BASE_URL ?? manifest?.release?.baseUrl ?? null;
+  /**
+   * 某个包的下载地址。
+   * ‼️ 基址存在时**由基址重新拼**，而不是直接用清单里的 `downloadUrl` ——
+   *    否则本地覆盖对已经写死完整 URL 的条目无效。
+   */
+  const urlOf = useCallback(
+    (pack: PackEntry): string | null => {
+      const name = pack.file.split("/").pop() ?? "";
+      if (effectiveBase) return `${effectiveBase}/${name}`;
+      return pack.downloadUrl;
+    },
+    [effectiveBase],
+  );
+
   const refresh = useCallback(async (list: string[]) => {
     if (!list.length) return;
     try {
@@ -139,7 +175,8 @@ function PackManager() {
 
   const download = useCallback(
     async (pack: PackEntry, file: string) => {
-      if (!pack.downloadUrl || !pack.bytes) {
+      const url = urlOf(pack);
+      if (!url || !pack.bytes) {
         setErrors((p) => ({ ...p, [file]: "清单里缺少该包的下载地址或大小（本机没有对应文件）" }));
         setPhases((p) => ({ ...p, [file]: "error" }));
         return;
@@ -161,7 +198,7 @@ function PackManager() {
         await invoke("pack_download", {
           req: {
             file,
-            url: pack.downloadUrl,
+            url,
             sha256: pack.sha256 ?? "",
             bytes: pack.bytes,
           },
@@ -179,7 +216,7 @@ function PackManager() {
         await refresh([file]);
       }
     },
-    [refresh],
+    [refresh, urlOf],
   );
 
   const cancel = useCallback(async (file: string) => {
@@ -243,6 +280,7 @@ function PackManager() {
           const busy = phase === "downloading";
           const resumable = !st?.exists && (st?.partBytes ?? 0) > 0;
           const sizeText = pack.bytes ? mb(pack.bytes) : pack.sizeMb ? `${pack.sizeMb} MB` : "—";
+          const url = urlOf(pack);
 
           return (
             <li key={pack.key} className={styles.row}>
@@ -274,8 +312,8 @@ function PackManager() {
                     type="button"
                     className={styles.btn}
                     onClick={() => void download(pack, file)}
-                    disabled={!pack.downloadUrl}
-                    title={pack.downloadUrl ? pack.downloadUrl : "清单里没有该包的下载地址"}
+                    disabled={!url}
+                    title={url ?? "清单里没有该包的下载地址"}
                   >
                     {resumable || err ? "重试 / 续传" : "下载"}
                   </button>
@@ -308,7 +346,10 @@ function PackManager() {
       </ul>
 
       <p className={styles.note}>
-        下载地址来自 <code className={styles.code}>{manifest?.release?.baseUrl ?? "—"}</code>
+        下载地址：<code className={styles.code}>{effectiveBase ?? "—"}</code>
+        <span className={VITE_BASE_URL ? styles.badgePart : styles.badgeIdle}>
+          {VITE_BASE_URL ? "本地覆盖 VITE_PACKS_BASE_URL" : "来自清单 packs_manifest.json"}
+        </span>
       </p>
     </section>
   );
