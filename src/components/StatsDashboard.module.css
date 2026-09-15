@@ -1,0 +1,247 @@
+/* ==========================================================
+   阶段46 · 数据看板（静态原型）
+   ⚠️ 刻意复用现有面板的视觉语言：同一套边框 / 圆角 / 背景 / CSS 变量，
+      不引入任何设计系统或 UI 库。色块颜色也来自 lib/fuel.ts 的
+      FUEL_COLORS —— 与地图上的点**同一份**配色，永远不会脱节。
+   ========================================================== */
+
+.dashboard {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  /* 与 .panelToggle 的水平内边距对齐，视觉上属于面板的第一段 */
+  padding: 0 0.375rem 0.5rem;
+  /* 与下方「图层控制」开关之间拉一条分隔线：看板在上、图层开关在下，
+     层级关系一眼可见。 */
+  margin-bottom: 0.375rem;
+  border-bottom: 1px solid var(--gpg-border);
+  color: var(--gpg-text);
+  font-size: 0.72rem;
+}
+
+.header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.title {
+  margin: 0;
+  color: var(--gpg-muted);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+}
+
+/* 「静态原型」徽标：必须显眼 —— 一组看起来很真的数字若没有标注，
+   很容易被当成已完成的功能，后续验收就会失去意义。 */
+.badge {
+  flex: 0 0 auto;
+  padding: 0.05rem 0.3rem;
+  border: 1px solid rgba(77, 170, 252, 0.4);
+  border-radius: 3px;
+  background-color: rgba(77, 170, 252, 0.1);
+  color: #4daafc;
+  font-size: 0.6rem;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+
+/* ---------- 总量 ---------- */
+
+.totals {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  margin: 0;
+}
+
+.totalRow {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.totalLabel {
+  color: var(--gpg-muted);
+  font-size: 0.7rem;
+}
+
+/* ⚠️ <dd> 浏览器默认 margin-inline-start: 40px，不重置会整体右移 */
+.totalValue {
+  margin: 0;
+  color: #4daafc;
+  font-size: 0.92rem;
+  font-weight: 600;
+  /* 等宽数字：数值刷新时不会左右抖 */
+  font-variant-numeric: tabular-nums;
+}
+
+.unit {
+  margin-left: 0.15rem;
+  color: var(--gpg-muted);
+  font-size: 0.65rem;
+  font-weight: 400;
+}
+
+/* ---------- 分类 ---------- */
+
+.subtitle {
+  margin: 0;
+  color: var(--gpg-muted);
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+}
+
+.fuelList {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* 四列：色块 / 名称 / 座数 / 容量。
+   名称列用 minmax(0,1fr) —— 不加 minmax 的话长名称会把整行撑破，
+   因为 flex/grid 子项默认 min-width:auto 不肯收缩。 */
+.fuelRow {
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 0 0.375rem;
+  padding: 0.1rem 0.125rem;
+  border-radius: 3px;
+}
+
+.fuelRow:hover {
+  background-color: var(--gpg-hover);
+}
+
+.swatch {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+}
+
+.fuelName {
+  overflow: hidden;
+  color: var(--gpg-text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fuelCount {
+  color: var(--gpg-muted);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.fuelCap {
+  min-width: 4.4rem;
+  color: var(--gpg-text);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.moreBtn {
+  align-self: flex-start;
+  padding: 0.1rem 0.35rem;
+  border: 1px solid var(--gpg-border);
+  border-radius: 3px;
+  background-color: transparent;
+  box-shadow: none;
+  color: var(--gpg-muted);
+  font: inherit;
+  font-size: 0.65rem;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+/* ⚠️ 必须显式写 :hover/:active：App.css 的 `button:hover` 是 (0,1,1)，
+   优先级高于 `.moreBtn`(0,1,0)，不覆盖会冒出默认的高亮边框与阴影。
+   （同样的坑在 .panelToggle 上已经踩过一次。） */
+.moreBtn:hover,
+.moreBtn:active {
+  border-color: var(--gpg-border);
+  background-color: var(--gpg-hover);
+  box-shadow: none;
+  color: var(--gpg-text);
+}
+
+/* ---------- 容量分级图例 ---------- */
+
+/* 两列网格：12px 的点位 + 文本。
+   用 grid 而不是 flex 是为了让**不同大小的点居中在同一列**，
+   否则点越大标签越往右挤，四行文字对不齐。 */
+.sizeLegend {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.sizeItem {
+  display: grid;
+  grid-template-columns: 12px 1fr;
+  align-items: center;
+  gap: 0.375rem;
+  color: var(--gpg-muted);
+  font-size: 0.68rem;
+}
+
+.dot {
+  justify-self: center;
+  border-radius: 50%;
+  background-color: #4daafc;
+}
+
+.dot[data-size="xl"] {
+  width: 11px;
+  height: 11px;
+}
+
+.dot[data-size="lg"] {
+  width: 8px;
+  height: 8px;
+}
+
+.dot[data-size="md"] {
+  width: 6px;
+  height: 6px;
+}
+
+.dot[data-size="sm"] {
+  width: 4px;
+  height: 4px;
+}
+
+/* ---------- 脚注 ---------- */
+
+.footNote {
+  margin: 0;
+  color: var(--gpg-muted);
+  font-size: 0.65rem;
+  line-height: 1.35;
+}
+
+.protoNote {
+  margin: 0;
+  padding: 0.3rem 0.4rem;
+  border-left: 2px solid #4daafc;
+  background-color: rgba(77, 170, 252, 0.08);
+  color: var(--gpg-muted);
+  font-size: 0.65rem;
+  line-height: 1.35;
+}
+
+.footNote b,
+.protoNote b {
+  color: var(--gpg-text);
+  font-weight: 600;
+}

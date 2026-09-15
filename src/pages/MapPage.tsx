@@ -37,6 +37,7 @@ import {
   type ViewportBbox,
 } from "../lib/nlq";
 import MapQueryBox from "../components/MapQueryBox";
+import StatsDashboard from "../components/StatsDashboard";
 import styles from "./MapPage.module.css";
 
 /** 图层清单：纯 UI 占位，不含任何真实数据 */
@@ -450,6 +451,14 @@ type PlantProperties = {
   capacity: number | null;
   fuel: string | null;
   color: string;
+  /**
+   * 阶段46：由迁移 006 + 重新导入 WRI 提供的元数据。
+   * ⚠️ 全部为可选：老库（未重跑导入）里这几列是 NULL，
+   *    而且旧版的 GeoJSON 属性里根本没有这几个键。
+   */
+  year?: number | null;
+  owner?: string | null;
+  source?: string | null;
 };
 
 /** 变电站要素的属性。voltage 参与半径分级，缺失时为 0（落在 step 第一档）。 */
@@ -495,6 +504,15 @@ function formatLineKind(kind?: string): string {
 }
 
 /**
+ * 阶段46：字段缺失时的**统一**占位符。
+ *
+ * ⚠️ 为什么全应用只留一个常量：此前缺失值有三种写法（"未提供" / "未知" / 空串），
+ *    用户无法区分「数据源没填」与「我们渲染丢了」。统一成 "--" 后语义唯一：
+ *    **这个字段没有值**，且它不会被当成 0 参与任何求和。
+ */
+const MISSING = "--";
+
+/**
  * 用原生 DOM 构建 Popup 内容。
  *
  * ⚠️ 刻意**不用 `setHTML()`**：电厂名称来自外部数据集，拼 HTML 字符串会有
@@ -502,20 +520,44 @@ function formatLineKind(kind?: string): string {
  * ⚠️ 样式用 CSS Modules 的类名（它在运行时就是个字符串），因此 Popup 的
  *    外观与其它悬浮面板完全一致，不需要为它另写一套全局 CSS。
  */
-function buildPlantPopup(props: PlantProperties): HTMLElement {
-  return buildPopupFrame(props.name, "未命名电厂", [
-    { label: "国家/地区", value: props.country || "未知" },
-    {
-      label: "燃料类型",
-      value: props.fuel || "未知",
-      // 燃料那一行在文字前加一个与地图同色的色块，和图例形成呼应
-      swatch: props.fuel ? props.color : undefined,
-    },
-    {
-      label: "装机容量",
-      value: props.capacity == null ? "未提供" : `${props.capacity} MW`,
-    },
-  ]);
+function buildPlantPopup(
+  props: PlantProperties,
+  point?: readonly [number, number],
+): HTMLElement {
+  return buildPopupFrame(
+    props.name,
+    "未命名电厂",
+    [
+      { label: "国家/地区", value: props.country || MISSING },
+      {
+        label: "燃料类型",
+        value: props.fuel ? fuelLabel(props.fuel) : MISSING,
+        // 燃料那一行在文字前加一个与地图同色的色块，和图例形成呼应
+        swatch: props.fuel ? props.color : undefined,
+      },
+      {
+        label: "装机容量",
+        value: props.capacity == null ? MISSING : `${props.capacity} MW`,
+      },
+      // 阶段46：以下三行是本次新增的「多行详情」。
+      // ‼️ 年份与所有者由迁移 006 + 重跑导入提供；
+      //    尚未回填时一律显示 "--"，而**不是**「未知」或直接隐藏。
+      //    理由："--" 能分清「数据没填」与「我们没导入」；
+      //    兜底成「未知」会把后者伪装成前者，正是这次要修的 bug 的隐藏方式。
+      {
+        label: "投产年份",
+        value: props.year == null ? MISSING : `${props.year} 年`,
+      },
+      { label: "所有者", value: props.owner || MISSING },
+      {
+        label: "坐标",
+        value: point ? formatLngLat(point as [number, number]) : MISSING,
+      },
+    ],
+    // 阶段46：溯源信息放最底部（与 OSM ID 同一层级），不与主信息抢注意力。
+    // 专业 GIS 里「这条数据哪来的」是刚需，也是 CC BY 4.0 署名的一部分。
+    props.source ? `数据来源 ${props.source}` : undefined,
+  );
 }
 
 /** 变电站 Popup：名称 / 国家 / 电压等级 */
@@ -961,7 +1003,8 @@ async function loadPlantsGeoJson(): Promise<FeatureCollection> {
 
   // 只取有坐标的记录：经纬度缺失的行无法在地图上定位
   const rows = (await db.select(
-    "SELECT name, lat, lon, country, capacity_mw, primary_fuel FROM power_plants " +
+    "SELECT name, lat, lon, country, capacity_mw, primary_fuel, " +
+      "commissioning_year, owner, source FROM power_plants " +
       "WHERE lat IS NOT NULL AND lon IS NOT NULL",
   )) as Array<{
     name: string;
@@ -970,6 +1013,10 @@ async function loadPlantsGeoJson(): Promise<FeatureCollection> {
     country: string | null;
     capacity_mw: number | null;
     primary_fuel: string | null;
+    // 阶段46：迁移 006 新增的列。类型写成可空 —— 老库未重跑导入时全是 NULL
+    commissioning_year: number | null;
+    owner: string | null;
+    source: string | null;
   }>;
 
   return {
@@ -985,6 +1032,10 @@ async function loadPlantsGeoJson(): Promise<FeatureCollection> {
         // 颜色在这里算好写进属性，样式里直接用 ["get", "color"] 取。
         // 比在样式里堆一长串 match 表达式简单，且图例与 Popup 复用同一份映射。
         color: fuelColor(r.primary_fuel),
+        // 阶段46：新字段一并带进属性，供多行 Popup 使用
+        year: r.commissioning_year,
+        owner: r.owner,
+        source: r.source,
       },
       geometry: { type: "Point", coordinates: [r.lon, r.lat] },
     })),
@@ -2121,6 +2172,31 @@ function MapPage({
       prev.includes(id) ? prev.filter((g) => g !== id) : [...prev, id],
     );
 
+  /**
+   * 阶段46：「按能源细分」子菜单的展开状态（第三层）。
+   * 与 openGroups 同级但**故意不复用**：openGroups 管的是分组（第二层），
+   * 复用会让「收起分组」与「收起能源细分」互相牵连。
+   */
+  const [fuelMenuOpen, setFuelMenuOpen] = useState(false);
+
+  /**
+   * 阶段46 静态原型：能源细分的勾选状态（**纯本地视觉状态**）。
+   *
+   * ‼️ 它刻意**不驱动地图**。这不是偷懒，而是因为它目前做不对：
+   *    电厂走的是 cluster 数据源，聚合体的 point_count 是**数据源级**算好的，
+   *    在图层上加 filter 只能藏掉散点，聚合圆里的数字照样把被过滤的电站算进去
+   *    —— 结果会是「关掉煤电，聚合圆还写着 500」，比不做更让人困惑。
+   *    要真做对必须改数据源（重建 GeoJSON / 或在 SQL 层加 WHERE primary_fuel），
+   *    那属于阶段47 的范围。所以这里如实标为「原型」，绝不假装它能过滤。
+   */
+  const [protoFuels, setProtoFuels] = useState<readonly string[]>(() =>
+    FUEL_LEGEND.map(([fuel]) => fuel),
+  );
+  const toggleProtoFuel = (fuel: string) =>
+    setProtoFuels((prev) =>
+      prev.includes(fuel) ? prev.filter((f) => f !== fuel) : [...prev, fuel],
+    );
+
   /** 阶段33：AI 工作台展开 / 折叠。展开时把左侧的图层控制与视野统计面板右推，避免抢空间 */
   const [benchOpen, setBenchOpen] = useState(true);
 
@@ -2876,7 +2952,10 @@ function MapPage({
                 popup
                   .setLngLat(point.slice() as [number, number])
                   .setDOMContent(
-                    buildPlantPopup(feature.properties as PlantProperties),
+                    buildPlantPopup(
+                      feature.properties as PlantProperties,
+                      point,
+                    ),
                   )
                   .addTo(map);
               });
@@ -3533,7 +3612,11 @@ function MapPage({
       />
 
       {/* 左上角：图层控制 */}
-      <section className={styles.layerPanel} aria-label="图层控制">
+      <section className={styles.layerPanel} aria-label="数据看板与图层控制">
+        {/* 阶段46：数据看板（静态原型）—— 放在面板最上方，优先于图层开关。
+            用户先看到「有多少、装了多少」，再决定开哪些图层。 */}
+        <StatsDashboard />
+
         <button
           type="button"
           className={styles.panelToggle}
@@ -3622,6 +3705,53 @@ function MapPage({
                                   aria-hidden="true"
                                 />
                                 {TIER_LABEL[tier.vclass] ?? tier.vclass}
+                              </label>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+
+                      {/* 阶段46：第三层折叠 —— 按能源细分。
+                          同一套样式（.tierGroup / .tierItem / .tierCheck）
+                          构成第三层，靠**缩进**而不是新分隔线区分层级。
+                          ⚠️ 静态原型：勾选暂不影响地图渲染，原因见 protoFuels 的注释。 */}
+                      <div className={styles.tierGroup}>
+                        <button
+                          type="button"
+                          className={styles.subHeader}
+                          aria-expanded={fuelMenuOpen}
+                          aria-controls="fuel-sub-menu"
+                          onClick={() => setFuelMenuOpen((v) => !v)}
+                        >
+                          <span>
+                            按能源细分
+                            <span className={styles.protoTag}>原型</span>
+                          </span>
+                          <span className={styles.chevron} aria-hidden="true">
+                            {fuelMenuOpen ? "▼" : "▶"}
+                          </span>
+                        </button>
+
+                        <ul
+                          id="fuel-sub-menu"
+                          className={`${styles.tierList} ${styles.subList}`}
+                          hidden={!fuelMenuOpen}
+                        >
+                          {FUEL_LEGEND.map(([fuel, label]) => (
+                            <li key={fuel}>
+                              <label className={styles.tierItem}>
+                                <input
+                                  type="checkbox"
+                                  className={styles.tierCheck}
+                                  checked={protoFuels.includes(fuel)}
+                                  onChange={() => toggleProtoFuel(fuel)}
+                                />
+                                <span
+                                  className={styles.layerSwatch}
+                                  style={{ background: fuelColor(fuel) }}
+                                  aria-hidden="true"
+                                />
+                                {label}
                               </label>
                             </li>
                           ))}

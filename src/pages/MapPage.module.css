@@ -197,6 +197,66 @@
   list-style: none;
 }
 
+/* 同上：`.tierList{display:flex}` 是作者样式，会盖掉 UA 的 [hidden]{display:none}。
+   阶段46 的「按能源细分」用 hidden 控制展开，漏了这条就根本折不上。 */
+.tierList[hidden] {
+  display: none;
+}
+
+/* ---------- 阶段46：第三层折叠（按能源细分） ---------- */
+
+/* 与 .groupHeader 同为折叠开关，但低一层：字号更小、无背景，
+   层级差异靠缩进与字重表达，而不是再加一个看起来同级的标题。 */
+.subHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.2rem 0.5rem;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background-color: transparent;
+  box-shadow: none;
+  color: var(--gpg-muted);
+  font: inherit;
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+/* ⚠️ 同 .panelToggle：App.css 的 `button:hover` 是 (0,1,1)，
+   优先级高于本类 (0,1,0)，不显式覆盖会冒出默认高亮边框与阴影。 */
+.subHeader:hover,
+.subHeader:active {
+  border-color: transparent;
+  background-color: var(--gpg-hover);
+  box-shadow: none;
+  color: var(--gpg-text);
+}
+
+/* 「原型」小标记：明确告知这一层还不生效，
+   避免被当成已完成的过滤器而被误验收。 */
+.protoTag {
+  margin-left: 0.35rem;
+  padding: 0 0.25rem;
+  border: 1px solid rgba(77, 170, 252, 0.4);
+  border-radius: 3px;
+  background-color: rgba(77, 170, 252, 0.1);
+  color: #4daafc;
+  font-size: 0.58rem;
+  font-weight: 400;
+  letter-spacing: 0;
+}
+
+/* 第三层缩进：层级关系靠缩进表达，不多加一条分隔线 */
+.subList {
+  padding-left: 0.75rem;
+}
+
 .tierItem {
   display: flex;
   align-items: center;

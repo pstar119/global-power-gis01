@@ -108,6 +108,18 @@ fn migrations() -> Vec<Migration> {
             sql: include_str!("../migrations/005_index_plants_latlon.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 6,
+            description: "add_plant_metadata",
+            // 阶段46：补回 WRI 里本就有、但导入脚本一直丢弃的 4 个字段
+            // （commissioning_year / owner / source / url）。
+            // 纯 ADD COLUMN：SQLite 只改元数据不重写行，对现有数据零风险。
+            // ⚠️ 新列在**已有**记录上全是 NULL —— 必须重跑
+            //    `python scripts/import_wri_plants.py --apply` 才会有值。
+            //    旧 seed 库同理：列会自动加上，但值要等重新生成 seed 才有。
+            sql: include_str!("../migrations/006_add_plant_metadata.sql"),
+            kind: MigrationKind::Up,
+        },
     ]
 }
 

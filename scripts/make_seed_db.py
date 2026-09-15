@@ -11,9 +11,14 @@ import os
 import sqlite3
 import sys
 
-SRC = os.path.join(
-    os.environ["APPDATA"], "com.yourname.globalpowergis", "global_power_gis.db"
-)
+# ⚠️ 与 import_wri_plants.py 共用同一个真相源（app_paths 读 tauri.conf.json）。
+#    这里曾经硬编码 "com.yourname.globalpowergis"，而真实 identifier 是
+#    "com.pstar119.globalpowergis" —— 后果是会把一个**空库或过期库**
+#    当成种子打包进安装包，且脚本自检（表 + 行数 + 抽查）全部通过。
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from app_paths import app_db_path  # noqa: E402
+
+SRC = str(app_db_path())
 DST = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "..",
