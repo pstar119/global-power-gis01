@@ -113,6 +113,16 @@ const DEFAULTS = {
   maxFeaturesPerTile: 0,
   /** 只对低于该级别的瓦片做封顶（高级别本来就一张瓦片几个要素） */
   capBelowZoom: 8,
+  /**
+   * 阶段50：低缩放级别把 tags **收敛到哪几个字段**（默认就是 OSM 那套）。
+   *
+   * 🔴 为什么要做成可配置：下面那段收敛原本写死成 `{ftype, vclass}`，
+   *    而 GEM 电厂数据**根本没有这两个字段** —— 一旦沿用，低缩放级别所有属性会被清空，
+   *    前端的 `["match", ["get","plant_type"], …]` 会全部落到兑底色。
+   *    这种 bug 在小缩放下才现形，很容易漏掉。
+   * ⚠️ 默认值与改动前**完全一致** ⇒ 现有 OSM 归档逐字节不变。
+   */
+  collapseProps: ["ftype", "vclass"],
   estimateOnly: false,
 };
 
@@ -136,6 +146,8 @@ function parseArgs(argv) {
     else if (a === "--no-names") cfg.keepNames = false;
     else if (a === "--max-features-per-tile") cfg.maxFeaturesPerTile = Number(next());
     else if (a === "--cap-below-zoom") cfg.capBelowZoom = Number(next());
+    else if (a === "--keep-props") cfg.keepProps = next().split(",").map((s) => s.trim()).filter(Boolean);
+    else if (a === "--collapse-props") cfg.collapseProps = next().split(",").map((s) => s.trim()).filter(Boolean);
     else if (a === "--estimate-only") cfg.estimateOnly = true;
     else if (a === "-h" || a === "--help") {
       console.log(
@@ -156,6 +168,8 @@ function parseArgs(argv) {
           "  --no-names           丢弃 name 属性以减小体积",
           "  --max-features-per-tile <n>  低级别单瓦片要素数封顶（默认 0 = 不封顶）",
           "  --cap-below-zoom <n> 只对低于该级别的瓦片封顶（默认 8）",
+          "  --keep-props <csv>   属性白名单（默认 OSM 那 10 项）",
+          "  --collapse-props <csv>  低级别收敛到哪几个字段（默认 ftype,vclass）",
           "  --estimate-only      只统计瓦片数与体积，不写文件",
         ].join("\n"),
       );
@@ -190,11 +204,16 @@ const VCLASS_RANK = { "735+": 0, "500-734": 1, "220-499": 2, "<220": 3, unknown:
 const FTYPE_RANK = { plant: 0, substation: 1, line: 2 };
 
 /**
- * 低级别瓦片抽稀：**按电压由高到低**优先保留。
+ * 低级别瓦片抽稀：**有电压/类型字段时按电压由高到低优先保留**。
  *
  * 为什么按电压而不是随机/等距抽：低级别看到的是电网**骨架**。
  * 抽掉 10kV 支线不影响观感，抽掉 ±800kV 直流就丢掉主线了。
- * 用「稳定排序 + 原始序号兜底」，保证同一份输入每次切出的瓦片完全一致（可重现）。
+ * 用「稳定排序 + 原始序号兵底」，保证同一份输入每次切出的瓦片完全一致（可重现）。
+ *
+ * ⚠️ 阶段50：**非 OSM 数据没有 `vclass` / `ftype`**（如 GEM 电厂点），
+ *    此时所有要素的 key 都相同，排序退化为 `a.i - b.i` ——
+ *    也就是「**按源数据顺序保留前 cap 个**」。这是预期行为，不是 bug，
+ *    但日志里不能再说「按电压保留」（那会让人以为有优先级，白排查）。
  */
 function pickForLowZoom(features, cap) {
   const ranked = features.map((f, i) => {
@@ -372,7 +391,14 @@ async function main() {
           //       华东可选包（封顶，铁路在 z<8 已被 pickForLowZoom 丢光）看不出问题 ——
           //       这正是这个 bug 前面几轮没被发现的原因。
           //    修法：只在 vclass 真实存在时才写这个键。
-          f.tags = "vclass" in t ? { ftype: t.ftype, vclass: t.vclass } : { ftype: t.ftype };
+          // 阶段50：收敛哪些字段改为可配置。
+          // ⚠️ 只写**确实存在**的键（与原写法的 `"vclass" in t ? … : …` 语义一致），
+          //    否则会写出一条空值消息（vt-pbf 的 writeValue 三个分支都不匹配）。
+          const collapsed = {};
+          for (const k of cfg.collapseProps) {
+            if (k in t) collapsed[k] = t[k];
+          }
+          f.tags = collapsed;
         }
       }
       // 🔴 必须显式指定 version: 2。
@@ -412,7 +438,8 @@ async function main() {
   if (cfg.maxFeaturesPerTile > 0) {
     console.log(
       `  低级别封顶 : ${cappedTiles.toLocaleString()} 张瓦片被截断，共丢弃 ${droppedFeatures.toLocaleString()} 个要素` +
-        `（上限 ${cfg.maxFeaturesPerTile.toLocaleString()}/瓦片，仅 z<${cfg.capBelowZoom}；按电压由高到低保留）`,
+        `（上限 ${cfg.maxFeaturesPerTile.toLocaleString()}/瓦片，仅 z<${cfg.capBelowZoom}；` +
+        `有 vclass/ftype 时按电压由高到低保留，否则按源数据顺序保留前 ${cfg.maxFeaturesPerTile.toLocaleString()} 个）`,
     );
   }
   console.log(
