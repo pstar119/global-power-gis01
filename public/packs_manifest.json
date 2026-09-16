@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-09-15T14:59:18.581Z",
+  "generatedAt": "2026-09-16T16:01:40.161Z",
   "generatedBy": "scripts/gen_packs_manifest.mjs",
   "note": "区域数据包元信息清单。pack 是否已安装需在运行时用 127 字节 Range 探测判定，本文件只描述「有哪些包、覆盖哪里」。",
   "release": {
@@ -20,6 +20,7 @@
   "packs": [
     {
       "key": "huadong",
+      "kind": "region",
       "label": "华东",
       "provinces": "沪苏浙皖闽赣鲁（含粤北、湘南邻界带）",
       "bbox": [
@@ -39,6 +40,7 @@
     },
     {
       "key": "huazhong",
+      "kind": "region",
       "label": "华中",
       "provinces": "豫鄂湘",
       "bbox": [
@@ -58,6 +60,7 @@
     },
     {
       "key": "huanan",
+      "kind": "region",
       "label": "华南",
       "provinces": "粤桂琼港澳台",
       "bbox": [
@@ -77,6 +80,7 @@
     },
     {
       "key": "huabei",
+      "kind": "region",
       "label": "华北",
       "provinces": "京津冀晋",
       "bbox": [
@@ -96,6 +100,7 @@
     },
     {
       "key": "dongbei",
+      "kind": "region",
       "label": "东北",
       "provinces": "辽吉黑",
       "bbox": [
@@ -115,6 +120,7 @@
     },
     {
       "key": "xinan",
+      "kind": "region",
       "label": "西南",
       "provinces": "川渝云贵藏",
       "bbox": [
@@ -134,6 +140,7 @@
     },
     {
       "key": "xibei",
+      "kind": "region",
       "label": "西北",
       "provinces": "陕甘青宁新（含内蒙西部）",
       "bbox": [
@@ -150,6 +157,24 @@
       "downloadUrl": "https://gh-proxy.com/https://github.com/pstar119/global-power-gis01/releases/download/v1.0-packs/osm-xibei.pmtiles",
       "sha256": "26df1b9e759b627e7166fae13fcbd5e9097a9a3721ea13fedd975bb3cb6ed0c2",
       "bytes": 30857329
+    },
+    {
+      "key": "gem",
+      "kind": "gem",
+      "label": "GEM Plants",
+      "provinces": "全球",
+      "file": "packs/gem-plants.pmtiles",
+      "bbox": [
+        -180,
+        -85,
+        180,
+        85
+      ],
+      "features": null,
+      "sizeMb": 7.07,
+      "sha256": "6dfca250fa6958aede2930162eb0483d2e44779d718b65d6330687aee99b99d6",
+      "bytes": 7414329,
+      "downloadUrl": "https://gh-proxy.com/https://github.com/pstar119/global-power-gis01/releases/download/v1.0-packs/gem-plants.pmtiles"
     }
   ]
 }

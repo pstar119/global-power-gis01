@@ -146,6 +146,36 @@ pub fn packs_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+/// 阶段50-B.1：**解析某个包实际可用的绝对路径**（带命中顺序）。
+///
+/// 查找顺序（与前端 `MapPage` 的 `candidatePaths()` **必须一致**）：
+///   1. `app_data_dir/packs/<file>` —— 用户下载下来的（**可能是更新的版本**）
+///   2. `$RESOURCE/packs/<file>`    —— 随安装包分发、或用 `install_packs.mjs` 手动投放的
+///
+/// ‼️ 为什么 `pack_status` 必须也查第 2 处：
+///    它原先只看第 1 处，于是出现一个自相矛盾的状态 ——
+///    「文件明明在 `$RESOURCE/packs/` 里、地图也画得出来，设置页却显示『未下载』」。
+///    用户会据此去点下载，重复下一份（或干脆下载失败），而他并不需要那份。
+///    这类 UI 与真实能力不一致的问题，不会报任何错，只是让人不信任界面。
+///
+/// ⚠️ 顺序不能反：用户目录在前，因为那里的可能是**新版本**；
+///    若反过来，手动投放的旧副本会把已下载的新副本遮蔽掉。
+fn resolve_pack_resource(app: &AppHandle, file: &str) -> Option<PathBuf> {
+    if let Ok(dir) = packs_dir(app) {
+        let p = dir.join(file);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    if let Ok(dir) = app.path().resource_dir() {
+        let p = dir.join(PACKS_SUBDIR).join(file);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    None
+}
+
 /// 把 `file` 规范化成**安全的纯文件名**。
 ///
 /// 前端传来的字符串会直接参与路径拼接，必须挡住 `..\`、`/`、盘符等，
@@ -215,14 +245,25 @@ pub fn pack_dir(app: AppHandle) -> Result<String, String> {
 }
 
 /// 查询若干包的落盘状态（正式文件 + 未完成的 `.part`）。
+///
+/// ‼️ 阶段50-B.1：`exists` 取**统一解析器** `resolve_pack_resource()` 的结果，
+///    即用户目录与 `$RESOURCE/packs/` 两处都算“已安装”，
+///    与地图侧 `candidatePaths()` 的判定口径保持一致。
+///    在此之前只查用户目录，导致手动投放/随包分发的数据包在地图上能用、
+///    在设置页却显示“未下载”。
 #[tauri::command]
 pub fn pack_status(app: AppHandle, files: Vec<String>) -> Result<Vec<PackFileStatus>, String> {
-    let dir = packs_dir(&app)?;
+    let user_dir = packs_dir(&app)?;
     let mut out = Vec::with_capacity(files.len());
     for file in files {
         let file = safe_file_name(&file)?;
-        let bytes = fs::metadata(dir.join(&file)).map(|m| m.len()).unwrap_or(0);
-        let part_bytes = fs::metadata(dir.join(format!("{file}{PART_SUFFIX}")))
+        // ‼️ 两处都查，顺序：用户目录 → resource 目录
+        let bytes = resolve_pack_resource(&app, &file)
+            .and_then(|p| fs::metadata(p).ok())
+            .map(|m| m.len())
+            .unwrap_or(0);
+        // `.part` 只可能出现在**用户目录**（那是唯一的下载落点），不查 resource
+        let part_bytes = fs::metadata(user_dir.join(format!("{file}{PART_SUFFIX}")))
             .map(|m| m.len())
             .unwrap_or(0);
         out.push(PackFileStatus {
@@ -236,18 +277,37 @@ pub fn pack_status(app: AppHandle, files: Vec<String>) -> Result<Vec<PackFileSta
 }
 
 /// 删除一个**已下载**的包（含残留的 `.part`）。
+///
+/// ‼️ 阶段50-B.2：正式文件改用统一解析器 `resolve_pack_resource()` 定位，
+///    与 `pack_status` / 前端 `candidatePaths()` 口径一致。
 #[tauri::command]
 pub fn pack_remove(app: AppHandle, file: String) -> Result<(), String> {
     let file = safe_file_name(&file)?;
     if is_in_flight(&file) {
         return Err(format!("BUSY: {file} 正在下载中，请先取消"));
     }
-    let dir = packs_dir(&app)?;
-    for name in [file.clone(), format!("{file}{PART_SUFFIX}")] {
-        let p = dir.join(&name);
-        if p.exists() {
-            fs::remove_file(&p).map_err(|e| format!("IO_ERROR: 无法删除 {p:?}: {e}"))?;
-        }
+    let user_dir = packs_dir(&app)?;
+
+    // ‼️ 为什么不能只删 `packs_dir()`：那样会出现
+    //    「包在 `$RESOURCE/packs/` 里 → `pack_status` 说已安装 → 点删除没反应
+    //      → UI 永远显示已安装」，状态与操作的口径又分叉。
+    // ⚠️ `$RESOURCE/packs/` 可能是**只读**的（装到 `C:\Program Files` 时必然如此）。
+    //    那种情况必须**报错**，不能假装成功 —— 假装成功会让 UI 显示“已删除”，
+    //    而文件还在，下一次 `pack_status` 又把它标回已安装，
+    //    用户看到的是“删了又自己回来了”，比直接报错更难理解。
+    if let Some(path) = resolve_pack_resource(&app, &file) {
+        fs::remove_file(&path).map_err(|e| {
+            format!(
+                "IO_ERROR: 无法删除 {}: {e}（若该文件在安装目录里，可能为只读）",
+                path.display()
+            )
+        })?;
+    }
+    // `.part` 只可能出现在**用户目录**（那是唯一的下载落点），不查 resource
+    let part = user_dir.join(format!("{file}{PART_SUFFIX}"));
+    if part.exists() {
+        fs::remove_file(&part)
+            .map_err(|e| format!("IO_ERROR: 无法删除 {}: {e}", part.display()))?;
     }
     Ok(())
 }

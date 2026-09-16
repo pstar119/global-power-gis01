@@ -153,6 +153,28 @@ fn migrations() -> Vec<Migration> {
             sql: include_str!("../migrations/008_add_gem_coal_plants.sql"),
             kind: MigrationKind::Up,
         },
+        // 阶段50-C.3-C：**已启用**（原本这里是一整段被注释的注册）。
+        //
+        //   启用条件写在这里，现已满足 —— 50-C.0 ~ 50-C.3-A 已把 GEM 完全切到
+        //   gem-plants.pmtiles 数据包：
+        //     · `gem_coal_plants` 在 `src/` 里 **0 命中**
+        //     · `sqlite_master` 在前端 **0 命中**（不存在枚举表的泛化路径）
+        //     · 前端全部 SQL 只查 power_plants / substations / transmission_lines
+        //     · `loadGem*` 只剩注释，加载函数已删除
+        //   ⇒「表已删、前端还在查它」那种静默失败（走 catch 分支、不报错、更难查）
+        //     不会再发生。
+        //
+        //   ⚠️ 上线后**不能撤**：sqlx 的 `ignore_missing` 默认为 false，
+        //      「库里有 v9、列表里没有 v9」会让 `pool.migrate()` 直接返回 Err，
+        //      连连接池都不会注册（完整机制见 `migrations()` 上方的 v3 说明）。
+        //   ⚠️ 009 从未被应用过（两个库都停在 v8），所以本次修改它的 SQL 内容
+        //      不会触发 checksum 校验 —— 只有**已应用**的迁移才比对 checksum。
+        Migration {
+            version: 9,
+            description: "drop_gem_coal_plants",
+            sql: include_str!("../migrations/009_drop_gem_coal_plants.sql"),
+            kind: MigrationKind::Up,
+        },
     ]
 }
 

@@ -10,7 +10,7 @@
  */
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { REGIONS, gridFor } from "./pipeline_regions.mjs";
@@ -119,7 +119,13 @@ function main() {
   /** 沿用了旧指纹的包，用于最后统一告警 */
   const carried = [];
 
-  const packs = REGIONS.map((r) => {
+  /**
+   * ---- 区域包（kind="region"）----
+   * ‼️ 阶段50-B：这里只装**区域包**。thematic / global overlay（GEM）走下面的
+   *    独立分支，绝不混进本数组 —— 两类包的挂载生命周期不同（见 MapPage 的
+   *    `isThematicOverlay`），混在一起会让下游分不清该用哪套逻辑。
+   */
+  const regionPacks = REGIONS.map((r) => {
     const rec = report?.regions?.[r.key];
     const { cols, rows } = gridFor(r);
     const assetName = `osm-${r.key}.pmtiles`;
@@ -135,6 +141,9 @@ function main() {
 
     return {
       key: r.key,
+      // 阶段50-B：显式写出品类，让清单自描述。缺省也能被下游当作 region 处理，
+      // 但显式写出来才能让人一眼看出这两类包是同级的、不是“一个特例”。
+      kind: "region",
       label: r.label,
       provinces: r.provinces,
       bbox: r.bbox,
@@ -165,7 +174,7 @@ function main() {
    * ⚠️ 校验要精确到「拼接处」那一个字符，不能用“URL 里不能出现 //”这种糙判据：
    *    镜像形式的基址**本身就含** `https://`（即 `//`），那样会误报。
    */
-  const sample = packs.find((p) => p.downloadUrl);
+  const sample = regionPacks.find((p) => p.downloadUrl);
   if (sample) {
     const assetName = sample.file.split("/").pop();
     const url = sample.downloadUrl;
@@ -215,6 +224,74 @@ function main() {
     console.log(`\n下载地址自检 : ✅ 通过\n   ${url}`);
   }
 
+  /**
+   * ---- thematic / global overlay（kind="gem"）----
+   *
+   * ‼️ 与上面的 `regionPacks` **不是同一类东西**：
+   *    · `kind: "region"` —— 某区域的电网线/面要素，**按视口 bbox 选举**挂载
+   *    · `kind: "gem"`    —— 全球电厂点要素，由图层开关控制，
+   *                          **不参与视口选举**（见 MapPage 的 isThematicOverlay）
+   *    两者归档内的 MVT 图层名也不同（`grid` 对 `gem`），混用会取到不存在的 source-layer，
+   *    而那个失败是**静默的**（MapLibre 只是什么都不画）。
+   *
+   * ‼️ `file` **必须带 `packs/` 前缀**。这不是命名风格问题：
+   *    MapPage 的 `candidatePaths()` 只在 `resource.startsWith("packs/")` 时才把
+   *    **用户下载目录**（`%APPDATA%\...\packs\`）放进候选列表。
+   *    漏掉前缀 ⇒ 下载完成后永远探测不到，症状是「设置页显示已下载、地图上什么都没有」。
+   *    前缀同时也是「扫描 `$RESOURCE/packs/`」的开关 —— 正式资源路径就落在这里。
+   *
+   * ‼️ `key` 用 `"gem"`，**不从文件名推**。文件名是 `gem-plants.pmtiles`，
+   *    而 `packKeyFromFile()` 只能推出 `"gem-plants"` —— 两者对不上。
+   *    所以约定：**GEM 一律以清单的 `entry.key` 为准**，事件里的 basename
+   *    只用来反查是哪一个条目（见 MapPage 的 onPackInstalled）。
+   *
+   * ⚠️ `features` 留 null：数字来自舞台外的抓取步骤，写死会漂移，而它只用于一句提示文案。
+   * ⚠️ 包不存在时**不写这条**并大声告警，而不是写一条 sha256=null 的废条目
+   *    （那种条目前端拿不到校验和，用户下载必然失败且看不出原因）。
+   */
+  const thematicPacks = [];
+  /**
+   * 阶段50-B.1：GEM 是 **downloadable thematic pack**，**不进安装包**。
+   * 所以它的正式产物与区域包**同目录**：`data/packs/gem-plants.pmtiles`。
+   *
+   * ‼️ 这里曾经优先去读 `src-tauri/resources/packs/` —— 那是在 GEM 还打算
+   *    随安装包分发时的写法。现在那样做反而是错的：
+   *    · 安装包 46.5 → ~52 MB，超预算（这就是改回可下载的原因）
+   *    · 两份同时存在时，指纹会取自其中一份，而实际分发的是另一份 ⇒
+   *      SHA256 对不上，用户下载必然 CHECKSUM_MISMATCH 且不明所以
+   *    ⇒ 只认一个路径，从源头上消除“两份产物不一致”的可能。
+   */
+  const gemFile = join(ROOT, "data", "packs", "gem-plants.pmtiles");
+  if (existsSync(gemFile)) {
+    const buf = readFileSync(gemFile);
+    thematicPacks.push({
+      key: "gem",
+      kind: "gem",
+      label: "GEM Plants",
+      provinces: "全球",
+      file: "packs/gem-plants.pmtiles",
+      bbox: [-180, -85, 180, 85],
+      features: null,
+      sizeMb: Number((buf.length / 1024 / 1024).toFixed(2)),
+      sha256: createHash("sha256").update(buf).digest("hex"),
+      bytes: buf.length,
+      downloadUrl: `${BASE_URL}/gem-plants.pmtiles`,
+    });
+    console.log(
+      `\nthematic 包 : key=gem  kind=gem  label="GEM Plants"  ` +
+        `${(buf.length / 1024 / 1024).toFixed(2)} MB\n` +
+        `              file=packs/gem-plants.pmtiles（可下载，不进安装包，不参与视口选举）\n` +
+        `              指纹取自 ${relative(ROOT, gemFile)}`,
+    );
+  } else {
+    console.warn("\n⚠️ 未找到 gem-plants.pmtiles —— GEM 条目不会出现在清单里。已查路径：");
+    console.warn(`     ${relative(ROOT, gemFile)}`);
+    console.warn(`   生成：${GEM_GEOJSON_HINT} --out data/packs/gem-plants.pmtiles`);
+  }
+
+  /** 两类包合并写入清单。顺序：区域包在前（已有的消费方按这个顺序展示）。 */
+  const packs = [...regionPacks, ...thematicPacks];
+
   const payload = {
     generatedAt: new Date().toISOString(),
     generatedBy: "scripts/gen_packs_manifest.mjs",
@@ -239,9 +316,14 @@ function main() {
   };
 
   writeFileSync(OUT, JSON.stringify(payload, null, 2));
-  console.log("=== 区域数据包清单 ===");
+  console.log("=== 数据包清单 ===");
   console.log(`核心区覆盖 : ${CORE_BBOX.join(",")}（来自 yrd ∪ zhejiang 的实测 bbox）`);
-  console.log(`区域包     : ${packs.length} 个`);
+  // ⚠️ 两类包要分开计数。写成一个“区域包 N 个”会把 GEM 也算进去，
+  //    看日志的人会以为 GEM 是第 8 个区域 —— 它们的生命周期完全不同。
+  console.log(
+    `数据包     : ${packs.length} 个` +
+      `（区域包 ${regionPacks.length} + thematic ${thematicPacks.length}）`,
+  );
   for (const p of packs) {
     console.log(
       `  ${p.label.padEnd(4)} ${p.key.padEnd(9)} bbox=${p.bbox.join(",").padEnd(24)} ` +
@@ -264,9 +346,14 @@ function main() {
         "清单仍可用（前端只依赖 key/label/bbox/file），但提示文案会缺数字。",
     );
   }
-  const missing = packs.filter((p) => !existsSync(join(ROOT, "data", "packs", `osm-${p.key}.pmtiles`)));
+  // ⚠️ 阶段50-B：这里必须只看**区域包**。原先用 `osm-${p.key}.pmtiles` 拼路径，
+  //    对 GEM（key="gem"）会去查一个根本不存在的 `osm-gem.pmtiles`，
+  //    于是每次生成都会把 GEM 误报成「本机还没生成的包」。
+  const missing = regionPacks.filter(
+    (p) => !existsSync(join(ROOT, "data", "packs", `osm-${p.key}.pmtiles`)),
+  );
   if (missing.length) {
-    console.log(`\n本机 data/packs 里还没生成的包：${missing.map((p) => p.key).join("、")}`);
+    console.log(`\n本机 data/packs 里还没生成的区域包：${missing.map((p) => p.key).join("、")}`);
   }
 }
 

@@ -124,70 +124,196 @@ const DEFAULTS = {
    */
   collapseProps: ["ftype", "vclass"],
   estimateOnly: false,
+  /**
+   * 阶段50-B：**数据源品类**。
+   *
+   * · `"osm"`（默认）—— 输电线路 + 变电站/电厂，MVT 图层名 `grid`
+   * · `"gem"`  —— Global Energy Monitor 电源设施点，MVT 图层名 `gem`
+   *
+   * ⚠️ 默认 `"osm"` ⇒ 不传 `--kind` 时**代码路径与改动前完全一致**，
+   *    现有 OSM 归档继续逐字节可复现。
+   */
+  kind: "osm",
+};
+
+/**
+ * 阶段50-B：`--kind` 的专用档案（**只对 gem 生效**）。
+ *
+ * ‼️ 为什么不直接改 `DEFAULTS`：`DEFAULTS` 是 OSM 的基线，阶段29~43 关于
+ *    「体积 / 图层 id / 配色 / 画序」的全部验收结论都建立在它之上。
+ *    改它 = 让 OSM 归档不再是可复现的同一份东西。
+ *    所以这里的值只在 `--kind gem` 时**逐键回填**，且**显式传过的参数优先**。
+ *
+ * ⚠️ `collapseProps` 必须跟着换：高缩放级收敛的默认值是 `ftype,vclass`，
+ *    而 GEM 数据**这两个字段一个都没有** —— 沿用会让 z<fullPropsFromZoom
+ *    的瓦片属性被**清空**（`collapsed` 变成 `{}`），症状是「字段全没了、坐标还在」：
+ *    地图上点都在，但按容量取半径、按状态做 filter 全部失灵，而且**不报错**。
+ *    这里取的是白名单里体积可控且对渲染有用的三个（`name` 特意不放 ——
+ *    它几乎每个要素都不同，会把低级别瓦片的 MVT 字符串表撞大，
+ *    原因见 `fullPropsFromZoom` 的注释）。
+ */
+const KIND_PROFILES = {
+  gem: {
+    layer: "gem",
+    /**
+     * ⚠️ z10 而非 OSM 默认的 z12。
+     *    理由：①本仓已有的 GEM 归档就是用 z10 切的（已验收的那份 5.53 MB）；
+     *        ②GEM 是**纯点**数据，没有需要逐级简化的线几何，再深两级只是把
+     *          同一个点重复写进更多的瓦片 —— 实测 z12 会把归档从 5.85 MB 撞到
+     *          9.41 MB（瓦片数 19,182 → 41,749），体积 +61% 而信息量不变。
+     *    需要更深时显式传 `--maxzoom 12`（显式值优先）。
+     */
+    maxZoom: 10,
+    /**
+     * 阶段50-B.1：与 `import_gem_plants.py` 的 `KEEP` **逐字一致**。
+     * ‼️ 两处必须同步：上游少写一个字段 ⇒ 这里白名单取不到；
+     *    这里漏一个字段 ⇒ 瓦片里就真没这一列。两边都不报错。
+     *    （阶段50-B 审查发现的两个隐患正是这么来的：`plant_type` 没进白名单，
+     *      导致三类电源在图上同一个颜色。）
+     */
+    keepProps: [
+      "location_id",
+      "country",
+      "state",
+      "name",
+      "plant_type",
+      "units",
+      "capacity",
+      "status",
+      "owner",
+    ],
+    /**
+     * 低缩放级（z<fullPropsFromZoom）收敛到哪几个字段。
+     *
+     * 🔴 `plant_type` **必须在这里**，否则 `["get", "plant_type"]`
+     *    在 z<8 的瓦片里会返回 **undefined** —— 而 MapLibre 不报错，
+     *    只是 `match` 表达式落到兑底色。前端据此取颜色的需求就静默失效了。
+     * 🔴 `location_id` / `name` / `owner` / `country` / `state` **刻意不在这里**：
+     *    · `location_id` 是高基数字符串（14,793 个唯一值）—— 放进来会让
+     *      z0~z7 那一共 2,410 张瓦片的字符串表全部撞大，代价是非线性的
+     *      （这 2,410 张瓦片装着全部 14,793 个要素，体积几乎全压在这一级）
+     *    · `name` / `owner` 同理，都是逐要素不同的自由文本
+     *    · `country` / `state` 基数低，本可以放，但低缩放级本来就不点选，
+     *      没有收益就不加
+     *    ⇒ 它们仍会在 z>=fullPropsFromZoom 的瓦片里完整保留，弹窗照常可读。
+     */
+    collapseProps: ["plant_type", "units", "capacity", "status"],
+    fullPropsFromZoom: 8,
+  },
 };
 
 function parseArgs(argv) {
   const cfg = { ...DEFAULTS };
+  /**
+   * 显式传过的参数 —— 供 `--kind` 回填默认值时避让。
+   * ⚠️ 不能靠「值是否等于 DEFAULTS」来判断：用户显式传 `--layer grid --kind gem`
+   *    时那是真实意图，与默认值恰好相同，会被误当成「没传过」而静默覆盖。
+   */
+  const explicit = new Set();
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const next = () => argv[++i];
     if (a === "--name") cfg.name = next();
-    else if (a === "--in") cfg.inFile = next();
-    else if (a === "--out") cfg.out = next();
-    else if (a === "--layer") cfg.layer = next();
-    else if (a === "--minzoom") cfg.minZoom = Number(next());
-    else if (a === "--maxzoom") cfg.maxZoom = Number(next());
-    else if (a === "--index-maxzoom") cfg.indexMaxZoom = Number(next());
+    else if (a === "--in") {
+      cfg.inFile = next();
+      explicit.add("inFile");
+    } else if (a === "--out") {
+      cfg.out = next();
+      explicit.add("out");
+    } else if (a === "--layer") {
+      cfg.layer = next();
+      explicit.add("layer");
+    } else if (a === "--kind") {
+      const k = next();
+      if (!KIND_PROFILES[k] && k !== "osm") {
+        throw new Error(`--kind 只支持 osm | gem，收到：${k}`);
+      }
+      cfg.kind = k;
+    } else if (a === "--minzoom") cfg.minZoom = Number(next());
+    else if (a === "--maxzoom") {
+      cfg.maxZoom = Number(next());
+      explicit.add("maxZoom");
+    } else if (a === "--index-maxzoom") cfg.indexMaxZoom = Number(next());
     else if (a === "--tolerance") cfg.tolerance = Number(next());
     else if (a === "--extent") cfg.extent = Number(next());
     else if (a === "--buffer") cfg.buffer = Number(next());
     else if (a === "--min-features") cfg.minFeatures = Number(next());
-    else if (a === "--full-props-from") cfg.fullPropsFromZoom = Number(next());
-    else if (a === "--no-names") cfg.keepNames = false;
+    else if (a === "--full-props-from") {
+      cfg.fullPropsFromZoom = Number(next());
+      explicit.add("fullPropsFromZoom");
+    } else if (a === "--no-names") cfg.keepNames = false;
     else if (a === "--max-features-per-tile") cfg.maxFeaturesPerTile = Number(next());
     else if (a === "--cap-below-zoom") cfg.capBelowZoom = Number(next());
-    else if (a === "--keep-props") cfg.keepProps = next().split(",").map((s) => s.trim()).filter(Boolean);
-    else if (a === "--collapse-props") cfg.collapseProps = next().split(",").map((s) => s.trim()).filter(Boolean);
-    else if (a === "--estimate-only") cfg.estimateOnly = true;
+    else if (a === "--keep-props") {
+      cfg.keepProps = next().split(",").map((s) => s.trim()).filter(Boolean);
+      explicit.add("keepProps");
+    } else if (a === "--collapse-props") {
+      cfg.collapseProps = next().split(",").map((s) => s.trim()).filter(Boolean);
+      explicit.add("collapseProps");
+    } else if (a === "--estimate-only") cfg.estimateOnly = true;
     else if (a === "-h" || a === "--help") {
       console.log(
         [
           "用法: node scripts/build_pmtiles.mjs [选项]",
           "",
           "  --name <n>           数据名（默认 yrd），用于推导输入/输出路径",
-          "  --in <path>          输入 GeoJSON（默认 public/osm/<name>_power.geojson）",
-          "  --out <path>         输出 PMTiles（默认 src-tauri/resources/maps/osm_grid.pmtiles）",
-          "  --layer <id>         MVT 图层名（默认 grid）",
-          "  --maxzoom <n>        最深切片级别（默认 12，再深体积翻倍）",
+          "  --kind <osm|gem>     数据源品类（默认 osm）",
+          "                       osm → 输入 public/osm/<name>_power.geojson，输出 osm_grid.pmtiles，图层 grid",
+          "                       gem → 输入 data/packs/<name>.geojson，输出 data/packs/<name>.pmtiles，图层 gem",
+          "  --in <path>          输入 GeoJSON（默认按 --kind 推导）",
+          "  --out <path>         输出 PMTiles（默认按 --kind 推导）",
+          "  --layer <id>         MVT 图层名（osm 默认 grid，gem 默认 gem）",
+          "  --maxzoom <n>        最深切片级别（osm 默认 12，gem 默认 10；点数据再深只是重复写点）",
           "  --index-maxzoom <n>  geojson-vt 内部索引级别（默认 5）",
           "  --tolerance <n>      简化容差（默认 3，越大越小越糊）",
           "  --extent <n>         瓦片网格精度（默认 4096）",
           "  --buffer <n>         瓦片边缘缓冲（默认 64）",
           "  --min-features <n>   丢弃要素数少于 n 的瓦片（默认 1）",
-          "  --full-props-from <n> 从第 n 级起保留全部属性（默认 8，低于它只留 ftype+vclass）",
+          "  --full-props-from <n> 从第 n 级起保留全部属性（osm/gem 默认都是 8）",
           "  --no-names           丢弃 name 属性以减小体积",
           "  --max-features-per-tile <n>  低级别单瓦片要素数封顶（默认 0 = 不封顶）",
           "  --cap-below-zoom <n> 只对低于该级别的瓦片封顶（默认 8）",
-          "  --keep-props <csv>   属性白名单（默认 OSM 那 10 项）",
-          "  --collapse-props <csv>  低级别收敛到哪几个字段（默认 ftype,vclass）",
+          "  --keep-props <csv>   属性白名单（osm 默认那 11 项；gem 默认 name,country,state,units,capacity,status,owner,wiki,locationId）",
+          "  --collapse-props <csv>  低级别收敛到哪几个字段（osm 默认 ftype,vclass；gem 默认 units,capacity,status）",
           "  --estimate-only      只统计瓦片数与体积，不写文件",
         ].join("\n"),
       );
       return null;
     } else throw new Error(`未知参数：${a}`);
   }
-  cfg.inFile = cfg.inFile ?? `public/osm/${cfg.name}_power.geojson`;
+  // ---- 阶段50-B：按品类回填默认值（显式传过的参数优先）----
+  // ⚠️ 不传 --kind 时这段整块跳过，OSM 路径与改动前完全一致。
+  if (cfg.kind !== "osm") {
+    for (const [k, v] of Object.entries(KIND_PROFILES[cfg.kind])) {
+      if (!explicit.has(k)) cfg[k] = v;
+    }
+  }
+
+  cfg.inFile =
+    cfg.inFile ??
+    (cfg.kind === "gem" ? `data/packs/${cfg.name}.geojson` : `public/osm/${cfg.name}_power.geojson`);
   // ⚠️ 默认输出名是写死的 `osm_grid.pmtiles`：用别的 --name 生成时必须显式 --out，
   //    否则会把已装好的那个区域的归档**静默覆盖掉**（实测踩过：浙江盖掉了长三角）。
   //    多区域命名约定：--out src-tauri/resources/maps/osm-<region>.pmtiles
   if (!cfg.out) {
-    cfg.out = "src-tauri/resources/maps/osm_grid.pmtiles";
-    if (cfg.name !== "yrd") {
-      console.warn(
-        `⚠️  未指定 --out，将写入默认归档 ${cfg.out}；当前 --name=${cfg.name}，\n` +
-          `    如果那里已有其它区域的数据，会被覆盖。多区域请显式指定，例如：\n` +
-          `    --out src-tauri/resources/maps/osm-${cfg.name}.pmtiles`,
-      );
+    if (cfg.kind === "gem") {
+      // 阶段50-B.1：GEM 是 **downloadable thematic pack**，不进安装包
+      // （否则安装包 46.5 → ~52 MB，超预算）。
+      // 所以归档与区域包**走同一个目录约定**：构建产物落 `data/packs/`，
+      // 由 `gen_packs_manifest.mjs` 算指纹、上传到 Release，
+      // 用户下载后落到 `app_data_dir/packs/`。
+      // ‼️ 不再放 `src-tauri/resources/` —— 那个目录下的东西会被
+      //    `bundle.resources` 打进安装包。
+      cfg.out = `data/packs/${cfg.name}.pmtiles`;
+    } else {
+      cfg.out = "src-tauri/resources/maps/osm_grid.pmtiles";
+      if (cfg.name !== "yrd") {
+        console.warn(
+          `⚠️  未指定 --out，将写入默认归档 ${cfg.out}；当前 --name=${cfg.name}，\n` +
+            `    如果那里已有其它区域的数据，会被覆盖。多区域请显式指定，例如：\n` +
+            `    --out src-tauri/resources/maps/osm-${cfg.name}.pmtiles`,
+        );
+      }
     }
   }
   return cfg;
@@ -247,7 +373,8 @@ function cleanProps(props) {
 async function main() {
   const inPath = resolve(ROOT, cfg.inFile);
   const outPath = resolve(ROOT, cfg.out);
-  console.log("=== 阶段29：OSM 电网 GeoJSON → PMTiles（纯 Node） ===");
+  console.log(`=== ${cfg.kind === "gem" ? "GEM 电源数据" : "OSM 电网"} GeoJSON → PMTiles（纯 Node） ===`);
+  console.log(`品类   : ${cfg.kind}（MVT 图层名 "${cfg.layer}"）`);
   console.log(`输入   : ${cfg.inFile}`);
 
   let fc;
@@ -256,8 +383,10 @@ async function main() {
   } catch (err) {
     throw new Error(
       `读不到输入文件 ${inPath}（${err.message}）。\n` +
-        `请先跑：python scripts/fetch_osm_power.py --preset yrd --name ${cfg.name}\n` +
-        `    再跑：node scripts/prepare_osm_geojson.mjs --name ${cfg.name}`,
+        (cfg.kind === "gem"
+          ? `请先跑：python scripts/import_gem_plants.py --out ${cfg.inFile}`
+          : `请先跑：python scripts/fetch_osm_power.py --preset yrd --name ${cfg.name}\n` +
+            `    再跑：node scripts/prepare_osm_geojson.mjs --name ${cfg.name}`),
     );
   }
   if (fc?.type !== "FeatureCollection" || !Array.isArray(fc.features)) {
@@ -296,6 +425,95 @@ async function main() {
   console.log(`范围   : ${minLon.toFixed(3)},${minLat.toFixed(3)} → ${maxLon.toFixed(3)},${maxLat.toFixed(3)}`);
   console.log(`ftype  : ${JSON.stringify(ftypeHist)}`);
   console.log(`vclass : ${JSON.stringify(vclassHist)}`);
+
+  // ---- 阶段50-B：几何类型核对 ----
+  // GEM 归档的契约是**纯 Point**（数据模型是「设施点位」）。若混进了线/面，
+  // 前端的 circle 图层不会报错，而是默默不画 —— 所以在这里就描出来。
+  const geomHist = {};
+  for (const f of fc.features) {
+    const t = f.geometry?.type ?? "null";
+    geomHist[t] = (geomHist[t] ?? 0) + 1;
+  }
+  console.log(`geometry: ${JSON.stringify(geomHist)}`);
+  if (cfg.kind === "gem") {
+    const bad = Object.entries(geomHist).filter(([t]) => t !== "Point");
+    if (bad.length) {
+      throw new Error(
+        `--kind gem 要求全部为 Point 几何，实测发现：` +
+          bad.map(([t, n]) => `${t}×${n}`).join("、") +
+          `\n请在上游（import_gem_plants.py）把几何统一成 Point 再切片。`,
+      );
+    }
+  }
+
+  // ---- 阶段50-B：属性白名单核对 ----
+  // ‼️ 为什么必须打印：`cleanProps` 对**白名单里但源数据没有的字段是静默跳过的**
+  //    （不报错、不写空值）。于是「字段名写错/与源数据对不上」和「数据本来就没这一列」
+  //    两种情况的症状完全一样：瓦片里少了几列，且没有任何提示。实测本次就碰到了 ——
+  //    需求白名单 9 项中的 country/state/wiki/locationId 在 GEM 源数据里**一个都没有**，
+  //    而源数据真正有的 `plant_type` 又不在白名单内。
+  //    这里把「命中 / 落空 / 被丢弃」三类都摊开，让静默变成可见。
+  const srcKeys = new Map();
+  for (const f of fc.features) {
+    for (const k of Object.keys(f.properties ?? {})) srcKeys.set(k, (srcKeys.get(k) ?? 0) + 1);
+  }
+  const hit = [];
+  const missed = [];
+  for (const k of cfg.keepProps) {
+    if (k === "name" && !cfg.keepNames) {
+      missed.push(`${k}（被 --no-names 关闭）`);
+      continue;
+    }
+    if (srcKeys.has(k)) hit.push(`${k}(${srcKeys.get(k)})`);
+    else missed.push(k);
+  }
+  const dropped = [...srcKeys]
+    .filter(([k]) => !cfg.keepProps.includes(k))
+    .map(([k, n]) => `${k}(${n})`);
+  console.log(`保留字段: ${hit.join(" ") || "（无）"}`);
+  if (missed.length) {
+    console.warn(
+      `⚠️  白名单里 ${missed.length} 项在源数据中不存在，将被**静默跳过**：${missed.join("、")}`,
+    );
+  }
+  if (dropped.length) {
+    console.warn(
+      `⚠️  源数据里 ${dropped.length} 个字段不在白名单内，将被丢弃：${dropped.join("、")}`,
+    );
+  }
+
+  // ---- 阶段50-B.2：低缩放级字段的**基数审查**（可执行守卫）----
+  // ‼️ 为什么必须查：`collapseProps` 里的字段会被写进**每一张**低缩放级瓦片。
+  //    一个高基数字段（如 `location_id`，14,793 个唯一值）放进去，
+  //    会让 z<fullPropsFromZoom 的每张瓦片字符串表都被撑大 ——
+  //    而那些瓦片只有 2,410 张、却装着**全部** 14,793 个要素，代价是非线性的。
+  //    这正是「归档从 5.53 涨到 6.85 MB」背后的机理。
+  //    以前这只是一条写在注释里的约定，谁改错了都不会被发现；现在它会自己报警。
+  const HIGH_CARDINALITY = 2000;
+  const cardinalityOf = (k) => {
+    const seen = new Set();
+    for (const f of fc.features) {
+      const v = f.properties?.[k];
+      if (v !== null && v !== undefined && v !== "") seen.add(v);
+    }
+    return seen.size;
+  };
+  if (cfg.collapseProps.length) {
+    console.log("低缩放级字段基数：");
+    for (const k of cfg.collapseProps) {
+      const n = cardinalityOf(k);
+      const high = n > HIGH_CARDINALITY;
+      console.log(`  ${k.padEnd(12)} ${String(n).padStart(7)} 个唯一值  ${high ? "⚠️ 高基数" : "ok"}`);
+      if (high) {
+        console.warn(
+          `⚠️  collapseProps 含高基数字段 "${k}"（${n} 个唯一值 > 阈值 ${HIGH_CARDINALITY}）。\n` +
+            `    它会被写进每一张低缩放级瓦片，归档体积会明显膨胀。\n` +
+            `    若该字段只在放大后点选时才需要，请把它从 --collapse-props 移除 ——\n` +
+            `    它仍会在 z>=${cfg.fullPropsFromZoom} 的瓦片里完整保留。`,
+        );
+      }
+    }
+  }
 
   // ---- 清洗属性后交给 geojson-vt ----
   const cleaned = {
@@ -471,34 +689,88 @@ async function main() {
   const actualMinZoom = Math.min(...realZooms);
   const actualMaxZoom = Math.max(...realZooms);
 
-  const metadata = {
-    name: `Global Power GIS — OSM 电网（${cfg.name}）`,
-    format: "pbf",
-    type: "overlay",
-    version: "1",
-    description:
-      "OSM 输电线路与变电站/电厂。属性 ftype=line|substation|plant，vclass 为电压分档（735+ / 500-734 / 220-499 / <220 / unknown）。",
-    attribution: "© OpenStreetMap contributors (ODbL)",
-    minzoom: actualMinZoom,
-    maxzoom: actualMaxZoom,
-    bounds,
-    center: [center[0], center[1], Math.min(actualMaxZoom, 9)],
-    vector_layers: [
-      {
-        id: cfg.layer,
-        description: "OSM 电网要素（线 + 点混合，靠 ftype 区分）",
-        minzoom: actualMinZoom,
-        maxzoom: actualMaxZoom,
-        fields: {
-          ftype: "String",
-          vclass: "String",
-          voltage_kv: "Number",
-          name: "String",
-          osm_id: "String",
-        },
-      },
-    ],
+  /**
+   * 归档内嵌 metadata。
+   *
+   * 🔴 阶段50-B：**必须按品类区分**。原先这段是写死的 OSM 文案，整块套到 GEM 归档上
+   *    会产生三处错误，而且**一处都不会报错**：
+   *      · `vector_layers[0].fields` 列的是 ftype/vclass/voltage_kv/osm_id —— GEM 一个都没有
+   *      · `attribution` 写 OSM/ODbL —— 而 GEM 是 **CC BY 4.0**，署名错等于许可违约
+   *      · `description` 描述的是输电线路
+   *    ⚠️ OSM 分支**逐字节保持原样**（键顺序、文案、字段表全部不动），
+   *       否则现有归档不再是可复现的同一份产物。
+   */
+  /**
+   * 字段表从**真实写进瓦片的数据**推断，不再手写常量 ——
+   * 手写就会像上面那样随源数据演进悄悄过期。
+   * ⚠️ 只列真正取到过值的字段（与 `cleanProps` 的跳过语义一致）。
+   */
+  const fieldsOf = (keys) => {
+    const out = {};
+    for (const k of keys) {
+      for (const f of cleaned.features) {
+        const v = f.properties?.[k];
+        if (v === null || v === undefined) continue;
+        out[k] = typeof v === "number" ? "Number" : typeof v === "boolean" ? "Boolean" : "String";
+        break;
+      }
+    }
+    return out;
   };
+
+  const metadata =
+    cfg.kind === "gem"
+      ? {
+          name: `Global Power GIS — GEM 电源数据（${cfg.name}）`,
+          format: "pbf",
+          type: "overlay",
+          version: "1",
+          description:
+            "Global Energy Monitor 电源设施（Point）。属性见 vector_layers.fields；" +
+            `低缩放级（z<${cfg.fullPropsFromZoom}）仅保留 ${cfg.collapseProps.join(" / ")}。`,
+          attribution: "© Global Energy Monitor · CC BY 4.0",
+          minzoom: actualMinZoom,
+          maxzoom: actualMaxZoom,
+          bounds,
+          center: [center[0], center[1], Math.min(actualMaxZoom, 9)],
+          vector_layers: [
+            {
+              id: cfg.layer,
+              description: "GEM 电源设施点位",
+              minzoom: actualMinZoom,
+              maxzoom: actualMaxZoom,
+              fields: fieldsOf(cfg.keepProps),
+            },
+          ],
+        }
+      : {
+          name: `Global Power GIS — OSM 电网（${cfg.name}）`,
+          format: "pbf",
+          type: "overlay",
+          version: "1",
+          description:
+            "OSM 输电线路与变电站/电厂。属性 ftype=line|substation|plant，vclass 为电压分档（735+ / 500-734 / 220-499 / <220 / unknown）。",
+          attribution: "© OpenStreetMap contributors (ODbL)",
+          minzoom: actualMinZoom,
+          maxzoom: actualMaxZoom,
+          bounds,
+          center: [center[0], center[1], Math.min(actualMaxZoom, 9)],
+          vector_layers: [
+            {
+              id: cfg.layer,
+              description: "OSM 电网要素（线 + 点混合，靠 ftype 区分）",
+              minzoom: actualMinZoom,
+              maxzoom: actualMaxZoom,
+              fields: {
+                ftype: "String",
+                vclass: "String",
+                voltage_kv: "Number",
+                name: "String",
+                osm_id: "String",
+              },
+            },
+          ],
+        };
 
   const archive = buildArchive({
     tiles,

@@ -2,7 +2,7 @@
 阶段50-A：抓取 GEM 三类电源（煤炭 / 油气 / 生物质）机组级数据，
 聚合成**电站级 GeoJSON**，供 build_pmtiles.mjs 切片。
 
-‼️ 与阶段48-A 的 import_gem_coal.py 的本质区别：
+‼️ 与阶段48-A 已归档的 import_gem_coal_legacy.py 的本质区别：
    **不再写任何数据库**。产物是一个 GeoJSON 文件（随后切成 pmtiles 数据包），
    这样 GEM 数据可以走已经验证过的下载链路，而不是让安装包变胖。
    （现有下载管线只接受 .pmtiles —— packs.rs 的 safe_file_name 硬校验，
@@ -59,8 +59,31 @@ TYPES: list[tuple[str, str]] = [
 # 状态取主状态时的确定性优先级（并列时用它决出，避免渲染结果随数据顺序变）
 STATUS_PRIORITY = ["operating", "planned", "retired", "cancelled"]
 
-# GeoJSON 里保留的字段。**越少越好**：MVT 的字符串表会为每个唯一值付一次成本。
-KEEP = ("plant_type", "capacity", "status", "units", "name", "owner")
+# 输出的**属性契约**（阶段50-B.2 定稿）。
+# ‼️ 这里不只是“注释里的白名单”：主流程末尾会拿它做**可执行的自检**。
+#    原因：字段缺失是**静默**的 —— GeoJSON 照样能切、能渲染，只是瓦片里少几列，
+#    前端 `["get", "plant_type"]` 返回 undefined，而 MapLibre 不会报错。
+#    （阶段50-B 核查时确实撞上了：实际输出只有 6 个字段，
+#      而 location_id 与 country 在原始数据里明明存在，只是没被写出来。）
+#
+# ⚠️ 三个行政/链接字段的分工（这是**刻意**的，不是遗漏）：
+#    · `country` —— **必需**。低基数（约 200 个国家），很适合当 MVT 属性，弹窗要用
+#    · `state`   —— **可选**。来自 `state_province`，值可能为空；键恒在、值可为 None
+#    · `wiki_url` —— **不入列**。它是**高长度、高基数**的自由文本 URL：
+#      几乎每个电站都不同，且单值长度远高于其它字段。放进 MVT 会同时撞大
+#      字符串表（唯一值多）与字节量（单值长），性价比极低。
+#      需要原文链接时应该在弹窗里拼 GEM 的检索页，而不是把 URL 烧进每一张瓦片。
+KEEP = (
+    "location_id",
+    "country",
+    "state",
+    "name",
+    "plant_type",
+    "units",
+    "capacity",
+    "status",
+    "owner",
+)
 
 
 class Abort(RuntimeError):
@@ -183,6 +206,12 @@ def main() -> int:
                 owners0 = r.get("owners") or []
                 st = {
                     "plant_type": plant_type,
+                    # 阶段50-B.1：location_id 以前只做聚合键、没写进输出。
+                    # 它是**电站级稳定标识**（`L100000103878`），前端定位/去重都要用。
+                    "location_id": str(r.get("location_id") or ""),
+                    "country": r.get("country"),
+                    # 阶段50-B.2：`state_province` → `state`。可选字段，允许为空。
+                    "state": r.get("state_province"),
                     "name": r.get("project_name") or r.get("asset_name") or "未命名电站",
                     "lat_sum": 0.0,
                     "lon_sum": 0.0,
@@ -192,6 +221,11 @@ def main() -> int:
                     "owner": (owners0[0].get("name") if owners0 else None),
                 }
                 stations[key] = st
+            # 同一电站的各机组 country/state 理论上一致；只补空位，避免被 None 覆盖
+            if not st["country"] and r.get("country"):
+                st["country"] = r["country"]
+            if not st["state"] and r.get("state_province"):
+                st["state"] = r["state_province"]
             # 质心：实测同一电站内机组坐标绝大多数相同，少数不一致时取均值最中立
             st["lat_sum"] += float(r.get("latitude") or 0.0)
             st["lon_sum"] += float(r.get("longitude") or 0.0)
@@ -217,15 +251,21 @@ def main() -> int:
     for _key, st in stations.items():
         n = st["units"]
         props = {
+            # ‼️ 键的顺序与 KEEP 保持一致，方便肉眼对照契约
+            "location_id": st["location_id"],
+            "country": st["country"],
+            "state": st["state"],
+            "name": st["name"],
             "plant_type": st["plant_type"],
+            "units": n,
             "capacity": round(st["capacity"], 1),
             "status": dominant(st["by_status"]),
-            "units": n,
-            "name": st["name"],
+            # 不再“有才写”：契约要求键**恒在**。值为 None 时
+            # `cleanProps`（build_pmtiles.mjs）会跳过它，不会写出空值消息 ——
+            # 而“无主电站”在前端也只能显示 MISSING，不能凭空造一个所有者。
+            "owner": st["owner"],
         }
-        if st["owner"]:
-            props["owner"] = st["owner"]
-        else:
+        if not st["owner"]:
             no_owner += 1
         by_type[st["plant_type"]] += 1
         by_status[props["status"]] += 1
@@ -248,6 +288,25 @@ def main() -> int:
     for s, c in by_status.most_common():
         print(f"    {s:<12} {c:>7}")
     print(f"  无 owner 的电站 : {no_owner}")
+
+    # ---- 输出契约自检（阶段50-B.1）----
+    # ‼️ 为什么必须有：字段缺失是**静默**的。GeoJSON 照样能切、能渲染，
+    #    只是瓦片里少几列，前端 `["get","plant_type"]` 拿到 undefined，
+    #    而 MapLibre 一个错都不报。阶段50-B 的核查正是撞在这个坑上
+    #    （location_id / country 在原始数据里存在，却没被写出来，且无人发现）。
+    #    ⇒ 把契约写成可执行断言，而不是一句注释。
+    violations: list[str] = []
+    for k in KEEP:
+        n = sum(1 for f in features if k not in f["properties"])
+        if n:
+            violations.append(f"{k} 缺失 {n}/{len(features)}")
+    if violations:
+        raise Abort(f"输出字段契约不满足：{'; '.join(violations)}（要求全部含 {list(KEEP)}）")
+    print()
+    print("  字段契约自检：")
+    for k in KEEP:
+        have = sum(1 for f in features if f["properties"].get(k) is not None)
+        print(f"    {k:<12} 键 {len(features)}/{len(features)}   非空 {have}")
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)

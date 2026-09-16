@@ -74,6 +74,18 @@ function WelcomeWizard({ api, onFinish }: WelcomeWizardProps) {
   const { packs, statuses, progress, phases, errors, bridgeOk, download, cancel } =
     api;
 
+  /**
+   * 阶段50-B.2：向导**只管区域包**，thematic（GEM）单独一块。
+   *
+   * ‼️ 为什么必须分开（三条都是实际会发生的）：
+   *    ① GEM 的 bbox 是全世界 ⇒ 进 `finishBbox` 后地图会缩到世界视图
+   *    ② 它不参与视口选举（见 MapPage 的 `isThematicOverlay`），
+   *       “选区域”对它没有意义
+   *    ③ 它是可选的全局图层，在「设置 → 数据包管理」里有正经入口
+   */
+  const regionPacks = useMemo(() => packs.filter((p) => p.kind !== "gem"), [packs]);
+  const thematicPacks = useMemo(() => packs.filter((p) => p.kind === "gem"), [packs]);
+
   const installedSet = useMemo(() => {
     const s = new Set<string>();
     for (const p of packs) {
@@ -90,8 +102,9 @@ function WelcomeWizard({ api, onFinish }: WelcomeWizardProps) {
 
   /** 本次要下载的 = 已选且本机还没有的 */
   const targets = useMemo(
-    () => packs.filter((p) => selected.includes(p.key) && !installedSet.has(p.key)),
-    [packs, selected, installedSet],
+    // 阶段50-B.2：**只处理区域包**（thematic 不参与“选择区域”）
+    () => regionPacks.filter((p) => selected.includes(p.key) && !installedSet.has(p.key)),
+    [regionPacks, selected, installedSet],
   );
 
   const totalBytes = targets.reduce((sum, p) => sum + (p.bytes ?? 0), 0);
@@ -128,11 +141,15 @@ function WelcomeWizard({ api, onFinish }: WelcomeWizardProps) {
   const finishBbox = useMemo(
     () =>
       unionBbox(
-        packs
+        // 阶段50-B.2：必须只看**区域包**。
+        // ‼️ GEM 的 bbox 是全世界（-180,-85,180,85），一旦进了并集，
+        //    向导结束时地图会直接缩到世界视图 —— 用户刚选的“华东”被吞掉，
+        //    而且不报任何错。
+        regionPacks
           .filter((p) => readyKeys.includes(p.key) && p.bbox)
           .map((p) => p.bbox as [number, number, number, number]),
       ),
-    [packs, readyKeys],
+    [regionPacks, readyKeys],
   );
 
   const finish = () => onFinish(finishBbox);
@@ -281,7 +298,19 @@ function WelcomeWizard({ api, onFinish }: WelcomeWizardProps) {
             )}
           </div>
         ) : (
-          <ul className={styles.list}>{packs.map(renderRow)}</ul>
+          <>
+            <ul className={styles.list}>{regionPacks.map(renderRow)}</ul>
+            {/* 阶段50-B.2：thematic 数据**单独一块**，不进“选择区域”。
+                ‼️ 行内的下载按钮仍可用（`renderRow` 直接调 `download(pack)`），
+                   但它**不参与** targets / finishBbox / “已就绪 N 个区域” ——
+                   它是全局图层，与初始视野无关。 */}
+            {thematicPacks.length > 0 && (
+              <div className={styles.doneBox}>
+                <p className={styles.doneTitle}>主题数据（可选，不影响初始视野）</p>
+                <ul className={styles.list}>{thematicPacks.map(renderRow)}</ul>
+              </div>
+            )}
+          </>
         )}
 
         <footer className={styles.foot}>

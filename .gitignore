@@ -25,7 +25,14 @@ dist-ssr
 # 它是可完整重建的派生产物（一份归档 + 一个脚本即可重现），因此不进仓库。
 # ⚠️ 注意：tauri.conf.json 的 bundle.resources 会引用它，
 #    所以全新克隆后必须先跑一次 `node scripts/fetch_basemap.mjs` 才能出安装包。
-/src-tauri/resources/maps/*.pmtiles
+#
+# ⚠️ 阶段50-B：这里必须用 `**` 而不能是 `*`。
+#    原来写的是 `/src-tauri/resources/maps/*.pmtiles`，它**只匹配该目录下第一层**，
+#    于是新加的 `maps/gem/gem-plants.pmtiles`（5.42 MB）落在规则之外，
+#    `git status` 会把它当成待提交文件 —— 一个 5 MB 的派生二进制混进历史，
+#    而且体积会随数据更新不断累积。`**` 对齐的是「整棵 maps 树下的 pmtiles 全是派生产物」
+#    这个真实意图。
+/src-tauri/resources/maps/**/*.pmtiles
 
 # 阶段27：离线中文字形（由 scripts/fetch_glyphs.mjs 按需裁出的 woff2 子集，约 2.1 MB）。
 # 同上：派生且可用脚本重建，不进仓库。
@@ -51,11 +58,26 @@ __pycache__/
 *.pyc
 
 # 阶段39：区域数据包（单包 10~25 MB，7 个共 116 MB）。**绝不进仓库。**
+# 🔴 阶段50-B 实测修正：原来写的是 `packs/*.pmtiles`，它**不起兜底作用** ——
+#    gitignore 里**只要模式中间含 `/`，整条规则就锚定在 .gitignore 所在目录**，
+#    所以 `packs/*.pmtiles` 只匹配 `<repo>/packs/`，匹配不到
+#    `src-tauri/resources/packs/`（实测 `git check-ignore` 退出码 1 = 未忽略）。
+#    而原注释恰恰声称“放到别的目录也不会误提交 116 MB” —— 那句话是错的，
+#    这条规则一直只是**看起来**在兜底。
+#    ⇒ 用 `**/packs/` 才能真正匹配任意层级下的 packs 目录。
 # 实测覆盖情况：`data/packs/` 已被上面的 `/data/` 覆盖；
 # `src-tauri/target/**/packs/` 已被 src-tauri/.gitignore 的 `/target/` 覆盖。
-# 这里显式再写一条做**兜底** —— 万一日后有人把包放到别的目录
-# （例如 src-tauri/resources/packs/，那目录**不在**任何忽略规则里），也不会误提交 116 MB。
-packs/*.pmtiles
+#
+# ── 阶段50-B.2：正式发布产物在哪里（已定案，别再改）──
+# ✅ **全部走下载**，一个数据包都不进 Git：
+#      · 正式构建产物：`data/packs/*.pmtiles`（含 gem-plants.pmtiles）
+#      · 分发方式    ：上传 GitHub Release → 用户下载到 `%APPDATA%\...\packs\`
+#      · 进安装包的  ：只有 seed 库 + basemap + osm_grid（见 tauri.conf.json）
+#    ⇒ `data/` 已把全部产物挡住，**不需要**任何白名单。
+# ‼️ 为什么必须只有一个位置：同一个文件若一份由 Git 管理、一份由用户目录管理，
+#    两条来源会各自漂移（版本不一致、sha256 对不上），下载校验会因此
+#    随机失败 —— 而失败点与“哪份是新的”完全无关，极难定位。
+**/packs/*.pmtiles
 
 # Editor directories and files
 .vscode/*

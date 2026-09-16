@@ -21,11 +21,15 @@ import {
   type GeoJSONSource,
   type LayerSpecification,
   type MapGeoJSONFeature,
+  type MapLayerMouseEvent,
   type StyleSpecification,
 } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { PMTiles, Protocol } from "pmtiles";
-import { FUEL_LEGEND, fuelColor, fuelLabel } from "../lib/fuel";
+import { FUEL_FALLBACK_COLOR, FUEL_LEGEND, fuelColor, fuelLabel } from "../lib/fuel";
+// 阶段50-B：只借类型，不引运行时。品类枚举的**唯一定义点**在 packs.ts，
+// 避免 MapPage 这份本地 PackEntry 与共享版再漂移出一套自己的字面量。
+import type { PackKind } from "../lib/packs";
 // 阶段27：离线中文字形的 `font-faces` 清单（由 scripts/fetch_glyphs.mjs 生成）
 import { BASEMAP_FONT_FACES, BASEMAP_FONT_FAMILY } from "../lib/basemapFonts.generated";
 import {
@@ -48,14 +52,64 @@ import styles from "./MapPage.module.css";
 const LAYERS = ["电厂", "变电站", "输电线路"] as const;
 
 /**
- * 阶段48-A：GEM 层在图层面板上的开关名。
+ * GEM 层在图层面板上的开关名（阶段48-A 引入，50-C.2-A 改名）。
+ *
+ * ‼️ 50-C.2-A：`"GEM 煤炭数据"` → `"GEM 发电设施"`。
+ *    理由：归档里的 `plant_type` 有 coal / oil-gas / bioenergy **三类**，
+ *    叫“煤炭数据”会把油气、生物质两类说成煤，属**事实性错误**。
  *
  * ⚠️ 必须声明在 `LAYER_SWATCH` **之前** —— 那个表拿它当键。
  *    `const` 在模块求值阶段有暂时性死区，声明顺序反了会在**运行时**直接抛
- *    `Cannot access 'GEM_COAL_LAYER_NAME' before initialization`，
+ *    `Cannot access 'GEM_PLANT_LAYER_NAME' before initialization`，
  *    而 TypeScript **查不出来**（它只做类型检查，不关心求值顺序）。
  */
-const GEM_COAL_LAYER_NAME = "GEM 煤炭数据";
+const GEM_PLANT_LAYER_NAME = "GEM 发电设施";
+
+/**
+ * 阶段50-C.2-A：**旧的开关名**，只为迁移保留，**不参与渲染**。
+ *
+ * ‼️ 为什么不能删：「不要删除旧中文 key」。
+ *    它可能已经外流到：旧版本的 `visibleLayers` 快照、外部链接/脚本、
+ *    或未来加的「面板状态持久化」。只要它存在一天，就必须能被读懂。
+ *    （本文件当前的 `visibleLayers` 是纯内存 state，**没有**持久化，
+ *      所以这条迁移今天只是防御性的 —— 但一旦加持久化就是必需的。）
+ */
+const GEM_PLANT_LAYER_NAME_LEGACY = "GEM 煤炭数据";
+
+/**
+ * 阶段50-C.3-A：**旧开关名 → 当前开关名** 的迁移表。
+ *
+ * ‼️ 方向与 C.2-A 的旧表相反（那时是「当前 → 旧」、在每个读取点反查）。
+ *    改成这个方向后，`normalizeLayerKeys` 在入口一次转换就完事，
+ *    下游（`visibleLayers.includes(...)` / 面板 / `LAYER_SWATCH`）
+ *    再也不需要知道存在旧名。
+ */
+const LAYER_KEY_MIGRATIONS: Record<string, string> = {
+  [GEM_PLANT_LAYER_NAME_LEGACY]: GEM_PLANT_LAYER_NAME,
+};
+
+/**
+ * 阶段50-C.3-A：把一份图层开关列表**规范化**。
+ *
+ * 做两件事：
+ *   ① 旧 key → 当前 key（查 `LAYER_KEY_MIGRATIONS`）
+ *   ② 去重（新旧 key 同时出现时会撞成两项）
+ *
+ * ‼️ 为什么必须有这一层：只要 `visibleLayers` 里残留一个旧 key，
+ *    `includes(GEM_PLANT_LAYER_NAME)` 就会**静默**返回 false ——
+ *    表现为「面板里开关是打开的、地图上却什么都没有」。不报错、不警告。
+ */
+function normalizeLayerKeys(names: readonly string[]): readonly string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const name of names) {
+    const next = LAYER_KEY_MIGRATIONS[name] ?? name;
+    if (seen.has(next)) continue;
+    seen.add(next);
+    out.push(next);
+  }
+  return out;
+}
 
 /**
  * 图层开关左侧色块的颜色 —— 让开关本身充当图例，不必再单独解释一遍。
@@ -65,31 +119,39 @@ const LAYER_SWATCH: Record<string, string> = {
   电厂: "conic-gradient(#9aa0a6, #f5a524, #4daafc, #5ee39b, #b07cf5, #9aa0a6)",
   变电站: "#3fd0c9",
   输电线路: "#8b96a8",
-  // 阶段48-A：GEM 层是**空心环**，色块也画成空心的（形状语言与地图上一致）。
-  // 颜色仍取自同一份 fuelColor("Coal")，不另写一个十六进制。
-  [GEM_COAL_LAYER_NAME]: `radial-gradient(circle, transparent 0 30%, ${fuelColor("Coal")} 31%)`,
+  // 阶段48-A / 50-C.2-A：GEM 层是**实心彩色圆**，按 `plant_type` 三色
+  //    （coal / oil-gas / bioenergy，见 addGemPlantLayers 的 `gemFuelColor`）。
+  //    所以色块用 conic 三色饼：既表达了「三种燃料」，又是地图上填色的直接缩略。
+  //    ‼️ 50-C.2-A 之前这里还要写一大段解释「空心环 vs 三色饼」的矛盾 ——
+  //       圆改成实心后，图例与地图不再打架，那段解释随之删除。
+  [GEM_PLANT_LAYER_NAME]: `conic-gradient(${fuelColor("Coal")} 0 33.3%, ${fuelColor("Gas")} 33.3% 66.6%, ${fuelColor("Biomass")} 66.6% 100%)`,
 };
 
 /**
- * 阶段48-A：GEM（Global Energy Monitor）煤炭数据层。
+ * 阶段48-A：GEM（Global Energy Monitor）发电设施数据层。
  *
  * ‼️ 与 WRI 是**两个独立数据源**，不是替换关系：
- *    · WRI = 电站级、只有在运、全球全燃料（实心圆）
- *    · GEM = 机组级、含拟建/在运/退役/取消的**全生命周期**（空心环）
- *    所以图上会同时出现「实心点」与「空心环」，这是预期效果。
+ *    · WRI = 电站级、只有在运、全球全燃料
+ *    · GEM = 电站级聚合、含拟建/在运/退役/取消的**全生命周期**
+ *    两边现在都是实心圆（GEM 略大一圈），所以同位置会看到「大圆套小圆」。
+ *    ⇒ 阶段50-C.2-A 起不再有「实心点 + 空心环」那种形状区分 ——
+ *      两个数据集靠 **颜色 + 大小 + 透明度** 区分，这是本次迁移有意的取舍。
  *
- * ‼️ **默认关闭**（不在 visibleLayers 初始值里）：多出 4,865 个环，
+ * ‼️ **默认关闭**（不在 visibleLayers 初始值里）：归档实测 14,793 个点，
  *    默认打开会压住用户真正想看的东西。另外它还带来一个好处 ——
  *    数据是**首次开启时才加载**的，不开的用户不会为它付任何开销。
  *
  * 许可：CC BY 4.0（要求署名，见弹窗与数据源 attribution）。
+ *
+ * ⚠️ 阶段50-C.1 / C.2-A：这里**只剩一个常量**。
+ *    原来的 `gem-coal` GeoJSON 源、`gem-coal-rings` 与 `gem-coal-planned-halo`
+ *    两个图层已整体删除 —— GEM 现在只有**一条**通道：PMTiles vector。
+ *    那两个图层原本承担的填色/线宽/双环编码，已全部由
+ *    `addGemPlantLayers` 里那一个 circle 图层接管。
  */
-const GEM_COAL_SOURCE = "gem-coal";
-const GEM_COAL_RING_LAYER_ID = "gem-coal-rings";
-/** 拟建/在建的**双环**：环套环。这是 circle 图层**支持的**形状编码。 */
-const GEM_COAL_PLANNED_HALO_ID = "gem-coal-planned-halo";
-const GEM_COAL_ATTRIBUTION = "煤炭数据 © Global Energy Monitor · CC BY 4.0";
-const GEM_COAL_LICENSE_URL = "https://globalenergymonitor.org/creative-commons-license/";
+const GEM_PLANT_SOURCE = "gem-pmtiles";
+const GEM_PLANT_ATTRIBUTION = "GEM 发电设施 © Global Energy Monitor CC BY 4.0";
+const GEM_PLANT_LICENSE_URL = "https://globalenergymonitor.org/creative-commons-license/";
 
 /** 状态中文名。只用实测到的 4 个值，不编造第五个。 */
 const GEM_STATUS_LABEL: Record<string, string> = {
@@ -98,6 +160,51 @@ const GEM_STATUS_LABEL: Record<string, string> = {
   cancelled: "已取消",
   planned: "拟建/在建",
 };
+
+/**
+ * 阶段50-C：GEM 的 **PMTiles** 通道（**唯一**通道）。
+ * ‼️ 旧的 GeoJSON/SQLite 通路（建图期空源 + `loadGemPlants()` + `setData` 注入）
+ *    已在 50-C.0 / 50-C.1 删除 —— 两者**不再并存**。
+ *
+ * ‼️ 为什么 id 全部另起一套、不复用 `GEM_PLANT_*`（PMTiles 通路）：
+ *    两者是**两条独立的数据通路**，将来要能单独关掉其中一条来对比 / 排障。
+ *    共用 id 会把「换数据源」变成一次不可回退的全量替换。
+ *
+ * ⚠️ `GEM_PMTILES_SOURCE_LAYER` 必须与切片时 `--kind gem` 的 `--layer` 一致。
+ *    实测（把归档解开逐层打印）：`build_pmtiles.mjs --kind gem` 产出的归档里
+ *    唯一的 MVT 图层名就是 `gem`。写错了**不会报错** —— source-layer 对不上时
+ *    MapLibre 只是「什么都不画」，是典型的静默失败。
+ *
+ * ⚠️ 图层 id 用固定值而不是 `--<key>` 后缀：GEM 是**单一全球包**，
+ *    加后缀会变成 `gem-plants--gem-plants` 这种毫无意义的 id。
+ */
+const GEM_PMTILES_SOURCE_LAYER = "gem";
+
+/**
+ * 阶段50-B：GEM 的 source id / layer id **统一走函数出口**（不再直接引常量）。
+ *
+ * ⚠️ 无参数 —— GEM 在清单里只会有 ≤ 1 条 `kind: "gem"`，所以 id 不加 key 后缀。
+ *    将来真出现多个 thematic 包时，**只改这两个函数**即可，
+ *    调用点已全部集中（addGemPlantLayers / removeGemPlantLayers / 生命周期 effect / 开关 effect）。
+ *
+ * ‼️ 与 `source-layer` 是两回事，不要混：
+ *    · 这里是 **MapLibre 样式里的 source / layer id**（自己起的名）
+ *    · `source-layer` 是**归档内部的 MVT 图层名**，必须是 `"gem"`，
+ *      且必须与 `build_pmtiles.mjs --kind gem` 的 `--layer` 一致
+ *    · 归档里的 MVT 图层名**不是** `gem-plants`（那是本地文件名的部分，
+ *      旧归档用过这个名字，但当前 builder 输出的是 `gem`）
+ */
+function gemPmtilesSourceId(): string {
+  // ‼️ 阶段50-C.1：直接引常量，不再写第二个字面量 ——
+  //    两处各写一遍时，改一处漏一处会让“新增 vector 源”与“删旧 geojson 源”
+  //    落在不同的 id 上，而那种错误是**静默**的（图层只是什么都不画）。
+  return GEM_PLANT_SOURCE;
+}
+
+/** GEM 的 MapLibre 图层 id（注意：不是 source-layer，见上方说明） */
+function gemPlantsLayerId(): string {
+  return "gem-plants";
+}
 
 /**
  * 阶段26：真实离线底图。
@@ -389,6 +496,19 @@ interface PackEntry {
   file: string;
   features?: number | null;
   sizeMb?: number | null;
+  /**
+   * 阶段50-B：数据包品类 —— **按生命周期分**，不是按内容分。
+   *
+   * · `"region"` / 缺省 —— 区域包：按视口选举、最多 2 个、随视野增删（MVT 图层名 `grid`）
+   * · `"gem"`             —— thematic / global overlay：全球单一图层，
+   *                          由图层开关控制，**不参与视口选举**（MVT 图层名 `gem`）
+   *
+   * ⚠️ 类型是**可选的**（不是需求里写的必填）：旧清单没有这个字段，
+   *    而它又是从 `res.json()` 强转过来的 —— 标成必填不会阻止任何东西，
+   *    只会让“缺省”这个真实存在的情况在类型上不可表达。
+   *    运行时一律用 `=== "gem"` 判定，缺失自然落到 region 分支。
+   */
+  kind?: PackKind;
 }
 interface PacksManifest {
   core: { label: string; resource: string; bbox: [number, number, number, number] };
@@ -1233,168 +1353,110 @@ async function loadPlantsGeoJson(): Promise<FeatureCollection> {
   };
 }
 
-/** GEM 电站级聚合后的属性 */
-interface GemCoalProperties {
+/**
+ * GEM 电站级属性（**PMTiles 通道专用**）。
+ * ‼️ 只剩这一条通路（旧的 GeoJSON / SQLite 通道已删除）。
+ *
+ * ‼️ **字段可用性随缩放级变化** —— 这是数据契约，不是渲染 bug：
+ *    归档 z>=8 的瓦片带全部字段；z<8 只带 `plant_type`/`units`/`capacity`/`status`
+ *    （见 `build_pmtiles.mjs` 的 `--kind gem` 档案里的 `collapseProps`）。
+ *    ⇒ `location_id` / `name` / `country` / `state` / `owner` **仅高缩放级保证存在**。
+ *    低缩放级点开弹窗时它们是 `null`，弹窗显示 `MISSING` —— 那是**真实缺失**。
+ *    ⚠️ 所以不要在别处假设这些字段一定有值。
+ *
+ * 契约字段：`name` / `country` / `state` / `plant_type` / `units` /
+ *           `capacity` / `status` / `owner`（`location_id` 可选）。
+ *
+ * ‼️ 阶段50-C.2-B：`status` **只作数据字段**（弹窗展示），**不参与 paint** ——
+ *    颜色编码已由 `plant_type` 单独承担，两个通道再加一份 status 会互相抢谱。
+ *
+ * `wiki` 没有任何通路产出它，保留键位是为了改类型时不漏掉存量引用。
+ */
+interface GemPlantProperties {
   name: string;
+  /** 电站级稳定标识（GEM location_id）。⚠️ 仅 z>=8 保证存在 */
+  location_id?: string | null;
+  /** ⚠️ 仅 z>=8 保证存在 */
   country: string | null;
+  /** ⚠️ 仅 z>=8 保证存在 */
   state: string | null;
+  /**
+   * 煤 / 油气 / 生物质。**全缩放级可用**。
+   * ‼️ 阶段50-C.2-B 起它是**唯一**的颜色来源（status 不再参与 paint）。
+   */
+  plant_type?: string | null;
   units: number;
   capacity: number;
+  /** ⚠️ 只作弹窗展示，**不进任何 paint 表达式**（见上面的说明） */
   status: string;
+  /** ⚠️ 仅 z>=8 保证存在 */
   owner: string | null;
+  /** ⚠️ 无任何通路产出它，也**不在弹窗里展示**（保留键位只为改类型时不漏掉引用） */
   wiki: string | null;
-  /** 各状态的机组数，供弹窗说明「这个环为什么是这样画的」 */
-  byStatus: Record<string, number>;
   [key: string]: unknown;
 }
 
 /**
- * 阶段48-A：读 GEM 机组级数据，**在 JS 里按 location_id 聚合成电站级**。
+ * 阶段50-B.1：把要素属性**显式映射**成弹窗要的形状。
  *
- * 🔴 为什么不把聚合写进 SQL：主状态（数量最多的那个）不是 SQL 的强项，
- *    要么写成相关子查询（慢），要么写窗口函数（SQLite 支持但可读性骤降）。
- *    而这里的读取量只有 1.45 万行，与 WRI 那边一次拉 3.5 万行是同一个量级，
- *    JS 里一次 O(n) 分组完全够用，而且规则白纸黑字看得见。
+ * ‼️ 取代原来的 `feature.properties as unknown as GemPlantProperties`。
+ *    那个双重断言把「字段改名 / 字段缺失」整个挡在类型检查之外 ——
+ *    MapLibre 给过来的 `properties` 就是个 `{ [k: string]: any }`，
+ *    断言成什么都成立，**包括断言成错的**。症状是弹窗里出现 `undefined`，
+ *    而 TS 一句都不报。
+ *    这里逐字段取值 + 给缺省：缺字段时弹窗显示 `MISSING`（真实缺失），
+ *    而不是渲染出 `undefined 台`、`undefined MW`。
  *
- * 🔴 为什么坐标取**质心**：实测 4,865 个电站里有 255 个（5.2%）的机组坐标
- *    并不相同，最大跨度达 2.27°（≈252 km）。取「第一条」会系统性偏向
- *    数据录入顺序靠前的那个机组，取均值更中立。
- *    先累加后除，不保留小数点后过多位数。
- *
- * ⚠️ 状态取「机组数最多」的那一个（用户拍板）。并列时按 operating > planned
- *    > retired > cancelled 的优先级决出 —— **必须有个确定性规则**，
- *    否则同一个电站的渲染结果会随数据顺序变，那种 bug 极难复现。
+ * ‼️ 阶段50-C.2-B（Task 4 核查）：属性唯一的来源是 **PMTiles 瓦片要素**
+ *    （字段集见 `build_pmtiles.mjs` 的 `--kind gem` 档案）。实测可用性：
+ *      · `plant_type` / `units` / `capacity` / `status` —— **全缩放级**可用
+ *      · `name` / `owner` / `country` / `state` —— **仅 z>=8** 可用
+ *    ⇒ 低缩放级瓦片里后四个字段**不存在**，弹窗会显示 `MISSING`。
+ *      这是**数据契约**，不是渲染 bug。（`location_id` 同属 z>=8 组）
  */
-async function loadGemCoalStations(): Promise<FeatureCollection> {
-  const db = await Database.load(DB_URL);
-  const rows = (await db.select(
-    "SELECT location_id, unit_name, station_name, country, state_province, " +
-      "capacity_mw, status, latitude, longitude, owner, wiki_url " +
-      "FROM gem_coal_plants WHERE latitude IS NOT NULL AND longitude IS NOT NULL",
-  )) as Array<{
-    location_id: string;
-    unit_name: string | null;
-    station_name: string | null;
-    country: string | null;
-    state_province: string | null;
-    capacity_mw: number | null;
-    status: string | null;
-    latitude: number;
-    longitude: number;
-    owner: string | null;
-    wiki_url: string | null;
-  }>;
-
-  interface Acc {
-    name: string;
-    country: string | null;
-    state: string | null;
-    units: number;
-    capacity: number;
-    lat: number;
-    lon: number;
-    owner: string | null;
-    wiki: string | null;
-    byStatus: Map<string, number>;
-  }
-  const groups = new Map<string, Acc>();
-
-  for (const r of rows) {
-    let g = groups.get(r.location_id);
-    if (!g) {
-      g = {
-        name: r.station_name || r.unit_name || "未命名电站",
-        country: r.country,
-        state: r.state_province,
-        units: 0,
-        capacity: 0,
-        lat: 0,
-        lon: 0,
-        owner: r.owner,
-        wiki: r.wiki_url,
-        byStatus: new Map(),
-      };
-      groups.set(r.location_id, g);
-    }
-    g.units += 1;
-    g.capacity += r.capacity_mw ?? 0;
-    g.lat += r.latitude;
-    g.lon += r.longitude;
-    // owner / wiki 只补空位：同一电站各机组基本一致，取到第一个非空即可
-    if (!g.owner && r.owner) g.owner = r.owner;
-    if (!g.wiki && r.wiki_url) g.wiki = r.wiki_url;
-    const st = r.status ?? "unknown";
-    g.byStatus.set(st, (g.byStatus.get(st) ?? 0) + 1);
-  }
-
-  // 并列时的确定性优先级（不在表里的一律排最后）
-  const PRIORITY = ["operating", "planned", "retired", "cancelled"];
-  const dominant = (m: Map<string, number>): string => {
-    let best = "";
-    let bestN = -1;
-    for (const [st, n] of m) {
-      if (n > bestN) {
-        best = st;
-        bestN = n;
-      }
-    }
-    for (const p of PRIORITY) {
-      if ((m.get(p) ?? 0) === bestN && m.has(p)) return p;
-    }
-    return best;
+function gemPropsFromFeature(raw: unknown): GemPlantProperties {
+  const o = (raw ?? {}) as Record<string, unknown>;
+  const str = (k: string): string | null => {
+    const v = o[k];
+    return typeof v === "string" && v !== "" ? v : null;
   };
-
-  const features = [];
-  for (const [locationId, g] of groups) {
-    const status = dominant(g.byStatus);
-    const props: GemCoalProperties = {
-      name: g.name,
-      country: g.country,
-      state: g.state,
-      units: g.units,
-      capacity: Math.round(g.capacity * 10) / 10,
-      status,
-      owner: g.owner,
-      wiki: g.wiki,
-      byStatus: Object.fromEntries(g.byStatus),
-      // 弹窗要显示 location_id（可贴去 gem.wiki 核对），带上省得再查
-      locationId,
-    };
-    features.push({
-      type: "Feature" as const,
-      properties: props,
-      geometry: {
-        type: "Point" as const,
-        coordinates: [g.lon / g.units, g.lat / g.units],
-      },
-    });
-  }
-
-  return { type: "FeatureCollection", features };
+  const num = (k: string): number => {
+    const v = o[k];
+    return typeof v === "number" && Number.isFinite(v) ? v : 0;
+  };
+  return {
+    name: str("name") ?? "未命名电站",
+    location_id: str("location_id"),
+    country: str("country"),
+    state: str("state"),
+    plant_type: str("plant_type"),
+    units: num("units"),
+    capacity: num("capacity"),
+    status: str("status") ?? "unknown",
+    owner: str("owner"),
+    wiki: str("wiki"),
+  };
 }
 
 /**
  * GEM 电站弹窗。
  * ⚠️ CC BY 4.0 **要求署名**，所以底部那行「数据来源」不是装饰，不能删。
  */
-function buildGemCoalPopup(
-  props: GemCoalProperties,
+function buildGemPlantPopup(
+  props: GemPlantProperties,
   point?: readonly [number, number],
 ): HTMLElement {
-  const byStatus = (props.byStatus ?? {}) as Record<string, number>;
-  const statusDetail = Object.entries(byStatus)
-    .map(([st, n]) => `${GEM_STATUS_LABEL[st] ?? st} ${n}`)
-    .join(" · ");
-
+  // ‼️ 阶段50-C.3-A：「机组构成」行及其「按状态聚合机组数」的字段已删除
+  //    （该字段无产出方，恒为空）。下面这几项与 `GemPlantProperties`
+  //    的契约字段一一对应，不多不少。
   return buildPopupFrame(props.name, "未命名电站", [
-    { label: "数据来源", value: "Global Energy Monitor (CC BY 4.0)", link: GEM_COAL_LICENSE_URL },
+    { label: "数据来源", value: "Global Energy Monitor (CC BY 4.0)", link: GEM_PLANT_LICENSE_URL },
     { label: "状态", value: GEM_STATUS_LABEL[props.status] ?? props.status },
     { label: "机组数", value: `${props.units} 台` },
     { label: "装机合计", value: `${props.capacity} MW` },
     { label: "国家/地区", value: [props.country, props.state].filter(Boolean).join(" ") || MISSING },
     { label: "所有者", value: props.owner || MISSING },
     { label: "坐标", value: point ? formatLngLat(point as [number, number]) : MISSING },
-    ...(statusDetail ? [{ label: "机组构成", value: statusDetail }] : []),
   ]);
 }
 
@@ -1890,6 +1952,33 @@ function ensureOsmGridArchive(): Promise<ArchiveHandle | null> {
   });
 }
 
+/**
+ * 阶段50-B.1：数据包解析的**统一入口**。
+ *
+ * ‼️ 存在的意义是「让判定口径只有一个」。在这之前，同一件事分散在三处调用
+ *    （探测 / 区域包挂载 / thematic 挂载），每处的 label 与 missingHint 都略有
+ *    不同，改一处漏一处几乎必然发生。
+ *
+ * 查找顺序（由 `candidatePaths()` 实现，与 Rust 侧 `resolve_pack_resource()`
+ * **必须保持一致**）：
+ *   1. `app_data_dir/packs/<file>` —— 用户下载的（可能是新版本）
+ *   2. `$RESOURCE/packs/<file>`    —— 随包分发 / `install_packs.mjs` 手动投放的
+ *
+ * ⚠️ 必须保持 `quiet: true`：用户没装某个包是**正常状态**，
+ *    而探测阶段会对清单里**每一个**包都调一次 —— 不安静就会每次启动刷一串 warn。
+ *
+ * ⚠️ label 按 `kind` 取词：把 GEM 叫成“区域包”会让人在日志里
+ *    把它当成第 8 个区域（它其实不参与视口选举）。
+ */
+function resolvePackResource(entry: PackEntry): Promise<ArchiveHandle | null> {
+  const kindLabel = isThematicOverlay(entry) ? "数据包" : "区域包";
+  return ensurePmtilesArchive(entry.file, {
+    label: `${entry.label}${kindLabel}`,
+    missingHint: `把 ${entry.file} 放到 $RESOURCE/packs/`,
+    quiet: true,
+  });
+}
+
 /** 用真实离线底图拼一个内联样式，彻底摆脱在线演示瓦片 */
 function buildBasemapStyle(basemap: ArchiveHandle | null): StyleSpecification {
   if (!basemap) {
@@ -2196,6 +2285,31 @@ function addOsmGridLayers(
   });
 }
 
+/**
+ * 阶段50-A：数据包按**生命周期**分两类（不是按内容分）。
+ *
+ * · `"osm"` / 缺省 —— **区域包**：按视口选举、最多 2 个、随视野反复增删
+ * · `"gem"`         —— **thematic / global overlay**：全球单一图层，
+ *                       由图层开关控制，**该不该显示与视野完全无关**
+ *
+ * ‼️ 为什么必须分开：把 GEM 混进 `activePacks` 会产生三个都不能接受的行为
+ *    （阶段50-A 代码审查逐条确认，均有明确代码依据）：
+ *      1. 视野中心落进核心区 bbox（118,27→123,33）时 `activePacks` 被强制清空
+ *         ⇒ **GEM 在长三角整片消失**
+ *      2. GEM 的 bbox 是全球，重叠面积恒为最大 ⇒ 恒排第一、恒占 2 个名额之一，
+ *         把华东/华中这些真正的区域包挤掉
+ *      3. `zoom < PACK_MIN_ZOOM(6)` 时清空 ⇒ 缩小反而没数据，与直觉相反
+ *
+ * ⚠️ 判定用 `=== "gem"` 而**不是** `!== "osm"`。
+ *    后者在类型改成 `"region" | "gem"`（阶段50-B）后会变成灾祸：
+ *    `kind: "region"` 的条目会被算作 thematic ⇒ **所有区域包被排除出选举**，
+ *    而且不报错、只是区域包再也不加载。现在这样写，
+ *    任何未知/缺失值都安全地落到“区域包”这一侧。
+ */
+function isThematicOverlay(p: PackEntry): boolean {
+  return p.kind === "gem";
+}
+
 /** 区域包的 source id */
 function packSourceId(key: string): string {
   return `osm-pack-${key}`;
@@ -2345,6 +2459,214 @@ function addPackLayers(
       "line-width": OSM_LINES_HIT_WIDTH,
     },
   });
+}
+
+/**
+ * 阶段50-C：GEM PMTiles 图层的监听器登记表。
+ *
+ * ‼️ 与 `packCursorHandlers` 是**同一个坑**：`map.on("click", layerId, fn)`
+ *    注册的监听器挂在 **map** 上、以 layerId 为键，而 `removeLayer`
+ *    **不会**把它们清掉。GEM 包同样随开关/视野反复增删，不摘就会累积。
+ *    所以必须把 fn 引用存下来，卸载时用**同一个 fn** 去 `off`（匿名声闭包摘不掉）。
+ *
+ * ⚠️ 键是固定的 source id ⇒ 这张表最多只有 1 项，不会无限增长。
+ */
+const gemPmtilesHandlers = new Map<
+  string,
+  { click: (e: MapLayerMouseEvent) => void; enter: () => void; leave: () => void }
+>();
+
+/**
+ * 阶段50-C：GEM 电源数据包的挂载（PMTiles vector source + circle 图层 + 点击弹窗）。
+ *
+ * ‼️ 为什么不复用 `addPackLayers`：两者的数据模型不同，共用一个函数会让双方
+ *    都取到不存在的 `source-layer`：
+ *      · OSM 区域包 = 线 + 点混合，MVT 图层名 `grid`，靠 `ftype`/`vclass` 分 7 个图层
+ *      · GEM 电源包 = 纯点，MVT 图层名 `gem`，属性为 `capacity`/`status`/`units`/…
+ *
+ * ## 可视编码（阶段50-C.2-A 起由本函数**独占**实现）
+ *   · 半径  ← `capacity`（与 48-A 旧层用**同一个** step 分级，两套数据才好对比）
+ *   · 填色  ← **按 `plant_type` 三色**（coal / oil-gas / bioenergy），见 `gemFuelColor`
+ *   · 描边  ← 与填色**同一份** `gemFuelColor`；线宽为**常量** 1.6
+ *   · 透明度 ← **常量** 1
+ *   ⇒ ‼️ 阶段50-C.2-B：**`status` 不参与 paint**，只作弹窗数据字段。
+ *      可视编码全部由 `plant_type`（颜色）+ `capacity`（半径）两个通道承担。
+ *
+ *   ⇒ 全部写成 MapLibre 表达式而不是 JS 聚合。按类别拆成 3 个图层也能做，
+ *     但会把「1 个图层」变成「3 个图层」：默认开关、点击弹窗、卸载顺序
+ *     全要跟着改成三份，而任何一处漏改都是**静默**的（少画一种颜色）。
+ *
+ * ⚠️ 旧的「空心环」形状已随旧 GeoJSON 通道一起删除（50-C.1 / 50-C.2-A）。
+ *    代价：同位置的 WRI 实心点会被 GEM 的实心圆盖住 —— 这是本次迁移
+ *    **有意接受**的取舍，因为 GEM 默认关闭，用户开它就是为了看 GEM。
+ *
+ * ## 弹窗
+ *   直接复用 `buildGemPlantPopup`。
+ *   ⚠️ 字段可用性取决于**缩放级**（契约详见 `gemPropsFromFeature` 的注释）：
+ *      · `plant_type`/`units`/`capacity`/`status` —— **全缩放级**可用
+ *      · `name`/`owner`/`country`/`state`/`location_id` —— **仅 z>=8** 可用
+ *      ⇒ 低缩放级点开的弹窗会显示 `MISSING`，这是**数据契约**，不是渲染 bug。
+ *      `wiki` 没有任何通路产出它，恒为 `MISSING`。
+ *
+ * ⚠️ `popup` 传 null 时只挂图层、不注册点击（比 NPE 好）。
+ */
+function addGemPlantLayers(
+  map: MapLibreMap,
+  key: string,
+  archive: ArchiveHandle,
+  popup: Popup | null,
+): void {
+  // 阶段50-B：id 统一从函数取 —— 函数内部是唯一的字面量定义点
+  const sourceId = gemPmtilesSourceId();
+  const layerId = gemPlantsLayerId();
+  if (map.getSource(sourceId)) return;
+
+  map.addSource(sourceId, {
+    type: "vector",
+    // 与核心区/区域包同理：用 `tiles` 而不是 `url`，
+    // 避开协议把归档 header 的 bbox 当 bounds 返回。
+    tiles: [`pmtiles://${archive.key}/{z}/{x}/{y}`],
+    minzoom: archive.minZoom,
+    maxzoom: archive.maxZoom,
+    bounds: [-180, -85.0511, 180, 85.0511],
+    // ‼️ 必须用 GEM 自己的署名：沿用 `OSM_ATTRIBUTION` 会把 ODbL/OSM
+    //    署到 CC BY 4.0 的数据上，属许可违约。
+    attribution: GEM_PLANT_ATTRIBUTION,
+  });
+
+  // ⚠️ `source-layer` 不在 `CircleLayerSpecification` 的类型里（它是 MapLibre 的扩展），
+  //    写成内联属性会触发 TS 的多余属性检查；用「先声明再展开」的写法绕过，
+  //    这也是 `addPackLayers` / `addOsmGridLayers` 已有的约定。
+  const layerRef = { "source-layer": GEM_PMTILES_SOURCE_LAYER };
+
+  // 阶段50-C.2-A：填色与描边**共用同一份**「燃料 → 颜色」表达式。
+  // ‼️ 不写成两遍字面量：那样会在改动时漂移，而漂移是**静默**的
+  //    （只是某一种燃料的描边与填充对不上，不报错、不警告）。
+  // ⚠️ 类型只能这样取：maplibre-gl 的公开 `.d.ts` **没有**导出
+  //    `ExpressionSpecification`（已核实：全文 0 命中），但它导出了
+  //    `LayerSpecification`（本文件已导入）。从它 Extract 出 circle 的 paint
+  //    类型，就能把表达式提成变量而**不丢失上下文类型**（直接写 `const x = [...]`
+  //    会退化成 `(string | ...)[]`，赋给 paint 时 TS 报错）。
+  type GemCirclePaint = NonNullable<
+    Extract<LayerSpecification, { type: "circle" }>["paint"]
+  >;
+  const gemFuelColor: GemCirclePaint["circle-color"] = [
+    "match",
+    ["get", "plant_type"],
+    "coal",
+    fuelColor("Coal"),
+    // ⚠️ `oil-gas` 在 GEM 里是**油气合并**的一个 tracker（GOGPT），
+    //    没有单独的“油”与“气”之分，所以只能二选一。
+    //    取 Gas（橙）而不是 Oil（棕）：橙在白底与深色底上都更易分辨。
+    "oil-gas",
+    fuelColor("Gas"),
+    "bioenergy",
+    fuelColor("Biomass"),
+    // ⚠️ `match` 的最后一项是**兑底值**，必须给：遇到清单外的 `plant_type`
+    //    （或字段缺失）时整条表达式会落回它。
+    FUEL_FALLBACK_COLOR,
+  ];
+
+  map.addLayer({
+    id: layerId,
+    type: "circle",
+    source: sourceId,
+    ...layerRef,
+    // 阶段50-A：恒为 `visible`。
+    // ‼️ 不再需要「加了但不显示」这个中间态 —— 由 thematic overlay 生命周期
+    //    effect 保证「只在该显示时才调用本函数」（开着才装、关掉就卸），
+    //    因此拿到 `visible` 参数反而会引入一个能被错误传入的开关。
+    layout: { visibility: "visible" },
+    paint: {
+      // 阶段50-C.2-A：**填色改为按 plant_type 三色**。
+      //    原先恒为 `transparent`（旧通道要靠“空心环”与 WRI 实心点区分）。
+      //    现在只在**这一条**通道上表达“按燃料分类”，填色与描边同源。
+      "circle-color": gemFuelColor,
+      // 阶段50-C.2-A：描边与填色**共用同一条表达式**（见上面 `gemFuelColor`）。
+      //    原先这里内联一份、而填色是 transparent；现在两处引用同一个值，
+      //    改燃料配色时不可能只改到一半。
+      "circle-stroke-color": gemFuelColor,
+      // ‼️ 与 48-A 旧层的半径分级**逐字相同**。
+      //    两套数据同图对比时，若半径不一致会让人以为是数据差异。
+      "circle-radius": [
+        "interpolate",
+        ["linear"],
+        ["zoom"],
+        3,
+        ["step", ["get", "capacity"], 3.5, 100, 4.5, 500, 6, 1000, 8],
+        8,
+        ["step", ["get", "capacity"], 5.5, 100, 8, 500, 11, 1000, 15],
+      ],
+      // 阶段50-C.2-B：**线宽改为常量**。
+      //    C.2-A 曾把旧 ring 的 `zoom × status` 线宽表达式逐字迁移过来；
+      //    C.2-B 确定「status 不参与 paint」，所以那两层 `match` 全部撤掉。
+      //    取 1.6：等于旧表达式在 z3 + operating 下的值，是它的中性档。
+      "circle-stroke-width": 1.6,
+      // 阶段50-C.2-B：**status 不再参与透明度**（原先是一条 4 档 match）。
+      //    显式写 1 而不是删掉这个键：删掉只是回到同一个默认值，
+      //    但看不出「这里被有意置平」，下次很容易又被加回去。
+      "circle-stroke-opacity": 1,
+    },
+  });
+
+  if (popup) {
+    // 用 `e.lngLat` 而不是 `feature.geometry.coordinates`：矢量和要素的
+    // geometry 由 MapLibre 解码后拼装，而 `lngLat` 是事件自带的、永远存在。
+    const click = (e: MapLayerMouseEvent) => {
+      const feature = e.features?.[0];
+      if (!feature) return;
+      const point: [number, number] = [e.lngLat.lng, e.lngLat.lat];
+      popup
+        .setLngLat(point)
+        .setDOMContent(
+          buildGemPlantPopup(gemPropsFromFeature(feature.properties), point),
+        )
+        .addTo(map);
+    };
+    const enter = () => {
+      map.getCanvas().style.cursor = "pointer";
+    };
+    const leave = () => {
+      map.getCanvas().style.cursor = "";
+    };
+    gemPmtilesHandlers.set(sourceId, { click, enter, leave });
+    map.on("click", layerId, click);
+    map.on("mouseenter", layerId, enter);
+    map.on("mouseleave", layerId, leave);
+  }
+
+  console.info(
+    `[MapPage] 加载 GEM 数据包 ${key}（MVT 图层 ${GEM_PMTILES_SOURCE_LAYER}，` +
+      `z${archive.minZoom}-${archive.maxZoom}，${archive.mode} 模式）`,
+  );
+}
+
+/**
+ * 阶段50-C：卸载 GEM PMTiles 图层。
+ *
+ * ⚠️ 顺序不能反：先摘监听器、再删图层、最后删 source。
+ * ⚠️ 而且**顺序写反是不会报错的**：实测 maplibre-gl 6.9.0 的
+ *    `Style.removeSource`（`maplibre-gl-dev.mjs:15181`）遇到「还有图层在用这个 source」
+ *    时走的是 `fire(new ErrorEvent(…))` 然后 **`return`** —— 它**不抛异常**，
+ *    source 也**不会被删掉**。即：写反了不会崩，而是**静默泄漏**归档引用与已缓存瓦片。
+ *    同类坑：`setLayoutProperty` 对不存在的图层（`maplibre-gl-dev.mjs:15376`）
+ *    也是 `fire(ErrorEvent)` + `return`，同样是静默的。
+ *    ⇒ 这一整块“没报错”**不等于**“没问题”。
+ * ⚠️ 必须真的 remove：只设 visibility=none 会把归档引用与已缓存瓦片留在内存里，
+ *    而包是随开关反复增删的。
+ */
+function removeGemPlantLayers(map: MapLibreMap): void {
+  const sourceId = gemPmtilesSourceId();
+  const layerId = gemPlantsLayerId();
+  const h = gemPmtilesHandlers.get(sourceId);
+  if (h) {
+    map.off("click", layerId, h.click);
+    map.off("mouseenter", layerId, h.enter);
+    map.off("mouseleave", layerId, h.leave);
+    gemPmtilesHandlers.delete(sourceId);
+  }
+  if (map.getLayer(layerId)) map.removeLayer(layerId);
+  if (map.getSource(sourceId)) map.removeSource(sourceId);
 }
 
 /**
@@ -2631,10 +2953,27 @@ function MapPage({
 
   // 图层可见性：纯视觉开关，不加载任何数据
   // 阶段30：除三个大开关外，还包含 4 个电压分级键（「电压未知」不在其中 = 默认关闭）
-  const [visibleLayers, setVisibleLayers] = useState<readonly string[]>(() => [
-    ...LAYERS,
-    ...DEFAULT_ON_TIERS,
-  ]);
+  //
+  // ‼️ 阶段50-C.3-A：初始值过一遍 `normalizeLayerKeys` —— 这是旧 key **唯一**
+  //    可能的进入口（将来从 localStorage / 用户配置恢复面板状态时，
+  //    恢复出来的可能是改名前的「GEM 煤炭数据」）。今天的初始值是常量、
+  //    转换是恒等映射，但入口先摆好，加持久化时才不会漏。
+  const [visibleLayers, setVisibleLayersRaw] = useState<readonly string[]>(() =>
+    normalizeLayerKeys([...LAYERS, ...DEFAULT_ON_TIERS]),
+  );
+
+  /**
+   * 阶段50-C.3-A：`visibleLayers` 的**唯一**写入通道。
+   *
+   * ‼️ 所有写入都过一遍 `normalizeLayerKeys`，维持这条不变量：
+   *    **`visibleLayers` 里永远只出现当前 key**。
+   *    只要有一次绕过（直接调 `setVisibleLayersRaw`）写进旧 key，
+   *    下游的 `includes(GEM_PLANT_LAYER_NAME)` 就会静默失效 ——
+   *    开关显示已打开、图层却不动，且没有任何报错。
+   */
+  const setVisibleLayers = (
+    updater: (prev: readonly string[]) => readonly string[],
+  ) => setVisibleLayersRaw((prev) => normalizeLayerKeys(updater(prev)));
 
   /**
    * 地图与数据是否都就绪。
@@ -2730,6 +3069,23 @@ function MapPage({
   /** 探测是一次性的，用 ref 防止 StrictMode 下重复探测（虽然归档缓存已幂等，这里省掉重复日志） */
   const packsProbedRef = useRef(false);
 
+  /**
+   * 阶段50-A：清单的 ref 镜像。
+   *
+   * ‼️ `onPackInstalled` 的订阅只注册一次（deps=`[]`），而它的回调里需要按
+   *    **最新**清单判断「这个文件属于哪个品类」才能选对卸载函数。
+   *    用 state 会发现回调永远只能看到首次挂载时的闭包值（通常还是 `null`），
+   *    于是 GEM 文件变化时会被当成区域包处理 —— 卸载落空，而且不报错。
+   */
+  const packsManifestRef = useRef<PacksManifest | null>(null);
+
+  /**
+   * 阶段50-A：thematic overlay（当前只有 GEM）当前**是否应该挂着**的 ref 镜像。
+   * ⚠️ 与 `activePacksRef` 同一个用途：挂载是异步的（要等归档 Range 探测），
+   *    `then` 里必须复核「这期间开关是不是又被关掉了」，读的必须是最新值。
+   */
+  const gemWantedRef = useRef(false);
+
   /** 输电线路总开关的状态：任一电压档开启即为「开」 */
   const anyTierOn = LINE_TIER_KEYS.some((k) => visibleLayers.includes(k));
 
@@ -2741,15 +3097,6 @@ function MapPage({
    *    「关掉电厂图层后再平移地图」会把聚合数字又画回来。
    */
   const visibleLayersRef = useRef<readonly string[]>(visibleLayers);
-
-  /**
-   * 阶段48-A：GEM 煤炭数据是否已经加载过。
-   *
-   * ⚠️ 用 **ref 而不是 state**：它只用来防重复加载，不参与渲染。
-   *    用 state 的话加载完成会多触发一整轮重渲染（含挂着的 3.5 万点聚合图层）。
-   * ⚠️ 加载失败时会被**复位成 false**，让用户再拨一次开关就能重试。
-   */
-  const gemCoalLoadedRef = useRef(false);
 
   /**
    * 聚合数字用的是 HTML Marker，**不受 MapLibre 的 visibility 管辖**，
@@ -3331,100 +3678,16 @@ function MapPage({
                 },
               });
 
-              // ---- 阶段48-A：GEM 煤炭层（空心环）----
+              // ---- GEM 层由 PMTiles vector 通道提供 ----
+              // ⚠️ 阶段50-C.1：这里原先是**建图期**就挂上的一个空 GeoJSON 源
+              //    （`gem-coal`）+ 两个 circle 图层，数据由 `loadGemPlants()` 读
+              //    SQLite 后 `setData` 注入。那整条通道已删除。
+              //    GEM 现在是 thematic overlay：由「开关 + 数据包是否已安装」
+              //    驱动的独立生命周期 effect 挂载（见 addGemPlantLayers），
+              //    建图时不占任何 source/layer。
               //
-              // 🔴 为什么不把 GEM 并进上面那个 source：两边粒度不同
-              //    （WRI 电站级 / GEM 机组级）且 GEM 已聚合到电站级，
-              //    合并会让「电厂」那个开关同时管两层，无法单独关掉 GEM。
-              //
-              // 🔴 为什么半径比 WRI 实心点**大一圈**：两边都覆盖煤电，
-              //    同一位置会重叠。若半径相同，WRI 的实心圆会把 GEM 的环
-              //    刚好填满 —— 环就看不见了。大一圈才形成「实心点外套一个环」
-              //    的可见组合，一眼能对比两个数据集。
-              //
-              // ⚠️ 数据**先不放**：空集合占位，等用户首次打开开关时再加载
-              //    （见下面的懒加载 effect）。这样不开这个层的用户零开销。
-              map.addSource(GEM_COAL_SOURCE, {
-                type: "geojson",
-                data: { type: "FeatureCollection", features: [] },
-                // CC BY 4.0 要求署名，挂在数据源上会出现在右下角版权区
-                attribution: GEM_COAL_ATTRIBUTION,
-              });
-
-              map.addLayer({
-                id: GEM_COAL_RING_LAYER_ID,
-                type: "circle",
-                source: GEM_COAL_SOURCE,
-                layout: { visibility: "none" },
-                paint: {
-                  // 空心：填色全透明，只留描边
-                  "circle-color": "transparent",
-                  // 与 WRI 同一套容量分级，但半径整体大一圈（见上）
-                  "circle-radius": [
-                    "interpolate",
-                    ["linear"],
-                    ["zoom"],
-                    3,
-                    ["step", ["get", "capacity"], 3.5, 100, 4.5, 500, 6, 1000, 8],
-                    8,
-                    ["step", ["get", "capacity"], 5.5, 100, 8, 500, 11, 1000, 15],
-                  ],
-                  // 描边颜色复用 **与 WRI 同一份** 燃料色，不另写十六进制
-                  "circle-stroke-color": fuelColor("Coal"),
-                  // ⚠️ MapLibre 的 circle 图层**没有** circle-stroke-dasharray
-                  //    （已在 maplibre-gl.d.ts 核实：只有 stroke-width / stroke-color /
-                  //    stroke-opacity 三个属性）。所以状态用**透明度 + 线宽**编码，
-                  //    而「拟建/在建」另加一圈外环（形状编码），见下一个图层。
-                  "circle-stroke-width": [
-                    "interpolate",
-                    ["linear"],
-                    ["zoom"],
-                    3,
-                    ["match", ["get", "status"], "operating", 1.6, "planned", 1.6, "retired", 1.1, "cancelled", 0.9, 1],
-                    8,
-                    ["match", ["get", "status"], "operating", 2.4, "planned", 2.4, "retired", 1.6, "cancelled", 1.2, 1.4],
-                  ],
-                  "circle-stroke-opacity": [
-                    "match",
-                    ["get", "status"],
-                    "operating",
-                    1,
-                    "planned",
-                    0.95,
-                    "retired",
-                    0.45,
-                    "cancelled",
-                    0.25,
-                    0.4,
-                  ],
-                },
-              });
-
-              // 拟建/在建：**第二圈外环**。
-              // circle 画不了虚线，但「双环」是制图上同样公认的「未建成」记号，
-              // 而且它走的是**形状**通道，不与颜色/透明度抢谱。
-              map.addLayer({
-                id: GEM_COAL_PLANNED_HALO_ID,
-                type: "circle",
-                source: GEM_COAL_SOURCE,
-                filter: ["==", ["get", "status"], "planned"],
-                layout: { visibility: "none" },
-                paint: {
-                  "circle-color": "transparent",
-                  "circle-radius": [
-                    "interpolate",
-                    ["linear"],
-                    ["zoom"],
-                    3,
-                    ["step", ["get", "capacity"], 6.5, 100, 7.5, 500, 9, 1000, 11],
-                    8,
-                    ["step", ["get", "capacity"], 8.5, 100, 11, 500, 14, 1000, 18],
-                  ],
-                  "circle-stroke-color": fuelColor("Coal"),
-                  "circle-stroke-width": 1,
-                  "circle-stroke-opacity": 0.75,
-                },
-              });
+              // ‼️ 为什么不在建图期就挂：归档要**下载**才能拿到，建图时并不存在；
+              //    而且默认关闭，不开这个层的用户不该为它付内存。
 
               // ‼️ addLayer 会追加到样式最顶，会盖住地名标签 —— 与区域包那里同一个坑
               if (map.getLayer(BASEMAP_LABEL_LAYER_ID)) {
@@ -3536,25 +3799,6 @@ function MapPage({
                   )
                   .addTo(map);
               });
-
-              // ---- 阶段48-A：点击 GEM 空心环：弹出电站详情 ----
-              // 两个图层都要注册：拟建/在建的位置上，最上层其实是那个外环，
-              // 只给内环注册的话用户会发现「有些环点不开」。
-              for (const lid of [GEM_COAL_RING_LAYER_ID, GEM_COAL_PLANNED_HALO_ID]) {
-                map.on("click", lid, (e) => {
-                  const feature = e.features?.[0];
-                  if (!feature) return;
-                  // ⚠️ 双重保险：外环层已用 filter 限定 planned，这里再确认一次，
-                  //    将来若有人改掉 filter 也不会弹出错误的状态
-                  const point = (feature.geometry as Point).coordinates as [number, number];
-                  popup
-                    .setLngLat(point.slice() as [number, number])
-                    .setDOMContent(
-                      buildGemCoalPopup(feature.properties as unknown as GemCoalProperties, point),
-                    )
-                    .addTo(map);
-                });
-              }
 
               // ---- 阶段22：点击变电站：弹出详情卡片 ----
               map.on("click", SUBSTATIONS_LAYER_ID, (e) => {
@@ -3691,6 +3935,11 @@ function MapPage({
       // 先摘掉标记与弹窗，再销毁地图
       clearClusterLabels();
       popup.remove();
+      // 阶段50-A：GEM 的监听器登记在**模块级** Map 里，`map.remove()` 只销毁
+      // map 自身的监听器，**不会**清它 —— 那条记录会继续持有已销毁的 map 与 popup。
+      // 若组件重挂载后 GEM 没被再次挂载（探测未完成 / 开关没开），
+      // 这条记录就再也没有机会被后来者覆盖 ⇒ 长期占着一份已废弃的地图内存。
+      gemPmtilesHandlers.clear();
       mapRef.current?.remove();
       mapRef.current = null;
     };
@@ -3749,6 +3998,7 @@ function MapPage({
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const manifest = (await res.json()) as PacksManifest;
         if (cancelled) return;
+        packsManifestRef.current = manifest;
         setPacksManifest(manifest);
 
         if (packsProbedRef.current) return;
@@ -3756,12 +4006,7 @@ function MapPage({
         const results = await Promise.all(
           manifest.packs.map(async (p) => ({
             key: p.key,
-            ok:
-              (await ensurePmtilesArchive(p.file, {
-                label: `${p.label}区域包`,
-                missingHint: `把 ${p.file} 放到 $RESOURCE/packs/（node scripts/install_packs.mjs）`,
-                quiet: true,
-              })) !== null,
+            ok: (await resolvePackResource(p)) !== null,
           })),
         );
         if (cancelled) return;
@@ -3777,7 +4022,10 @@ function MapPage({
             "该文件由 `node scripts/gen_packs_manifest.mjs` 生成。",
           err,
         );
-        if (!cancelled) setPacksManifest(null);
+        if (!cancelled) {
+          packsManifestRef.current = null;
+          setPacksManifest(null);
+        }
       }
     })();
     return () => {
@@ -3802,7 +4050,31 @@ function MapPage({
       invalidateArchive(resource);
 
       const map = mapRef.current;
-      if (map?.getSource(packSourceId(key))) {
+      // 阶段50-A：先按品类选对卸载函数。
+      // ‼️ 少了 GEM 这一支会出两个都不会报错的问题：
+      //    ① 用户在设置页**删除** GEM 数据包后，图层会一直留在图上
+      //       （source 指向已删除的归档；瓦片 404 或命中旧缓存）
+      //    ② 下面 `setPacksAvailable(filter)` 会把 key 从数组里摘掉，
+      //       而「按视口卸载」那个循环**遍历的正是 packsAvailable** ——
+      //       于是它再也看不到这个 key，永远不会补拆一次
+      //    （区域包不受影响：它在这一行就已经被显式拆掉了，这就是本段存在的意义）
+      //
+      // 🔴 阶段50-B：**按 file 反查清单条目，而不是按 key**。
+      //    `packKeyFromFile()` 是从 basename 推 key 的（`osm-huadong.pmtiles` → `huadong`），
+      //    对 GEM 会推出 `"gem-plants"`，而清单里声明的 `key` 是 `"gem"` ——
+      //    两者对不上 ⇒ `find` 落空 ⇒ 上面的 GEM 拆除分支**默默地永远不会执行**。
+      //    这正是“不要依赖 basename 自动推导 key”的具体原因：
+      //    **GEM 一律以清单的 entry.key 为准**，事件里的 basename 只用来定位是哪一个条目。
+      const changed = packsManifestRef.current?.packs.find(
+        (p) => p.file.split("/").pop() === file,
+      );
+      if (changed && isThematicOverlay(changed)) {
+        gemWantedRef.current = false;
+        if (map?.getSource(gemPmtilesSourceId())) {
+          removeGemPlantLayers(map);
+          console.info(`[MapPage] GEM 数据包 ${changed.key} 文件已变化，拆掉旧图层等重挂`);
+        }
+      } else if (map?.getSource(packSourceId(key))) {
         removePackLayers(map, key);
         console.info(`[MapPage] 区域包 ${key} 文件已变化，拆掉旧图层等重挂`);
       }
@@ -3868,6 +4140,11 @@ function MapPage({
       const view = boundsFromCamera(c.lng, c.lat, map.getZoom(), size.w, size.h);
       const next = packsManifest.packs
         .filter((p) => packsAvailable.includes(p.key))
+        // 阶段50-A：thematic overlay（GEM）**不参与**视口选举。
+        // ‼️ 这一步就是它“不抢名额”的全部实现 —— 只要它不进这个数组，
+        //    就不可能占掉 `PACK_MAX_ACTIVE` 里的一个位置。
+        //    （GEM 的挂载由下面那个独立生命周期 effect 接管）
+        .filter((p) => !isThematicOverlay(p))
         .map((p) => ({ key: p.key, area: bboxOverlapArea(view, p.bbox) }))
         .filter((x) => x.area > 0)
         .sort((a, b) => b.area - a.area)
@@ -3902,6 +4179,13 @@ function MapPage({
 
     for (const key of packsAvailable) {
       if (want.includes(key)) continue;
+      // 阶段50-A：GEM 不归这里管 —— 它的挂载/卸载由下面那个
+      // 「thematic overlay 生命周期」effect 独占。
+      // ‼️ 这里必须显式跳过而不是“反正它不会出现在 want 里”：
+      //    本循环遍历的是 `packsAvailable`（不是 want），而 GEM 永远不在 want 里，
+      //    于是每一轮都会把刚挂上的 GEM 拆掉 —— 两个 effect 互相抢管。
+      const entry = packsManifest.packs.find((p) => p.key === key);
+      if (entry && isThematicOverlay(entry)) continue;
       if (map.getSource(packSourceId(key))) {
         removePackLayers(map, key);
         console.info(`[MapPage] 卸载区域包 ${key}`);
@@ -3912,11 +4196,11 @@ function MapPage({
       if (map.getSource(packSourceId(key))) continue;
       const entry = packsManifest.packs.find((p) => p.key === key);
       if (!entry) continue;
-      void ensurePmtilesArchive(entry.file, {
-        label: `${entry.label}区域包`,
-        missingHint: `把 ${entry.file} 放到 $RESOURCE/packs/`,
-        quiet: true,
-      }).then((archive) => {
+      // 阶段50-A：GEM 不走这条路径（它由下面的 thematic overlay 生命周期 effect 独占）。
+      // 这里显式跳过而不是“靠选举保证不会出现”—— 把归属写在边界上，
+      // 将来若有人再把 GEM 塞进 activePacks 也只会无效，不会造成双向抢管。
+      if (isThematicOverlay(entry)) continue;
+      void resolvePackResource(entry).then((archive) => {
         const m = mapRef.current;
         if (!archive || !m) return;
         if (!activePacksRef.current.includes(key)) return; // 视野又变了，不挂了
@@ -3971,6 +4255,75 @@ function MapPage({
   }, [activePacks, mapReady, packsManifest, packsAvailable]);
 
   /**
+   * 阶段50-A：**thematic / global overlay 的独立生命周期**（当前只有 GEM）。
+   *
+   * ‼️ 为什么不复用 `activePacks`（上面那个 effect）：两者语义根本不同 ——
+   *    · `activePacks` = 「**按视口**选举、最多 2 个」的**区域包**管理器
+   *      （核心 bbox 优先、`zoom < 6` 不加载、按重叠面积排序取前 2）
+   *    · GEM = **全球单一图层**，由「GEM 发电设施」开关控制，
+   *      「该不该显示」与视野**完全无关**
+   *    混在一起会产生三个都不能接受的行为，详见 `isThematicOverlay` 的注释。
+   *
+   * ## 装载策略：**开着才装、关掉就卸**
+   *    与 48-A 的懒加载同一个取舍（「不开的用户零开销」）——
+   *    归档 5.4 MB / 19,182 张瓦片，没打开这个图层的人不该为它付内存。
+   *    这也让 `addGemPlantLayers` 不再需要「加了但不显示」那个中间态。
+   *
+   * ## 它同时接管了三件事
+   *    ① 开关打开且数据包已装 → 挂载
+   *    ② 开关关闭 / 数据包被删 → 卸载
+   *    ③ 数据包文件变化（重下/更新） → 由 `onPackInstalled` 里的
+   *       `removeGemPlantLayers` 先拆，然后本 effect 因为 `packsAvailable`
+   *       变化而重跑、重新挂上新归档
+   *
+   * ⚠️ 挂载是异步的（要等 127 字节 Range 探测），等待期间开关可能又关了 ——
+   *    所以 `then` 里必须用 ref **复核一次**（与区域包挂载同一个坑）。
+   *
+   * ⚠️ 有意**不**给 GEM 加 `PACK_MIN_ZOOM` 那类限级：归档自带 `minzoom: 0`，
+   *    而「缩小反而没数据」对一个全球图层是反直觉的（这正是审查里 H-3 那条）。
+   */
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapReady || !packsManifest) return;
+
+    const entry = packsManifest.packs.find(isThematicOverlay);
+    if (!entry) {
+      // 清单里根本没有 thematic overlay（或清单被换掉）→ 确保不残留
+      gemWantedRef.current = false;
+      if (map.getSource(gemPmtilesSourceId())) {
+        removeGemPlantLayers(map);
+        console.info("[MapPage] 卸载 GEM 数据包（清单中已无此包）");
+      }
+      return;
+    }
+
+    const wanted =
+      packsAvailable.includes(entry.key) &&
+      visibleLayers.includes(GEM_PLANT_LAYER_NAME);
+    gemWantedRef.current = wanted;
+
+    if (!wanted) {
+      if (map.getSource(gemPmtilesSourceId())) {
+        removeGemPlantLayers(map);
+        console.info("[MapPage] 卸载 GEM 数据包（开关关闭或数据包不可用）");
+      }
+      return;
+    }
+
+    if (map.getSource(gemPmtilesSourceId())) return; // 已挂上，无需重复
+
+    void resolvePackResource(entry).then((archive) => {
+      const m = mapRef.current;
+      if (!archive || !m) return;
+      if (!gemWantedRef.current) return; // 这期间开关被关了，不挂了
+      addGemPlantLayers(m, entry.key, archive, popupRef.current);
+      // 与区域包同理：`addLayer` 会把新图层**追加到样式最顶**，
+      // 得把地名标签提回来，否则 GEM 的环会盖住地名。
+      if (m.getLayer(BASEMAP_LABEL_LAYER_ID)) m.moveLayer(BASEMAP_LABEL_LAYER_ID);
+    });
+  }, [mapReady, packsManifest, packsAvailable, visibleLayers]);
+
+  /**
    * 阶段21：把「图层控制」的开关真正接到 MapLibre 上。
    *
    * ⚠️ 两个坑：
@@ -3999,9 +4352,15 @@ function MapPage({
     apply([CLUSTER_LAYER_ID, PLANT_LAYER_ID, HIGHLIGHT_LAYER_ID, OSM_PLANT_LAYER_ID], on("电厂"));
     apply([SUBSTATIONS_LAYER_ID, OSM_SUBSTATION_LAYER_ID], on("变电站"));
 
-    // 阶段48-A：GEM 煤炭层（默认关闭，不在 visibleLayers 初始值里）。
-    // 两个图层必须**一起**开关：只开环不开外环，拟建/在建立马失去形状区分。
-    apply([GEM_COAL_RING_LAYER_ID, GEM_COAL_PLANNED_HALO_ID], on(GEM_COAL_LAYER_NAME));
+    // 阶段48-A：GEM 层（默认关闭，不在 visibleLayers 初始值里）。
+    // 阶段50-A：它的**挂载/卸载**由「thematic overlay 生命周期」effect 独占管理
+    //    （关掉开关会整个拆掉）；这里保留它只是「兵底同步」——
+    //    万一卸载与开关在同一帧里竞态，也不会留下一个可见的残留。
+    // ‼️ 阶段50-C.2-A：只剩这一个图层了（旧 GeoJSON 通道的两个图层已删除），
+    //    原先“只开环不开外环会失去形状区分”的约束随之消失。
+    //    旧开关名已在 `visibleLayers` 的**规范化层**里转掉了（见 `normalizeLayerKeys`），
+    //    这里只认当前 key，无需再判旧名。
+    apply([gemPlantsLayerId()], on(GEM_PLANT_LAYER_NAME));
 
     // 阶段43：铁路 / 油气管道。两个独立开关，**默认关闭**（不在 visibleLayers 初始值里）。
     // 它们没有命中热区/弹窗，所以不需要像线路那样联动 hit 层。
@@ -4046,41 +4405,6 @@ function MapPage({
     // 「用户在看哪些电压等级」正是这个上下文的价值所在
     setViewportInfo(publishViewport());
   }, [visibleLayers, activePacks]);
-
-  /**
-   * 阶段48-A：GEM 煤炭数据的**懒加载**。
-   *
-   * ‼️ 为什么不在建图时一起读：这个层**默认关闭**，而它要多拉 1.45 万行
-   *    （WRI 那边已经是 3.5 万行）。把成本挂在所有用户的启动路径上，
-   *    只为少数会打开它的人服务，不划算 —— 而这里正好可以做到「不开不付」。
-   */
-  useEffect(() => {
-    if (!mapReady) return;
-    if (!visibleLayers.includes(GEM_COAL_LAYER_NAME)) return;
-    if (gemCoalLoadedRef.current) return;
-    const map = mapRef.current;
-    if (!map) return;
-
-    gemCoalLoadedRef.current = true;
-    let cancelled = false;
-    void loadGemCoalStations()
-      .then((fc) => {
-        if (cancelled) return;
-        const src = map.getSource(GEM_COAL_SOURCE) as GeoJSONSource | undefined;
-        if (!src) return;
-        src.setData(fc as unknown as GeoJSON.GeoJSON);
-        console.info(`[MapPage] GEM 煤炭数据已加载：${fc.features.length} 座电站（按 location_id 聚合）`);
-      })
-      .catch((err: unknown) => {
-        // 失败后**允许重试**：把标志复位，用户再拨一次开关就会重试，
-        // 而不是把这个层永久卡在空白状态（那种状态下用户完全无从判断）。
-        gemCoalLoadedRef.current = false;
-        console.error("[MapPage] GEM 煤炭数据加载失败：", err);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [visibleLayers, mapReady]);
 
   /**
    * 阶段30：当前视野数据统计。
@@ -4400,7 +4724,7 @@ function MapPage({
                   {group.id === "power" && (
                     <>
                       <ul className={styles.layerList}>
-                        {[...LAYERS, GEM_COAL_LAYER_NAME].map((name) => {
+                        {[...LAYERS, GEM_PLANT_LAYER_NAME].map((name) => {
                           // 「输电线路」是总开关：状态 = 任一电压档开启；点击 = 全开 / 全关
                           const isVisible =
                             name === "输电线路" ? anyTierOn : visibleLayers.includes(name);

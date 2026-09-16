@@ -12,6 +12,22 @@
 
 export const MANIFEST_URL = "/packs_manifest.json";
 
+/**
+ * 阶段50-B：数据包品类 —— **按生命周期分**，不是按内容分。
+ *
+ * · `"region"` —— **区域包**：某区域的电网线/面要素，按视口 bbox 选举、
+ *                  最多同时 2 个、随视野反复增删（归档内 MVT 图层名 `grid`）
+ * · `"gem"`    —— **thematic / global overlay**：全球单一图层，
+ *                  由图层开关控制、**不参与视口选举**（归档内 MVT 图层名 `gem`）
+ *
+ * ‼️ 两者的**挂载代码不同**，混用会取到不存在的 `source-layer` ——
+ *    而那个失败是**静默的**（MapLibre 只是什么都不画）。
+ *
+ * ⚠️ 只在这里定义一次，MapPage 以 `import type` 复用 —— 之前两边各写一份
+ *    `"osm" | "gem"`，已经在漂移（MapPage 那份没有 `core` / `release`）。
+ */
+export type PackKind = "region" | "gem";
+
 /** 单个区域数据包在清单里的描述 */
 export interface PackEntry {
   key: string;
@@ -26,6 +42,14 @@ export interface PackEntry {
   bytes: number | null;
   /** 阶段48：区域包围盒 [w, s, e, n]，向导完成后用它把地图初始化到已下载区域 */
   bbox?: [number, number, number, number];
+  /**
+   * 阶段50-B：数据包品类，决定由哪套生命周期代码挂载。
+   *
+   * ⚠️ 可选：旧清单没有这个字段。运行时一律用 `=== "gem"` 判定，
+   *    缺失自然落到 region 分支 —— 千万不要用 `!== "region"` 之类
+   *    的写法，那会把缺省值误判成 thematic。
+   */
+  kind?: PackKind;
 }
 
 export interface PacksManifest {

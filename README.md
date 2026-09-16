@@ -4,16 +4,19 @@
 
 ## 当前阶段
 
-**阶段48-A —— GEM 煤炭数据融合（机组级聚合渲染）**（2026-09-16）
+**阶段48-A —— GEM 发电设施数据融合（机组级聚合渲染）**（2026-09-16）
 
 已接入的能力：
 
 - **地图**：离线 PMTiles 底图 + 本地中文字形（无网络也能出中文地名）
 - **电网数据**：长三角真实 OSM 数据（22,380 条要素），本地切为 4.68 MB PMTiles 随安装包分发
 - **电厂数据**：WRI Global Power Plant Database（34,936 行，内置种子库，首次启动自动播种）
-- **GEM 煤炭数据**（阶段48-A）：Global Energy Monitor 的 Global Coal Plant Tracker，
-  **机组级 14,509 行 / 4,865 座电站**（全生命周期：在运 / 拟建在建 / 已退役 / 已取消），
-  独立于 WRI 的**空心环叠加层**，**默认关闭**且数据懒加载。详见下文「数据来源与许可」
+- **GEM 发电设施**（阶段48-A 引入，阶段50 改为 PMTiles 数据包）：Global Energy Monitor
+  的三份机组级 tracker（GCPT 煤电 / GOGPT 油气 / GBPT 生物质），
+  **33,790 机组聚合为 14,793 座电站**（煤炭 4,865 / 油气 6,390 / 生物质 3,538），
+  含全生命周期（在运 / 拟建在建 / 已退役 / 已取消）。**不随安装包分发** ——
+  作为 `packs/gem-plants.pmtiles`（7.07 MB）按需下载；独立于 WRI 的**实心彩色圆**叠加层
+  （按 `plant_type` 三色），**默认关闭**。详见下文「数据来源与许可」
 - **图层控制**：`电厂 / 变电站 / 输电线路` 三个总开关；输电线路再按 `735kV 以上 / 500-734kV /
   220-499kV / 220kV 以下 / 电压未知` 五个原生复选框细分（**「电压未知」默认关闭**）
 - **当前视野统计**：地图左下角实时显示「本视野：X 座电厂 · Y 段线路 · Z 座变电站」，
@@ -49,11 +52,22 @@
 |---|---|---|
 | 离线底图 PMTiles | `maps\basemap.pmtiles` | 31.77 MB |
 | 长三角 OSM 电网切片 | `maps\osm_grid.pmtiles` | 4.68 MB |
-| 数据种子库（WRI 33,215 行 + GEM 14,509 行） | `seed\global_power_gis.db` | 13.86 MB |
+| 数据种子库（仅 WRI 电厂 34,936 行） | `seed\global_power_gis.db` | 9.00 MB |
 
-> 种子库在阶段48-A 从 7.76 MB 涨到 13.86 MB（+6.10，主要是 GEM 机组级 14,509 行及其两条索引）。
-> 但**安装包只涨了 0.82 MB**（45.72 → 46.54）—— 数据库走 LZMA 后压缩率很高，
+> 种子库在阶段48-A 曾因 GEM 机组级数据从 7.76 MB 涨到 13.86 MB；**阶段50–51 把 GEM 移出种子库**
+> （改走可下载的数据包，见下方「GEM 的运行架构」）后回落到 **9.00 MB（−4.86 MB）**。
+> 参考：当初那 +6.10 MB 只让安装包涨了 0.82 MB（45.72 → 46.54）—— 数据库走 LZMA 后压缩率很高，
 > 所以「种子库大小」与「分发包膨胀」不是一回事，评估体积时别直接相加。
+
+**GEM 的运行架构**（阶段50 起 —— **不进安装包，也不进 SQLite**）：
+
+| 项 | 值 |
+|---|---|
+| 数据包 | `GEM Plants` — `packs/gem-plants.pmtiles`（7.07 MB，按需下载） |
+| 清单条目 | `{ key: "gem", kind: "gem", label: "GEM Plants" }` |
+| MapLibre source | `gem-pmtiles` —— **PMTiles vector source**（`pmtiles://` 协议） |
+| `source-layer` | `gem` |
+| MapLibre layer | `gem-plants` —— 单一 circle 图层，**默认关闭** |
 
 **三项全离线**：底图与电网切片来自安装目录（本地 `asset` 协议）、电厂数据来自 SQLite 种子库
 （首启播种到 `%APPDATA%\com.pstar119.globalpowergis\global_power_gis.db`）、自然语言查询走本机 Ollama。
@@ -101,26 +115,31 @@
 
 ### Global Energy Monitor —— CC BY 4.0
 
-GEM 的煤炭数据（Global Coal Plant Tracker）以
+GEM 发电设施（`GEM Plants`）—— **Global Energy Monitor 数据来源说明**：数据来自其三份
+机组级 tracker（GCPT 煤电 / GOGPT 油气 / GBPT 生物质），均以
 **Creative Commons Attribution 4.0 International（CC BY 4.0）**发放。
 
 - 许可正文：<https://globalenergymonitor.org/creative-commons-license/>
   （⚠️ 旧地址 `/terms-of-use/` 已 **404**，不要再用）
 - 数据集主页：<https://globalenergymonitor.org/projects/global-integrated-power-tracker/>
-- 抓取接口：`https://api.globalenergymonitor.org/assets?asset_type=coal-plant`
-  （公开、无需鉴权；`limit` 上限 **500**，超了返回 422）
-- 推荐引用：
+- 抓取接口：`https://api.globalenergymonitor.org/assets?asset_type=<type>`
+  （`<type>` ∈ `coal-plant` / `oil-gas-plant` / `bioenergy-plant`；公开、无需鉴权；
+  `limit` 上限 **500**，超了返回 422）
+- 推荐引用（**煤电 GCPT**）：
   > © Global Energy Monitor. Global Coal Plant Tracker, January 2026 release.
   > Distributed under a Creative Commons Attribution 4.0 International License.
+
+> ⚠️ 油气（GOGPT）与生物质（GBPT）是**独立 tracker**、各有自己的推荐引用（见许可正文页面）。
+> 本项目 GEM 数据**含三者**，此处只转录煤电那一条，**不代 GEM 拟写**其余两条。
 
 CC BY 4.0 允许复制、再分发与改编（§2），且 §4 明确覆盖数据库权利 —— 可以提取、
 再利用乃至再分发**全部或实质性部分**。**唯一义务是署名**，本项目在三个位置同时落实：
 
 | 位置 | 内容 |
 |---|---|
-| 地图右下版权区 | `煤炭数据 © Global Energy Monitor · CC BY 4.0`（挂在数据源 `attribution` 上）|
+| 地图右下版权区 | `GEM 发电设施 © Global Energy Monitor CC BY 4.0`（挂在数据源 `attribution` 上）|
 | 电厂弹窗 | 「数据来源 Global Energy Monitor (CC BY 4.0)」，**可点击**跳转许可页 |
-| 源代码 | `scripts/import_gem_coal.py` 与迁移 `008_add_gem_coal_plants.sql` 头部 |
+| 源代码 | `scripts/archive/import_gem_coal_legacy.py`（原 `scripts/import_gem_coal.py`）与迁移 `008_add_gem_coal_plants.sql` 头部 |
 
 ⚠️ 网站页脚的 `© 2026 Global Energy Monitor / All Rights Reserved` 是**网站自身**的版权，
 **不是数据集**的许可。核实许可以上述 CC BY 4.0 页面为准。
@@ -135,15 +154,20 @@ CC BY 4.0 允许复制、再分发与改编（§2），且 §4 明确覆盖数�
 
 ### 刷新 GEM 数据
 
-```bash
-# 演练（只抓取与校验，不写库）
-python scripts/import_gem_coal.py
-# 真正写入（需先启动一次应用，让迁移 008 建表）
-python scripts/import_gem_coal.py --apply
+⚠️ **阶段50 起 GEM 不再有 SQLite 通道**。旧脚本已归档为
+`scripts/archive/import_gem_coal_legacy.py`（阶段51-A）—— 它写入的 `gem_coal_plants`
+表已被**迁移 009** 删除，**该脚本现已无法运行**（误跑会抛 `ImportAbort`，不会写坏数据）。
+
+现在的刷新链路是「抓取 → GeoJSON → pmtiles → 数据包」（各脚本头部有完整说明）：
+
+```text
+scripts/import_gem_plants.py     抓取三类电源，产出电站级 GeoJSON
+scripts/build_pmtiles.mjs        用 --kind gem 切成 packs/gem-plants.pmtiles
+scripts/gen_packs_manifest.mjs   刷新清单里的 sizeMb / sha256 / bytes
 ```
 
-脚本只用 Python 标准库（`urllib`），**不引入任何第三方依赖**。
-它会做完整性硬校验：抓到的条数不等于接口声明的 `total` 就中止且**不写库**。
+（归档脚本当初的两个性质记录在此以便追溯：只用 Python 标准库 `urllib`、**不引入任何
+第三方依赖**；并做完整性硬校验 —— 抓到的条数不等于接口声明的 `total` 就中止且**不写库**。）
 
 ## 技术栈
 

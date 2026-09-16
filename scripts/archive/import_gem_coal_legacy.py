@@ -21,13 +21,20 @@
   · 全量 14,509 条 / 29 页满页 + 1 页 9 条 / 约 12.67 MB / 约 45 秒。
   · 坐标与容量完整率均为 100%，capacity_unit 恒为 MW。
 
-用法：
-    # 演练模式（默认）：只抓取与校验，**不写库**
-    python scripts/import_gem_coal.py
-    # 真正写入
-    python scripts/import_gem_coal.py --apply
+━━━ ⚠️⚠️ 已归档（阶段51-A）：本脚本现已无法运行 ━━━
+它要写入的 `gem_coal_plants` 表已被**迁移 009** 删除（阶段50-C.4 已实例验证）。
+GEM 数据现在走 pmtiles 数据包通道：
+    scripts/import_gem_plants.py  →  scripts/build_pmtiles.mjs  →  packs/gem-plants.pmtiles
 
-⚠️ 首次运行前需先启动一次应用（让迁移 008 建表）。
+保留本文件**只为历史与许可追溯**（README 的署名表把它列为署名位置之一）。
+现在误跑它会是**响亮失败**而非静默出错：它先查表是否存在，不存在就抛 ImportAbort，
+且**刻意不自建表** —— 避免 DDL 出现第二个来源而与迁移漂移。
+
+用法（仅作记录，现已不可用）：
+    # 演练模式（默认）：只抓取与校验，**不写库**
+    python scripts/archive/import_gem_coal_legacy.py
+    # 真正写入
+    python scripts/archive/import_gem_coal_legacy.py --apply
 """
 
 from __future__ import annotations
