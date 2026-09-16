@@ -4,13 +4,16 @@
 
 ## 当前阶段
 
-**阶段35 —— 第一版完整可分发离线桌面应用**（2026-09-13）
+**阶段48-A —— GEM 煤炭数据融合（机组级聚合渲染）**（2026-09-16）
 
 已接入的能力：
 
 - **地图**：离线 PMTiles 底图 + 本地中文字形（无网络也能出中文地名）
 - **电网数据**：长三角真实 OSM 数据（22,380 条要素），本地切为 4.68 MB PMTiles 随安装包分发
 - **电厂数据**：WRI Global Power Plant Database（34,936 行，内置种子库，首次启动自动播种）
+- **GEM 煤炭数据**（阶段48-A）：Global Energy Monitor 的 Global Coal Plant Tracker，
+  **机组级 14,509 行 / 4,865 座电站**（全生命周期：在运 / 拟建在建 / 已退役 / 已取消），
+  独立于 WRI 的**空心环叠加层**，**默认关闭**且数据懒加载。详见下文「数据来源与许可」
 - **图层控制**：`电厂 / 变电站 / 输电线路` 三个总开关；输电线路再按 `735kV 以上 / 500-734kV /
   220-499kV / 220kV 以下 / 电压未知` 五个原生复选框细分（**「电压未知」默认关闭**）
 - **当前视野统计**：地图左下角实时显示「本视野：X 座电厂 · Y 段线路 · Z 座变电站」，
@@ -36,16 +39,21 @@
 
 安装包：`src-tauri/target/release/bundle/nsis/Global Power GIS_0.1.0_x64-setup.exe`
 
-- 体积 **44.38 MB**（NSIS，中文安装界面）；SHA256 `55747905BDFDD93AC7DFDBD4B6B693B0B5DA6C7B130B9DBACEA0A7DBF68D6805`
-- 裸主程序 10.77 MB；安装包比它多出 33.6 MB，正是下面三份资源的 LZMA 压缩后体积
+- 体积 **46.54 MB**（NSIS，中文安装界面）；SHA256 `03DC2631BE5BC9B49EFFD3E5D02844A9556A34DF2767C371578BD9F43FB66DB0`
+- 裸主程序 9.26 MB；其余为下面几份资源的 LZMA 压缩后体积
+- 预算红线 50 MB，当前余量 **3.46 MB**
 
-三份关键资源随包分发（可核：`src-tauri/target/release/nsis/x64/installer.nsi` 里的 `File /a` 指令）：
+关键资源随包分发（可核：`src-tauri/target/release/nsis/x64/installer.nsi` 里的 `File /a` 指令）：
 
 | 资源 | 安装后位置 | 体积 |
 |---|---|---|
 | 离线底图 PMTiles | `maps\basemap.pmtiles` | 31.77 MB |
 | 长三角 OSM 电网切片 | `maps\osm_grid.pmtiles` | 4.68 MB |
-| 电厂数据种子库 | `seed\global_power_gis.db` | 2.98 MB |
+| 数据种子库（WRI 33,215 行 + GEM 14,509 行） | `seed\global_power_gis.db` | 13.86 MB |
+
+> 种子库在阶段48-A 从 7.76 MB 涨到 13.86 MB（+6.10，主要是 GEM 机组级 14,509 行及其两条索引）。
+> 但**安装包只涨了 0.82 MB**（45.72 → 46.54）—— 数据库走 LZMA 后压缩率很高，
+> 所以「种子库大小」与「分发包膨胀」不是一回事，评估体积时别直接相加。
 
 **三项全离线**：底图与电网切片来自安装目录（本地 `asset` 协议）、电厂数据来自 SQLite 种子库
 （首启播种到 `%APPDATA%\com.pstar119.globalpowergis\global_power_gis.db`）、自然语言查询走本机 Ollama。
@@ -86,6 +94,56 @@
 `link.exe` / `icu_properties_data` 的 `拒绝访问 (os error 5)`，**原样重试一次即过**（本阶段实测）。
 
 取数与切片流程见 [`README_OSM.md`](./README_OSM.md)。
+
+## 数据来源与许可
+
+本项目内置的数据集**全部为开放许可**，各自的要求均已在界面上落地，不能随意删除或改写。
+
+### Global Energy Monitor —— CC BY 4.0
+
+GEM 的煤炭数据（Global Coal Plant Tracker）以
+**Creative Commons Attribution 4.0 International（CC BY 4.0）**发放。
+
+- 许可正文：<https://globalenergymonitor.org/creative-commons-license/>
+  （⚠️ 旧地址 `/terms-of-use/` 已 **404**，不要再用）
+- 数据集主页：<https://globalenergymonitor.org/projects/global-integrated-power-tracker/>
+- 抓取接口：`https://api.globalenergymonitor.org/assets?asset_type=coal-plant`
+  （公开、无需鉴权；`limit` 上限 **500**，超了返回 422）
+- 推荐引用：
+  > © Global Energy Monitor. Global Coal Plant Tracker, January 2026 release.
+  > Distributed under a Creative Commons Attribution 4.0 International License.
+
+CC BY 4.0 允许复制、再分发与改编（§2），且 §4 明确覆盖数据库权利 —— 可以提取、
+再利用乃至再分发**全部或实质性部分**。**唯一义务是署名**，本项目在三个位置同时落实：
+
+| 位置 | 内容 |
+|---|---|
+| 地图右下版权区 | `煤炭数据 © Global Energy Monitor · CC BY 4.0`（挂在数据源 `attribution` 上）|
+| 电厂弹窗 | 「数据来源 Global Energy Monitor (CC BY 4.0)」，**可点击**跳转许可页 |
+| 源代码 | `scripts/import_gem_coal.py` 与迁移 `008_add_gem_coal_plants.sql` 头部 |
+
+⚠️ 网站页脚的 `© 2026 Global Energy Monitor / All Rights Reserved` 是**网站自身**的版权，
+**不是数据集**的许可。核实许可以上述 CC BY 4.0 页面为准。
+
+### 其它数据源
+
+| 数据 | 来源 | 许可 | 署名位置 |
+|---|---|---|---|
+| 全球电厂 | WRI Global Power Plant Database | CC BY 4.0 | 数据源 attribution + 弹窗 |
+| 电网设施 | OpenStreetMap contributors | ODbL | 数据源 attribution |
+| 离线底图 | Protomaps（基于 OSM） | ODbL | 数据源 attribution |
+
+### 刷新 GEM 数据
+
+```bash
+# 演练（只抓取与校验，不写库）
+python scripts/import_gem_coal.py
+# 真正写入（需先启动一次应用，让迁移 008 建表）
+python scripts/import_gem_coal.py --apply
+```
+
+脚本只用 Python 标准库（`urllib`），**不引入任何第三方依赖**。
+它会做完整性硬校验：抓到的条数不等于接口声明的 `total` 就中止且**不写库**。
 
 ## 技术栈
 

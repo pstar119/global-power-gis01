@@ -43,21 +43,30 @@ fn greet(name: &str) -> String {
 /// 连 `003_seed_demo_grid.sql` 一起删。**这条路会把整个数据库加载搞挂，而且不报明显错误**：
 ///
 /// 1. sqlx 的 `migrate/migrator.rs::validate_applied_migrations` 有这么一段：
-///    ```rust
+///
+///    ```text
 ///    if migrator.ignore_missing { return Ok(()); }
 ///    let migrations: HashSet<_> = migrator.iter().map(|m| m.version).collect();
 ///    ... return Err(MigrateError::VersionMissing(applied.version));
 ///    ```
+///
+///    ⚠️ 语言标记必须保持 `text`，**不要改成 `rust`**：这是一段为了说明问题而
+///    **故意省略**的源码（用了 `...` 占位），标成 `rust` 会被 `cargo test`
+///    的 doctest 拿去真编译，直接报 `unexpected token: ...` 等一堆错。
+///    （实测：本阶段 `cargo test` 就是因为这两处一直失败。）
 ///    而 `ignore_missing` **默认为 false**（`tauri-plugin-sql` 也没有暴露这个开关）。
 ///    于是「数据库里有 v3、列表里没有 v3」= `pool.migrate()` 直接返回 Err。
 /// 2. 插件的 `commands.rs::load` 是：
-///    ```rust
+///
+///    ```text
 ///    if let Some(m) = migrations.0.lock().await.remove(&db) {
 ///        let migrator = Migrator::new(m).await?;
 ///        pool.migrate(&migrator).await?;   // ← 这里报错就直接 return
 ///    }
 ///    db_instances.0.write().await.insert(db.clone(), pool);  // ← 根本执行不到
 ///    ```
+///
+///    （同样保持 `text` —— 这段依赖外部上下文，单独编译不可能通过。）
 ///    所以连接池**不会**被注册，前端 `Database.load()` 抛出。
 /// 3. 更坑的是：那次失败的 `remove()` 已经**把迁移条目从 map 里拿走了**，
 ///    所以*再*调一次 `Database.load()` 反而会成功（没有迁移要跑，自然不会报错），
