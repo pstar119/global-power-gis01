@@ -170,8 +170,20 @@ function main() {
     const assetName = sample.file.split("/").pop();
     const url = sample.downloadUrl;
     const j = BASE_URL.length; // 拼接处：url[j] 必须是 /，url[j-1] 必须不是 /
+
+    /**
+     * 阶段49：**仅允许回环地址使用 http**，用于「正式 .exe + 本地服务器」的下载链路实测。
+     *
+     * ⚠️ 为什么必须开这个口子：本地跑 `scripts/serve_packs.py` 只能提供 http，
+     *    而原来这条自检硬要求 https，导致本地测试**根本无法生成清单**（实测 exit 1）。
+     *    （注意：它拦的其实只是**协议**不是 localhost —— `https://localhost` 照样能过，
+     *      所以这条放宽并没有削弱它原本的防护意义。）
+     * 🔴 但仍然只认 127.0.0.1 / localhost / [::1]，**任何真实域名都必须 https**。
+     */
+    const isLoopback = /^http:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?\//.test(url);
+
     const failures = [
-      [/^https:\/\//.test(url), "必须是 https"],
+      [/^https:\/\//.test(url) || isLoopback, "必须是 https（仅 127.0.0.1/localhost/[::1] 可用 http）"],
       [url[j] === "/", "拼接处应有且仅有一个斜杠"],
       [url[j - 1] !== "/", "基址不应以斜杠结尾（否则拼出双斜杠）"],
       [url.endsWith(`/${assetName}`), `应以 /${assetName} 结尾`],
@@ -184,6 +196,21 @@ function main() {
     if (failures.length) {
       console.error(`\n❌ 下载地址自检失败：${failures.join("；")}\n   ${url}`);
       process.exit(1);
+    }
+
+    if (isLoopback) {
+      console.warn(
+        "\n" +
+          "=".repeat(72) +
+          "\n🔴 这是一份**本地测试专用**清单：下载基址指向回环地址\n" +
+          `   ${BASE_URL}\n` +
+          "   它**绝不能**进入发布包 —— 否则所有用户都下载不到任何数据包。\n" +
+          "   测完请立刻还原：\n" +
+          "     git checkout -- public/packs_manifest.json\n" +
+          "     （或 Copy-Item data\\_manifest_backup.json public\\packs_manifest.json -Force）\n" +
+          "=".repeat(72) +
+          "\n",
+      );
     }
     console.log(`\n下载地址自检 : ✅ 通过\n   ${url}`);
   }
