@@ -513,8 +513,10 @@
 }
 
 /* ⚠️ 与 .layerList 同理：作者样式会盖掉浏览器默认的 [hidden]{display:none}，
-   必须显式声明，否则折叠时图例隐藏不掉。 */
-.legend[hidden] {
+   必须显式声明，否则折叠时图例隐藏不掉。
+   阶段47-1：折叠容器从 .legend 换成 .legendBody —— 图例现在有**自己的**折叠开关，
+   开关本身必须始终可见，所以 `hidden` 只能落在内容体上，不能落在整个 .legend 上。 */
+.legendBody[hidden] {
   display: none;
 }
 

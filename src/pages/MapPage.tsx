@@ -533,10 +533,45 @@ const MISSING = "--";
  * 但**在渲染层再挡一道** —— 这样即使将来为了别的功能放宽插件权限，
  * 这里也不会变成一个漏洞。校验不过就退回纯文本，不报错、不丢字段。
  */
+
+/**
+ * 阶段47-1：**已知失效的来源站点**（实测确认，不是猜测）。
+ *
+ * `endcoal.org` 曾长期是 Global Coal Plant Tracker (GCPT) 的官网。实测
+ * （2026-09-16）：该域名已过期，访问会 302 到 `/lander` —— **GoDaddy 的域名停放页**
+ * （页面上写着「免费停放，由 GoDaddy.com 提供。获得此域名」）。
+ * 也就是说，点了「数据来源」的用户会看到一个卖域名的页面。
+ *
+ * ‼️ 这里**只做降级、不做映射**（用户拍板）：不会把 GCPT 改指到 GEM 或任何别处 ——
+ *    WRI 记录的出处确实就是当年的 endcoal.org，改指别处等于篡改数据溯源的真实性。
+ *    命中本名单的 URL 一律退回**纯文本**，标签文字原样保留。
+ *    也**不为此引入域名映射表**：这里只有「哪些站点已经死了」这一个事实。
+ *
+ * 📊 影响面实测（2026-09-16，全库 34,936 座；带链接记录 34,039 条）：
+ *    `endcoal.org` 共 1,100 条（3.2%），且与 `source='GCPT'` 的记录
+ *    **完全重合**（1100 = 1100，双向一致）⇒ 其余 96.8% 的溯源链接照旧可点。
+ *
+ * ⚠️ 按**主机名**而不是按 source 标签判断：将来 WRI 若把 url 修好指向新站，
+ *    链接会自动恢复可用，不需要再动代码。
+ */
+const DEAD_SOURCE_HOSTS: readonly string[] = ["endcoal.org"];
+
 function safeSourceUrl(url: string | null | undefined): string | undefined {
   if (!url) return undefined;
   const trimmed = url.trim();
-  return /^https?:\/\//i.test(trimmed) ? trimmed : undefined;
+  if (!/^https?:\/\//i.test(trimmed)) return undefined;
+
+  // 阶段47-1：已知失效的站点 → 退回纯文本（原因见 DEAD_SOURCE_HOSTS 上方注释）
+  let host: string;
+  try {
+    host = new URL(trimmed).hostname.toLowerCase();
+  } catch {
+    return undefined;
+  }
+  if (DEAD_SOURCE_HOSTS.some((d) => host === d || host.endsWith(`.${d}`))) {
+    return undefined;
+  }
+  return trimmed;
 }
 
 /**
@@ -2306,6 +2341,22 @@ function MapPage({
    *       展开后立刻回到原位。也**不改变任何图层的可见性**。
    */
   const [panelOpen, setPanelOpen] = useState(false);
+
+  /**
+   * 阶段47-1：图例的展开 / 折叠（**自己的开关**，与图层控制互不影响）。
+   *
+   * ‼️ 用户拍板：「图例解耦保留，但加一个 hidden 属性支持折叠」——
+   *    向导首次启动时先给用户一张干净的地图，等他主动展开图例再看。
+   *
+   *    所以这里**不是**把图例重新绑回 panelOpen（那就退回共用一个开关的老路），
+   *    而是给它一个独立状态 + 独立开关，默认折叠。
+   *
+   *    实测（1280×800，面板可视高度 695px）：
+   *      图例展开 + 图层控制展开 = 912px ⇒ 溢出 219px
+   *      图例折叠 + 图层控制折叠 = 373px ⇒ 溢出 0（当前默认）
+   *    即只有用户**主动**把两块都展开时才会滚动，那是他自己的选择。
+   */
+  const [legendOpen, setLegendOpen] = useState(false);
 
   /** 阶段45：各分组的展开状态。默认只展开「电力设施」。 */
   const [openGroups, setOpenGroups] = useState<readonly string[]>(() =>
@@ -4116,14 +4167,13 @@ function MapPage({
 
         {/* 图例：纯 DOM + CSS，不引入任何图表 / 配色库。
 
-            ‼️ 阶段47：**刻意与「图层控制」开关解耦**（不再写 `hidden={!panelOpen}`）。
-               用户拍板「图层控制默认折叠」的同时又要求「视觉说明必须保留，它是
-               产品专业度的体现」—— 两者要同时成立，就不能共用一个开关：
-               共用的结果是折叠图层开关时连视觉约定一起消失。
-               解耦后首屏仍能看到查询高亮 + 口径说明，而一长列图层开关收起。
+            ‼️ 阶段47：**与「图层控制」开关解耦**，阶段47-1 又给了它**自己的**折叠开关。
+               用户拍板：「保留独立控制的设计，但向导首次启动时要先看到干净的地图，
+               等他主动展开图例再看」—— 所以默认折叠，但**不删任何条目**。
 
-               实测（1280×800）：折叠态面板 367px（溢出 0）→ 保留本块后 455px，
-               仍远低于可视高度 695px，**不会因此产生滚动条**。
+            实测（1280×800，面板可视高度 695px）：
+              图例展开 + 图层控制展开 = 912px ⇒ 溢出 219px
+              图例折叠 + 图层控制折叠 = 373px ⇒ 溢出 0（默认）
 
             ⚠️ 阶段47：这块图例被**两次**去重，目的都是消掉左面板的长滚动条
                （实测：面板可视高度硬上限只有 609px，而去重前内容高达 1722px）。
@@ -4139,23 +4189,37 @@ function MapPage({
                   再列一遍就是纯重复。
 
             只保留**不重复**的部分：查询高亮（图层开关里没有它）与下方的视觉约定说明。
-            去重后折叠态的溢出从 56px 降为负数 —— 面板不再需要滚动。 */}
-        <div className={styles.legend}>
-          <p className={styles.legendTitle}>图例</p>
-          <ul className={styles.legendList}>
-            <li className={styles.legendItem}>
-              <span
-                className={styles.legendSwatch}
-                style={{ backgroundColor: "#ffd24a" }}
-                aria-hidden="true"
-              />
-              查询高亮
-            </li>
-          </ul>
-          <p className={styles.legendFoot}>
-            变电站半径与线路宽度均随电压等级递增；变电站与线路为演示数据。
-          </p>
-        </div>
+            ⚠️ 折叠只隐藏内容，**不删除任何条目**，展开后原样回来。 */}
+        <section className={styles.legend} aria-label="图例">
+          <button
+            type="button"
+            className={styles.panelToggle}
+            aria-expanded={legendOpen}
+            aria-controls="map-legend-body"
+            onClick={() => setLegendOpen((open) => !open)}
+          >
+            <span>图例</span>
+            <span className={styles.chevron} aria-hidden="true">
+              {legendOpen ? "▼" : "▶"}
+            </span>
+          </button>
+
+          <div id="map-legend-body" className={styles.legendBody} hidden={!legendOpen}>
+            <ul className={styles.legendList}>
+              <li className={styles.legendItem}>
+                <span
+                  className={styles.legendSwatch}
+                  style={{ backgroundColor: "#ffd24a" }}
+                  aria-hidden="true"
+                />
+                查询高亮
+              </li>
+            </ul>
+            <p className={styles.legendFoot}>
+              变电站半径与线路宽度均随电压等级递增；变电站与线路为演示数据。
+            </p>
+          </div>
+        </section>
       </section>
 
       {/* 右上角：缩放控件（已接真实地图） */}
