@@ -48,6 +48,16 @@ import styles from "./MapPage.module.css";
 const LAYERS = ["电厂", "变电站", "输电线路"] as const;
 
 /**
+ * 阶段48-A：GEM 层在图层面板上的开关名。
+ *
+ * ⚠️ 必须声明在 `LAYER_SWATCH` **之前** —— 那个表拿它当键。
+ *    `const` 在模块求值阶段有暂时性死区，声明顺序反了会在**运行时**直接抛
+ *    `Cannot access 'GEM_COAL_LAYER_NAME' before initialization`，
+ *    而 TypeScript **查不出来**（它只做类型检查，不关心求值顺序）。
+ */
+const GEM_COAL_LAYER_NAME = "GEM 煤炭数据";
+
+/**
  * 图层开关左侧色块的颜色 —— 让开关本身充当图例，不必再单独解释一遍。
  * 电厂用渐变表示「按燃料多色」，而不是给一个会误导人的单色。
  */
@@ -55,6 +65,38 @@ const LAYER_SWATCH: Record<string, string> = {
   电厂: "conic-gradient(#9aa0a6, #f5a524, #4daafc, #5ee39b, #b07cf5, #9aa0a6)",
   变电站: "#3fd0c9",
   输电线路: "#8b96a8",
+  // 阶段48-A：GEM 层是**空心环**，色块也画成空心的（形状语言与地图上一致）。
+  // 颜色仍取自同一份 fuelColor("Coal")，不另写一个十六进制。
+  [GEM_COAL_LAYER_NAME]: `radial-gradient(circle, transparent 0 30%, ${fuelColor("Coal")} 31%)`,
+};
+
+/**
+ * 阶段48-A：GEM（Global Energy Monitor）煤炭数据层。
+ *
+ * ‼️ 与 WRI 是**两个独立数据源**，不是替换关系：
+ *    · WRI = 电站级、只有在运、全球全燃料（实心圆）
+ *    · GEM = 机组级、含拟建/在运/退役/取消的**全生命周期**（空心环）
+ *    所以图上会同时出现「实心点」与「空心环」，这是预期效果。
+ *
+ * ‼️ **默认关闭**（不在 visibleLayers 初始值里）：多出 4,865 个环，
+ *    默认打开会压住用户真正想看的东西。另外它还带来一个好处 ——
+ *    数据是**首次开启时才加载**的，不开的用户不会为它付任何开销。
+ *
+ * 许可：CC BY 4.0（要求署名，见弹窗与数据源 attribution）。
+ */
+const GEM_COAL_SOURCE = "gem-coal";
+const GEM_COAL_RING_LAYER_ID = "gem-coal-rings";
+/** 拟建/在建的**双环**：环套环。这是 circle 图层**支持的**形状编码。 */
+const GEM_COAL_PLANNED_HALO_ID = "gem-coal-planned-halo";
+const GEM_COAL_ATTRIBUTION = "煤炭数据 © Global Energy Monitor · CC BY 4.0";
+const GEM_COAL_LICENSE_URL = "https://globalenergymonitor.org/creative-commons-license/";
+
+/** 状态中文名。只用实测到的 4 个值，不编造第五个。 */
+const GEM_STATUS_LABEL: Record<string, string> = {
+  operating: "在运",
+  retired: "已退役",
+  cancelled: "已取消",
+  planned: "拟建/在建",
 };
 
 /**
@@ -1189,6 +1231,171 @@ async function loadPlantsGeoJson(): Promise<FeatureCollection> {
       geometry: { type: "Point", coordinates: [r.lon, r.lat] },
     })),
   };
+}
+
+/** GEM 电站级聚合后的属性 */
+interface GemCoalProperties {
+  name: string;
+  country: string | null;
+  state: string | null;
+  units: number;
+  capacity: number;
+  status: string;
+  owner: string | null;
+  wiki: string | null;
+  /** 各状态的机组数，供弹窗说明「这个环为什么是这样画的」 */
+  byStatus: Record<string, number>;
+  [key: string]: unknown;
+}
+
+/**
+ * 阶段48-A：读 GEM 机组级数据，**在 JS 里按 location_id 聚合成电站级**。
+ *
+ * 🔴 为什么不把聚合写进 SQL：主状态（数量最多的那个）不是 SQL 的强项，
+ *    要么写成相关子查询（慢），要么写窗口函数（SQLite 支持但可读性骤降）。
+ *    而这里的读取量只有 1.45 万行，与 WRI 那边一次拉 3.5 万行是同一个量级，
+ *    JS 里一次 O(n) 分组完全够用，而且规则白纸黑字看得见。
+ *
+ * 🔴 为什么坐标取**质心**：实测 4,865 个电站里有 255 个（5.2%）的机组坐标
+ *    并不相同，最大跨度达 2.27°（≈252 km）。取「第一条」会系统性偏向
+ *    数据录入顺序靠前的那个机组，取均值更中立。
+ *    先累加后除，不保留小数点后过多位数。
+ *
+ * ⚠️ 状态取「机组数最多」的那一个（用户拍板）。并列时按 operating > planned
+ *    > retired > cancelled 的优先级决出 —— **必须有个确定性规则**，
+ *    否则同一个电站的渲染结果会随数据顺序变，那种 bug 极难复现。
+ */
+async function loadGemCoalStations(): Promise<FeatureCollection> {
+  const db = await Database.load(DB_URL);
+  const rows = (await db.select(
+    "SELECT location_id, unit_name, station_name, country, state_province, " +
+      "capacity_mw, status, latitude, longitude, owner, wiki_url " +
+      "FROM gem_coal_plants WHERE latitude IS NOT NULL AND longitude IS NOT NULL",
+  )) as Array<{
+    location_id: string;
+    unit_name: string | null;
+    station_name: string | null;
+    country: string | null;
+    state_province: string | null;
+    capacity_mw: number | null;
+    status: string | null;
+    latitude: number;
+    longitude: number;
+    owner: string | null;
+    wiki_url: string | null;
+  }>;
+
+  interface Acc {
+    name: string;
+    country: string | null;
+    state: string | null;
+    units: number;
+    capacity: number;
+    lat: number;
+    lon: number;
+    owner: string | null;
+    wiki: string | null;
+    byStatus: Map<string, number>;
+  }
+  const groups = new Map<string, Acc>();
+
+  for (const r of rows) {
+    let g = groups.get(r.location_id);
+    if (!g) {
+      g = {
+        name: r.station_name || r.unit_name || "未命名电站",
+        country: r.country,
+        state: r.state_province,
+        units: 0,
+        capacity: 0,
+        lat: 0,
+        lon: 0,
+        owner: r.owner,
+        wiki: r.wiki_url,
+        byStatus: new Map(),
+      };
+      groups.set(r.location_id, g);
+    }
+    g.units += 1;
+    g.capacity += r.capacity_mw ?? 0;
+    g.lat += r.latitude;
+    g.lon += r.longitude;
+    // owner / wiki 只补空位：同一电站各机组基本一致，取到第一个非空即可
+    if (!g.owner && r.owner) g.owner = r.owner;
+    if (!g.wiki && r.wiki_url) g.wiki = r.wiki_url;
+    const st = r.status ?? "unknown";
+    g.byStatus.set(st, (g.byStatus.get(st) ?? 0) + 1);
+  }
+
+  // 并列时的确定性优先级（不在表里的一律排最后）
+  const PRIORITY = ["operating", "planned", "retired", "cancelled"];
+  const dominant = (m: Map<string, number>): string => {
+    let best = "";
+    let bestN = -1;
+    for (const [st, n] of m) {
+      if (n > bestN) {
+        best = st;
+        bestN = n;
+      }
+    }
+    for (const p of PRIORITY) {
+      if ((m.get(p) ?? 0) === bestN && m.has(p)) return p;
+    }
+    return best;
+  };
+
+  const features = [];
+  for (const [locationId, g] of groups) {
+    const status = dominant(g.byStatus);
+    const props: GemCoalProperties = {
+      name: g.name,
+      country: g.country,
+      state: g.state,
+      units: g.units,
+      capacity: Math.round(g.capacity * 10) / 10,
+      status,
+      owner: g.owner,
+      wiki: g.wiki,
+      byStatus: Object.fromEntries(g.byStatus),
+      // 弹窗要显示 location_id（可贴去 gem.wiki 核对），带上省得再查
+      locationId,
+    };
+    features.push({
+      type: "Feature" as const,
+      properties: props,
+      geometry: {
+        type: "Point" as const,
+        coordinates: [g.lon / g.units, g.lat / g.units],
+      },
+    });
+  }
+
+  return { type: "FeatureCollection", features };
+}
+
+/**
+ * GEM 电站弹窗。
+ * ⚠️ CC BY 4.0 **要求署名**，所以底部那行「数据来源」不是装饰，不能删。
+ */
+function buildGemCoalPopup(
+  props: GemCoalProperties,
+  point?: readonly [number, number],
+): HTMLElement {
+  const byStatus = (props.byStatus ?? {}) as Record<string, number>;
+  const statusDetail = Object.entries(byStatus)
+    .map(([st, n]) => `${GEM_STATUS_LABEL[st] ?? st} ${n}`)
+    .join(" · ");
+
+  return buildPopupFrame(props.name, "未命名电站", [
+    { label: "数据来源", value: "Global Energy Monitor (CC BY 4.0)", link: GEM_COAL_LICENSE_URL },
+    { label: "状态", value: GEM_STATUS_LABEL[props.status] ?? props.status },
+    { label: "机组数", value: `${props.units} 台` },
+    { label: "装机合计", value: `${props.capacity} MW` },
+    { label: "国家/地区", value: [props.country, props.state].filter(Boolean).join(" ") || MISSING },
+    { label: "所有者", value: props.owner || MISSING },
+    { label: "坐标", value: point ? formatLngLat(point as [number, number]) : MISSING },
+    ...(statusDetail ? [{ label: "机组构成", value: statusDetail }] : []),
+  ]);
 }
 
 /**
@@ -2536,6 +2743,15 @@ function MapPage({
   const visibleLayersRef = useRef<readonly string[]>(visibleLayers);
 
   /**
+   * 阶段48-A：GEM 煤炭数据是否已经加载过。
+   *
+   * ⚠️ 用 **ref 而不是 state**：它只用来防重复加载，不参与渲染。
+   *    用 state 的话加载完成会多触发一整轮重渲染（含挂着的 3.5 万点聚合图层）。
+   * ⚠️ 加载失败时会被**复位成 false**，让用户再拨一次开关就能重试。
+   */
+  const gemCoalLoadedRef = useRef(false);
+
+  /**
    * 聚合数字用的是 HTML Marker，**不受 MapLibre 的 visibility 管辖**，
    * 必须由外面拿到建图时的这两个函数手动刷新 / 清空。
    */
@@ -3115,6 +3331,106 @@ function MapPage({
                 },
               });
 
+              // ---- 阶段48-A：GEM 煤炭层（空心环）----
+              //
+              // 🔴 为什么不把 GEM 并进上面那个 source：两边粒度不同
+              //    （WRI 电站级 / GEM 机组级）且 GEM 已聚合到电站级，
+              //    合并会让「电厂」那个开关同时管两层，无法单独关掉 GEM。
+              //
+              // 🔴 为什么半径比 WRI 实心点**大一圈**：两边都覆盖煤电，
+              //    同一位置会重叠。若半径相同，WRI 的实心圆会把 GEM 的环
+              //    刚好填满 —— 环就看不见了。大一圈才形成「实心点外套一个环」
+              //    的可见组合，一眼能对比两个数据集。
+              //
+              // ⚠️ 数据**先不放**：空集合占位，等用户首次打开开关时再加载
+              //    （见下面的懒加载 effect）。这样不开这个层的用户零开销。
+              map.addSource(GEM_COAL_SOURCE, {
+                type: "geojson",
+                data: { type: "FeatureCollection", features: [] },
+                // CC BY 4.0 要求署名，挂在数据源上会出现在右下角版权区
+                attribution: GEM_COAL_ATTRIBUTION,
+              });
+
+              map.addLayer({
+                id: GEM_COAL_RING_LAYER_ID,
+                type: "circle",
+                source: GEM_COAL_SOURCE,
+                layout: { visibility: "none" },
+                paint: {
+                  // 空心：填色全透明，只留描边
+                  "circle-color": "transparent",
+                  // 与 WRI 同一套容量分级，但半径整体大一圈（见上）
+                  "circle-radius": [
+                    "interpolate",
+                    ["linear"],
+                    ["zoom"],
+                    3,
+                    ["step", ["get", "capacity"], 3.5, 100, 4.5, 500, 6, 1000, 8],
+                    8,
+                    ["step", ["get", "capacity"], 5.5, 100, 8, 500, 11, 1000, 15],
+                  ],
+                  // 描边颜色复用 **与 WRI 同一份** 燃料色，不另写十六进制
+                  "circle-stroke-color": fuelColor("Coal"),
+                  // ⚠️ MapLibre 的 circle 图层**没有** circle-stroke-dasharray
+                  //    （已在 maplibre-gl.d.ts 核实：只有 stroke-width / stroke-color /
+                  //    stroke-opacity 三个属性）。所以状态用**透明度 + 线宽**编码，
+                  //    而「拟建/在建」另加一圈外环（形状编码），见下一个图层。
+                  "circle-stroke-width": [
+                    "interpolate",
+                    ["linear"],
+                    ["zoom"],
+                    3,
+                    ["match", ["get", "status"], "operating", 1.6, "planned", 1.6, "retired", 1.1, "cancelled", 0.9, 1],
+                    8,
+                    ["match", ["get", "status"], "operating", 2.4, "planned", 2.4, "retired", 1.6, "cancelled", 1.2, 1.4],
+                  ],
+                  "circle-stroke-opacity": [
+                    "match",
+                    ["get", "status"],
+                    "operating",
+                    1,
+                    "planned",
+                    0.95,
+                    "retired",
+                    0.45,
+                    "cancelled",
+                    0.25,
+                    0.4,
+                  ],
+                },
+              });
+
+              // 拟建/在建：**第二圈外环**。
+              // circle 画不了虚线，但「双环」是制图上同样公认的「未建成」记号，
+              // 而且它走的是**形状**通道，不与颜色/透明度抢谱。
+              map.addLayer({
+                id: GEM_COAL_PLANNED_HALO_ID,
+                type: "circle",
+                source: GEM_COAL_SOURCE,
+                filter: ["==", ["get", "status"], "planned"],
+                layout: { visibility: "none" },
+                paint: {
+                  "circle-color": "transparent",
+                  "circle-radius": [
+                    "interpolate",
+                    ["linear"],
+                    ["zoom"],
+                    3,
+                    ["step", ["get", "capacity"], 6.5, 100, 7.5, 500, 9, 1000, 11],
+                    8,
+                    ["step", ["get", "capacity"], 8.5, 100, 11, 500, 14, 1000, 18],
+                  ],
+                  "circle-stroke-color": fuelColor("Coal"),
+                  "circle-stroke-width": 1,
+                  "circle-stroke-opacity": 0.75,
+                },
+              });
+
+              // ‼️ addLayer 会追加到样式最顶，会盖住地名标签 —— 与区域包那里同一个坑
+              if (map.getLayer(BASEMAP_LABEL_LAYER_ID)) {
+                map.moveLayer(BASEMAP_LABEL_LAYER_ID);
+              }
+
               // ---- 聚合数字：用 HTML 标记而非 symbol 图层 ----
               // ⚠️ 为什么不用 symbol 图层的 text-field？文字渲染需要 `glyphs`
               //    （SDF 字体 PBF），而本项目样式是全离线内联的，没有字体服务器，
@@ -3220,6 +3536,25 @@ function MapPage({
                   )
                   .addTo(map);
               });
+
+              // ---- 阶段48-A：点击 GEM 空心环：弹出电站详情 ----
+              // 两个图层都要注册：拟建/在建的位置上，最上层其实是那个外环，
+              // 只给内环注册的话用户会发现「有些环点不开」。
+              for (const lid of [GEM_COAL_RING_LAYER_ID, GEM_COAL_PLANNED_HALO_ID]) {
+                map.on("click", lid, (e) => {
+                  const feature = e.features?.[0];
+                  if (!feature) return;
+                  // ⚠️ 双重保险：外环层已用 filter 限定 planned，这里再确认一次，
+                  //    将来若有人改掉 filter 也不会弹出错误的状态
+                  const point = (feature.geometry as Point).coordinates as [number, number];
+                  popup
+                    .setLngLat(point.slice() as [number, number])
+                    .setDOMContent(
+                      buildGemCoalPopup(feature.properties as unknown as GemCoalProperties, point),
+                    )
+                    .addTo(map);
+                });
+              }
 
               // ---- 阶段22：点击变电站：弹出详情卡片 ----
               map.on("click", SUBSTATIONS_LAYER_ID, (e) => {
@@ -3664,6 +3999,10 @@ function MapPage({
     apply([CLUSTER_LAYER_ID, PLANT_LAYER_ID, HIGHLIGHT_LAYER_ID, OSM_PLANT_LAYER_ID], on("电厂"));
     apply([SUBSTATIONS_LAYER_ID, OSM_SUBSTATION_LAYER_ID], on("变电站"));
 
+    // 阶段48-A：GEM 煤炭层（默认关闭，不在 visibleLayers 初始值里）。
+    // 两个图层必须**一起**开关：只开环不开外环，拟建/在建立马失去形状区分。
+    apply([GEM_COAL_RING_LAYER_ID, GEM_COAL_PLANNED_HALO_ID], on(GEM_COAL_LAYER_NAME));
+
     // 阶段43：铁路 / 油气管道。两个独立开关，**默认关闭**（不在 visibleLayers 初始值里）。
     // 它们没有命中热区/弹窗，所以不需要像线路那样联动 hit 层。
     apply([OSM_RAILWAY_LAYER_ID], on("铁路"));
@@ -3707,6 +4046,41 @@ function MapPage({
     // 「用户在看哪些电压等级」正是这个上下文的价值所在
     setViewportInfo(publishViewport());
   }, [visibleLayers, activePacks]);
+
+  /**
+   * 阶段48-A：GEM 煤炭数据的**懒加载**。
+   *
+   * ‼️ 为什么不在建图时一起读：这个层**默认关闭**，而它要多拉 1.45 万行
+   *    （WRI 那边已经是 3.5 万行）。把成本挂在所有用户的启动路径上，
+   *    只为少数会打开它的人服务，不划算 —— 而这里正好可以做到「不开不付」。
+   */
+  useEffect(() => {
+    if (!mapReady) return;
+    if (!visibleLayers.includes(GEM_COAL_LAYER_NAME)) return;
+    if (gemCoalLoadedRef.current) return;
+    const map = mapRef.current;
+    if (!map) return;
+
+    gemCoalLoadedRef.current = true;
+    let cancelled = false;
+    void loadGemCoalStations()
+      .then((fc) => {
+        if (cancelled) return;
+        const src = map.getSource(GEM_COAL_SOURCE) as GeoJSONSource | undefined;
+        if (!src) return;
+        src.setData(fc as unknown as GeoJSON.GeoJSON);
+        console.info(`[MapPage] GEM 煤炭数据已加载：${fc.features.length} 座电站（按 location_id 聚合）`);
+      })
+      .catch((err: unknown) => {
+        // 失败后**允许重试**：把标志复位，用户再拨一次开关就会重试，
+        // 而不是把这个层永久卡在空白状态（那种状态下用户完全无从判断）。
+        gemCoalLoadedRef.current = false;
+        console.error("[MapPage] GEM 煤炭数据加载失败：", err);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [visibleLayers, mapReady]);
 
   /**
    * 阶段30：当前视野数据统计。
@@ -4026,7 +4400,7 @@ function MapPage({
                   {group.id === "power" && (
                     <>
                       <ul className={styles.layerList}>
-                        {LAYERS.map((name) => {
+                        {[...LAYERS, GEM_COAL_LAYER_NAME].map((name) => {
                           // 「输电线路」是总开关：状态 = 任一电压档开启；点击 = 全开 / 全关
                           const isVisible =
                             name === "输电线路" ? anyTierOn : visibleLayers.includes(name);

@@ -130,6 +130,20 @@ fn migrations() -> Vec<Migration> {
             sql: include_str!("../migrations/007_index_plants_fuel_cover.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 8,
+            description: "add_gem_coal_plants",
+            // 阶段48-A：GEM（Global Energy Monitor）煤炭数据，**机组级**独立表。
+            //
+            // ‼️ 单独一张表，不并进 power_plants：两者粒度不同
+            //    （WRI 是电站级、GEM 是机组级），混表必须带粒度判别列，
+            //    一旦有人漏带就会把容量重复求和。分开存让粒度成为表自带的语义。
+            // ⚠️ 本迁移只建**空表**；数据由 scripts/import_gem_coal.py 单独导入，
+            //    与 WRI 的 001 建表 / import_wri_plants.py 导数是同一套流程。
+            //    因此全新安装时这张表是空的 —— 这是预期行为，不是 bug。
+            sql: include_str!("../migrations/008_add_gem_coal_plants.sql"),
+            kind: MigrationKind::Up,
+        },
     ]
 }
 
