@@ -133,6 +133,26 @@ export function effectiveBaseOf(manifest: PacksManifest | null): string | null {
   return DEV_BASE_URL_OVERRIDE ?? manifest?.release?.baseUrl ?? null;
 }
 
+/**
+ * 阶段53：返回**所有可用**的下载基址，按优先级排序。
+ *
+ * - 镜像（`baseUrl`）优先，直连（`directBaseUrl`）兜底
+ * - 开发覆盖（`DEV_BASE_URL_OVERRIDE`）**独占**，不降级 ——
+ *   否则本地测试失败时会偷偷用生产源，误导开发者
+ * - 两个 base 相同时只留一个
+ */
+export function effectiveBasesOf(manifest: PacksManifest | null): string[] {
+  // Dev override 独占：不做任何降级
+  if (DEV_BASE_URL_OVERRIDE) return [DEV_BASE_URL_OVERRIDE];
+
+  const bases: string[] = [];
+  const base = manifest?.release?.baseUrl;
+  const direct = manifest?.release?.directBaseUrl;
+  if (base) bases.push(base);
+  if (direct && direct !== base) bases.push(direct);
+  return bases;
+}
+
 /** 清单条目 → 下载地址。基址为空时才回落到条目里写死的完整 URL。 */
 export function urlOf(
   pack: PackEntry,
@@ -170,6 +190,29 @@ export function friendlyError(raw: string): string {
   if (raw.includes("BUSY")) return "该数据包正在下载中";
   if (raw.includes("DIR_ERROR")) return "无法创建数据目录";
   return msg || "下载失败";
+}
+
+/**
+ * 阶段53：判断一个 Rust 错误串是否值得换源重试。
+ *
+ * 只对「网络类 / 服务器类」错误返回 true；
+ * 校验失败、用户取消、文件占用等与源无关的错误返回 false。
+ */
+export function isRetryableNetworkError(raw: string): boolean {
+  // 绝对不重试：与源无关
+  if (
+    /CHECKSUM_MISMATCH|SIZE_MISMATCH|CANCELLED|BUSY|BAD_FILE_NAME|DIR_ERROR/.test(
+      raw,
+    )
+  ) {
+    return false;
+  }
+  // 值得换源重试：网络 / 服务器 / Range
+  if (/TIMEOUT|NETWORK_ERROR|HTTP_ERROR|RANGE_NOT_SATISFIABLE/.test(raw)) {
+    return true;
+  }
+  // 未知错误：保守起见不重试
+  return false;
 }
 
 export function mb(bytes: number): string {

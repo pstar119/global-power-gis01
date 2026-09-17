@@ -15,8 +15,10 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import { emitPackInstalled } from "../lib/packEvents";
 import {
   effectiveBaseOf,
+  effectiveBasesOf,
   fileNameOf,
   friendlyError,
+  isRetryableNetworkError,
   loadManifest,
   type DownloadProgress,
   type PackEntry,
@@ -125,8 +127,18 @@ export function usePackDownloads(): PackDownloadsApi {
   const download = useCallback(
     async (pack: PackEntry): Promise<boolean> => {
       const file = fileNameOf(pack);
-      const url = urlOf(pack, effectiveBase);
-      if (!url || !pack.bytes) {
+
+      // 阶段53：构造候选 URL 列表（镜像优先，直连兜底）
+      const bases = effectiveBasesOf(manifest);
+      const urls: string[] = [];
+      for (const b of bases) {
+        const u = urlOf(pack, b);
+        if (u && !urls.includes(u)) urls.push(u);
+      }
+      // 极端情况：清单里没有 base，退回到 pack.downloadUrl
+      if (urls.length === 0 && pack.downloadUrl) urls.push(pack.downloadUrl);
+
+      if (urls.length === 0 || !pack.bytes) {
         setErrors((p) => ({
           ...p,
           [file]: "清单里缺少该包的下载地址或大小（本机没有对应文件）",
@@ -134,6 +146,7 @@ export function usePackDownloads(): PackDownloadsApi {
         setPhases((p) => ({ ...p, [file]: "error" }));
         return false;
       }
+
       setErrors((p) => {
         const c = { ...p };
         delete c[file];
@@ -147,30 +160,47 @@ export function usePackDownloads(): PackDownloadsApi {
         setProgress((prev) => ({ ...prev, [p.file]: p }));
       };
 
-      try {
-        await invoke("pack_download", {
-          req: {
-            file,
-            url,
-            sha256: pack.sha256 ?? "",
-            bytes: pack.bytes,
-          },
-          onProgress: channel,
-        });
-        if (!mountedRef.current) return true;
-        setPhases((p) => ({ ...p, [file]: "done" }));
-        await refresh([file]);
-        emitPackInstalled(file);
-        return true;
-      } catch (err) {
-        if (!mountedRef.current) return false;
-        setPhases((p) => ({ ...p, [file]: "error" }));
-        setErrors((p) => ({ ...p, [file]: friendlyError(String(err)) }));
-        await refresh([file]);
-        return false;
+      let lastError: unknown = null;
+
+      for (let i = 0; i < urls.length; i++) {
+        const url = urls[i];
+        const isLast = i === urls.length - 1;
+        try {
+          await invoke("pack_download", {
+            req: {
+              file,
+              url,
+              sha256: pack.sha256 ?? "",
+              bytes: pack.bytes,
+            },
+            onProgress: channel,
+          });
+          // 成功
+          if (!mountedRef.current) return true;
+          setPhases((p) => ({ ...p, [file]: "done" }));
+          await refresh([file]);
+          emitPackInstalled(file);
+          return true;
+        } catch (err) {
+          lastError = err;
+          if (!mountedRef.current) return false;
+          if (isLast || !isRetryableNetworkError(String(err))) break;
+          // 换源重试 —— 不改变 phase，用户看到的仍是「下载中」
+          console.warn(
+            `[packs] ${file} 从 ${url} 失败，改用备用地址重试`,
+            err,
+          );
+        }
       }
+
+      // 所有 URL 都失败
+      if (!mountedRef.current) return false;
+      setPhases((p) => ({ ...p, [file]: "error" }));
+      setErrors((p) => ({ ...p, [file]: friendlyError(String(lastError)) }));
+      await refresh([file]);
+      return false;
     },
-    [effectiveBase, refresh],
+    [manifest, refresh],
   );
 
   const cancel = useCallback(async (file: string) => {
