@@ -1,7 +1,7 @@
 # Global Power GIS — 项目交接文档
 
 > 用途：开启新对话时无缝交接。**只读本文档 + 仓库现状即可恢复全部上下文。**
-> 最后更新：2026-09-17（阶段 52 中途，含 CSV 导出与破例依赖）
+> 最后更新：2026-09-18（阶段 54：修补批次 —— 权限收敛 / 图层溢出 / 投放脚本 / 文档治本）
 > 当前版本：**v0.2.0**
 
 ---
@@ -14,30 +14,63 @@
 - ⚠️ **有出处但含义需注意**：项目里确有该数字，但口径容易记错（已标注）。
 - ❓ **未核实**：来自口头描述或历史文档，落地前请先查证。
 
-### 依赖清单（阶段 52 起有破例）
+### 🔴 文档约定（阶段54 起执行，先看这条再看别的）
 
-阶段 50 之前项目执行「零新增依赖」。**阶段 52 破例新增 2 对包**（npm + cargo 各 2 个），
-用于 CSV 导出的「另存为」对话框：
+> **凡是写进本文档的数字，都要能立刻用一条命令验证；不能验证的，就别写进去。**
 
-- `@tauri-apps/plugin-dialog` / `tauri-plugin-dialog` —— 弹原生「另存为」对话框
-- `@tauri-apps/plugin-fs` / `tauri-plugin-fs` —— 写文件到用户选定路径
+阶段54 体检时发现 **10 处**文档与仓库不一致，其中两条（「HEAD 是 `3219cef`、
+领先 origin 3 个提交」与「本机已有 4 个数据包」）在写下后**一天内**就失效了。
+结论是：**逐条改数字治不了本，要改的是「记录什么」。**
 
-破例理由：CSV 导出必须让用户自选保存位置，浏览器原生 `<a download>` 只能写到系统默认
-下载目录，无法满足。破例经**用户明确授权**（2026-09-17）。
+以下三类属**易失状态**，**禁止**写进正文，一律给查询命令：
 
-**⚠️ 后续若再想加依赖，仍需单独授权，不得援引本次破例为「可以随便加」的先例。**
-
-### 最容易记错的数字（四个）
-
-| 数字 | 正确口径 |
+| 易失状态 | 现查命令 |
 |---|---|
-| `430,969` | **纯电力要素**（线路 / 变电站 / 电厂） |
-| `815,728` | **清单全要素**（含铁路 / 油气管道） |
-| `46.54 MB` | 阶段50 记录的安装包体积；**版本已 bump 到 0.2.0，需重建后才有效** |
-| `4.68 MB` | 长三角核心区切片体积 —— 🔴 **已过期**，实测 `osm_grid.pmtiles` = **7.49 MiB** |
+| 当前提交 / 领先 origin 几个提交 | 见 §9「提交状态（现查）」 |
+| 本机装了哪些数据包 | `node scripts/install_packs.mjs --list`（阶段54 已加 `--list`） |
+| 构建产物的文件名与体积 | 见 §9「产物（现查）」 |
+| 工具链绝对路径 | 见 §9 的环境自检块 |
+
+**可以写、也值得写的**是那些**不随时间变化**的东西：口径定义、红线、已踩过的坑、
+决策理由、以及**失败方案的记录**（例如「为什么不能把 v3 迁移删掉」）。
+本文档 §6、§7 是全篇最有价值的部分，改动代码前务必读完。
+
+### 依赖清单（阶段 52 破例 → 阶段 54 已收窄）
+
+阶段 50 之前项目执行「零新增依赖」。阶段 52 为 CSV 导出的「另存为」破例引了
+2 对包；**阶段 54 把其中一半收掉了**：
+
+| 包 | 引入 | 现状 |
+|---|---|---|
+| `tauri-plugin-dialog`（cargo） | 阶段52 | 🟡 **保留** —— Rust 侧 `export.rs` 用它的 `DialogExt` 弹原生对话框 |
+| `@tauri-apps/plugin-dialog`（npm） | 阶段52 | ✅ **已删** —— 前端不再弹对话框 |
+| `@tauri-apps/plugin-fs`（npm） | 阶段52 | ✅ **已删** |
+| `tauri-plugin-fs`（cargo 直接依赖） | 阶段52 | ✅ **已删**；但⚠️它仍是 `tauri-plugin-dialog` 的**传递依赖**，照样进二进制 ⇒ **不省体积** |
+| `fs:write-all` 权限 | 阶段52 | ✅ **已删**（这条才是真正的收益） |
+
+收窄的理由与「为什么不能只把写动作搬过去」的岔路说明，见
+`src-tauri/src/export.rs` 头部注释（那段是本题的核心，别删）。
+
+**⚠️ 后续若再想加依赖，仍需单独授权，不得援引阶段52 的破例为「可以随便加」的先例。**
+反过来，**删依赖**（如阶段54 这次）方向是收紧，属于恢复原原则，不新增授权负担。
+
+### 最容易记错 / 最容易过期的数字
+
+| 数字 | 正确口径 | 性质 |
+|---|---|---|
+| `430,969` | **纯电力要素**（线路 / 变电站 / 电厂） | ✅ 稳定，长期有效 |
+| `815,728` | **清单全要素**（含铁路 / 油气管道） | ✅ 稳定，长期有效 |
+| `34,936` | WRI 电厂行数（seed 库 `power_plants`） | ✅ 稳定 |
+| `4.68 MB` | 长三角核心区切片体积 | 🔴 **已作废** —— 实测 `osm_grid.pmtiles` = **7.49 MiB**（阶段43 加入铁路/管道后变大）。**别再引用 4.68** |
+| 安装包体积 / SHA256 | — | ⚠️ **易失**：每次重建都变。**不要写进正文**，用 §10「产物（现查）」的命令现查 |
 
 > 🔴 **口径铁律**：说 `430,969` 必须带「电力要素」；说 `815,728` 必须带「清单全要素」。
 > 两个都对，混用就错。
+
+> 📌 为什么把「安装包体积」从「最容易记错的数字」里挪走：它不是**记错**，而是
+> **必然过期**。阶段54 体检时本文档还写着「阶段50 记录的 46.54 MB，需重建后才有效」，
+> 而 README 里同时存在 `0.1.0` 的文件名 —— 两个过期数字互相「印证」，
+> 反而让人以为产物没问题。这类字段只该给命令。
 
 ### 先做一次环境自检（见 §9）再动手
 
@@ -56,9 +89,12 @@
 
 ---
 
-## 2. 当前阶段
+## 2. 阶段进度
 
-**阶段 51：UI/UX 最终打磨与产品化定型**（✅ 已完成，已提交 e31e881）
+> 最新阶段（**阶段54**）的详情与遗留直接看下面「阶段 54」小节；
+> 更早的阶段保留在此作为决策记录，**不必逐条读完**。
+
+**阶段 51：UI/UX 最终打磨与产品化定型**（✅ 已完成）
 
 四项任务与验收结论：
 
@@ -71,9 +107,25 @@
 
 ### 阶段 51 遗留 / 已知不完美
 
-1. **1280×800 边界情况**：用户手动展开「图层控制」后，面板 `693 / 704` → 溢出 **11px**，
-   来源是「电力设施」组内部的 5 条电压分级勾选框。**未修**（怕无谓扩大改动面）。
-   若要修：给这层加第三层折叠即可（`fuelMenuOpen` 已有可照抄的模式）。
+1. ~~**1280×800 边界情况：图层控制溢出**~~ —— ✅ **阶段54 已修**，且**旧数字作废**：
+   - 🔴 文档原记「`693 / 704` → 溢出 **11px**」**是过期的** —— 那是阶段52 把
+     AI 工作台改成地图上方横向条**之前**的数。布局一变可用高度少了约 52px。
+   - ✅ 阶段54 用浏览器实测（1280×800，工作台折叠，`.layerPanel` 的
+     `max-height` = 641px）：
+
+     | 状态 | clientHeight | scrollHeight | 溢出 |
+     |---|---|---|---|
+     | 电压分级**折叠**（改动后的默认） | 590 | 590 | **0** |
+     | 电压分级展开（= 改动前的默认） | 641 | 706 | **65** |
+     | 再展开「统计筛选」（15 个燃料项） | 641 | 1059 | 418 |
+     | 再展开「图例」 | 641 | 1110 | 469 |
+
+   - 修法：给「输电线路（按电压分级）」加第三层折叠（照抄 `fuelMenuOpen` 模式），
+     默认折叠。**代价已如实记录**：这 5 条从「始终可见」变为需点一次 ——
+     理由见 `MapPage.tsx` 中 `tierMenuOpen` 的注释。
+   - **残余**：展开该层后仍溢出 65px（那 116px 是真实内容，641px 是硬上限，
+     折叠只保证默认路径干净）；「统计筛选」15 项展开必然溢出，属阶段47-1
+     已接受的立场。
 2. ~~**原生标题栏仍是深色**~~ —— ✅ **阶段52 已修复**（`e31e881`）：
    新增 `syncNativeTheme()` 动态同步，`capabilities` 已放行
    `core:window:allow-set-theme`。
@@ -81,7 +133,7 @@
 
 ---
 
-### 阶段 52（进行中）
+### 阶段 52（✅ 已完成）
 
 **阶段 52：CSV 导出与 AI 工作台布局重构**
 
@@ -89,16 +141,51 @@
 |---|---|---|
 | 1 | 主题切换同步 Tauri 原生标题栏 | ✅ 已提交 e31e881 |
 | 2 | AI 工作台改为地图上方横向条（乙方案） | ✅ 已提交 42cc5a6 |
-| 3 | CSV 导出（另存为对话框，破例新增 dialog + fs） | ✅ 已提交 3219cef |
-| 4 | 数据包托管迁移评估 | ⏸ 未开始 |
-| 5 | 复杂 AI 空间查询 | ⏸ 未开始 |
-| 6 | GeoJSON 导出 | ⏸ 未开始 |
-| 7 | GEM 可再生能源引入 | ⏸ 未开始 |
-| 8 | 数据包多源降级（镜像失败切直连） | ✅ 已提交 59a8368 |
+| 3 | CSV 导出（另存为对话框） | ✅ 已提交 3219cef |
+| 8 | 数据包多源降级（镜像失败切直连） | ✅ 已提交 59a8368（阶段53 的一并算了） |
 
-**阶段 52 遗留**：
-- `fs:write-all` 权限是全放开（因为用户可能选任意路径），后续可考虑用 `fs:scope` 收紧
-- 待评估：新增的 dialog + fs 插件对安装包体积的影响（待下次打包实测）
+### 阶段 53（✅ 已完成）
+
+**阶段 53：数据包下载多源降级** —— `effectiveBasesOf()` 返回候选基址列表，
+镜像失败自动切 `directBaseUrl` 重试一次；`isRetryableNetworkError()` 只对网络类错误
+重试，校验失败 / 用户取消 / 文件占用**不重试**（重试只会浪费同样的时间）。
+
+> ⚠️ 降级**不等于换托管**：它是「镜像挂了切直连」，而两者都不可达时仍然无解。
+> 换托管仍待评估（见 §8）。
+
+### 阶段 54（✅ 本阶段）
+
+**阶段 54：修补批次** —— 全部是「修补」，不含新功能。
+
+| # | 任务 | 状态 |
+|---|---|---|
+| 1 | CSV 写盘下沉 Rust，删除 `fs:write-all` 过宽权限 | ✅ |
+| 2 | 修「图层控制」溢出（电压分级改可折叠，65px → 0） | ✅ |
+| 3 | 修 `install_packs.mjs` 两个盲区（GEM / 用户目录） | ✅ |
+| 4 | 文档治本：移除易失状态 + 修 10 处过时内容 | ✅ |
+| 5 | 重新打包（0.1.0 → **0.2.0**）并量化体积 | ✅ 46.12 MiB，**比阶段50 还小 0.42 MB**，余量 3.88 MB |
+
+**验收实测（阶段54，全部可复现）**：
+
+| 检查 | 结果 |
+|---|---|
+| `npm run typecheck` | ✅ 0 错误 |
+| `npm run build` | ✅ 0 退出码；产物内**无** `plugin-dialog` / `plugin-fs` / `write-all` 残留 |
+| `cargo check` | ✅ 退出码 0 |
+| `cargo test --lib` | ✅ 10 passed / 0 failed / 2 ignored（需外网） |
+| `npm run tauri build` | ✅ 退出码 0，产出 `Global Power GIS_0.2.0_x64-setup.exe` |
+| 二进制红线自检 | ✅ 4 项应未命中全部未命中；2 项**应命中**的对照项（`export_csv_file` / `tauri.localhost`）均命中 |
+| 发布版启动冒烟 | ✅ 进程存活，窗口标题 `Global Power GIS`，内存 66.8 MB |
+| 图层面板实测 | ✅ 默认态 `590 / 590`，溢出 0 |
+
+**阶段 54 遗留 / 未做**：
+
+- ⚠️ **原生「另存为」对话框的实际点击路径未验证** —— 只验证到
+  「`cargo check` 通过 + 命令已注册 + 产物无 `plugin-dialog`/`plugin-fs` 残留」。
+  真实对话框需要桌面窗口，请在 `npm run tauri dev` 里点一次「当前视野 → 导出」确认。
+- 「统计筛选」15 项展开必然溢出，未处理（见 §2 第 1 条残余）。
+- 阶段 52 遗留的**体积待评估项已消账**（本阶段实测 46.12 MiB，余量 3.88 MB）；
+  **托管迁移仍未做**，见 §8 第 1 条（它是当前唯一的「外部单点故障」）。
 
 ---
 
@@ -125,12 +212,13 @@
 
 | 项 | 值 | 核实 |
 |---|---|---|
-| 安装包体积 | **48,802,068 B = 46.54 MiB**（NSIS，中文安装界面）<br>文件名仍是 `Global Power GIS_0.1.0_x64-setup.exe`，时间戳 2026-09-16 20:28 | ⚠️ 属**阶段50 记录值**；<br>版本已 bump 到 0.2.0，**需重新构建后才有效** |
-| 裸主程序 | **9,713,664 B = 9.26 MiB** | ✅ 本轮实测 |
+| 安装包体积 | ⚠️ **易失，不写正文** —— 用 §10「产物（现查）」现查。阶段54 实测基线：`48,357,753 B = 46.12 MiB`，裸 exe `9,921,024 B = 9.46 MiB`，余量 3.88 MB | ✅ 阶段54 打包实测 |
+| 裸主程序 | **9,921,024 B = 9.46 MiB**（阶段50 为 9,713,664 B ⇒ 阶段52 的 dialog 插件 + 阶段54 的 `export.rs` 共 **+0.20 MiB**） | ✅ 本轮实测 |
+| ⚠️ 体积归因 | 裸 exe **+0.20 MiB**，但安装包 **−0.42 MiB**（46.54 → 46.12）。**两者方向相反是正常的** —— 资源段的 LZMA 压缩率与前端 bundle 大小都会影响最终结果，**不能拿裸 exe 增量去推安装包增量** | ✅ 本轮实测 |
 | 安装包内容 | **只有 3 项**：seed 库 + `basemap.pmtiles` + `osm_grid.pmtiles` | ✅ 本轮实测 `tauri.conf.json` 的 `bundle.resources` |
 | 数据包数量 | **8 个**（7 区域 + 1 GEM = **170.32 MiB**），全部按需下载 | ✅ 本轮实测清单求和 |
 | 数据包托管 | GitHub Release `v1.0-packs`，默认走 `gh-proxy.com` 加速镜像；`directBaseUrl` 为降级备用 —— **阶段53 起已接入代码**（见下行） | ✅ 本轮实测 `manifest.release` |
-| 下载目录 | `%APPDATA%\com.pstar119.globalpowergis\packs\`<br>（本机实测已有 4 个包：gem + 华东 / 华南 / 华中） | ✅ 本轮实测 |
+| 下载目录 | `%APPDATA%\com.pstar119.globalpowergis\packs\`（**运行时第一顺位**）<br>⚠️ 易失状态，**不写具体包数** —— 用 `node scripts/install_packs.mjs --user-dir --list` 现查 | 🔴 本文档原写「本机实测已有 4 个包」，阶段54 实测**该目录为空**；已按 §0 文档约定改为给命令 |
 | 资源解析顺序 | ① `%APPDATA%\...\packs\` → ② `$RESOURCE/packs/` | ✅ `src-tauri/src/packs.rs` `resolve_pack_resource` |
 | 包是否已装 | 运行时用 **127 字节 Range 探测**（只读，从不下载） | ✅ `MapPage.tsx` `ensurePmtilesArchive` |
 | 渲染 | PMTiles 流式渲染（`asset:` 协议 + vector source） | ✅ |
@@ -219,8 +307,16 @@
   经度 / 投运年份 / 所有者
 - 坐标精度 **5 位**（约 1m）；z < 8 时文件名带 `_z5` 之类标记
 - **AI 查询结果**的 CSV 导出（设置页 `AiQueryPanel`）**也走同一套** `downloadCsv`
-- 实现文件：`src/lib/csvExport.ts`（从 `AiQueryPanel.tsx` 抽出，两处共用）
-- ⚠️ 依赖 `@tauri-apps/plugin-dialog` + `@tauri-apps/plugin-fs`（见 §0 依赖清单）
+- 实现分两处（**阶段54 起写盘在 Rust**）：
+  | 层 | 文件 | 职责 |
+  |---|---|---|
+  | 前端 | `src/lib/csvExport.ts` | 拼 CSV 字符串（BOM + RFC 4180 转义）+ 翻译错误码 |
+  | Rust | `src-tauri/src/export.rs` | 弹原生「另存为」+ 写盘（**路径不经过前端**） |
+
+- ⚠️ 依赖：只有 **cargo 侧** `tauri-plugin-dialog`。前端**不装**任何文件插件，
+  `fs:write-all` 与 `dialog:allow-save` 两条权限已删（见 §0 依赖清单）。
+- 🔴 `export.rs` 头部说明了「为什么不能只把写动作搬到 Rust」——
+  那是本功能的**安全边界**所在，改这块前必读。
 
 ---
 
@@ -263,12 +359,17 @@
 | `src-tauri/tauri.conf.json` | 版本 / 标识 / 窗口 / CSP / asset 白名单 / `bundle.resources` |
 | `src-tauri/src/lib.rs` | **手写显式迁移数组** `migrations()`（v1–v9，`include_str!`） |
 | `src-tauri/src/packs.rs` | `pack_download` / `resolve_pack_resource` / `ensure_*` |
+| `src-tauri/src/export.rs` | 🆕 阶段54：CSV 导出的「另存为 + 写盘」。**头部注释说明了权限边界，改前必读** |
+| `src-tauri/capabilities/default.json` | 🆕 阶段54：删掉 `fs:write-all` / `dialog:allow-save` 后只剩 4 条权限 |
 | `public/packs_manifest.json` | 数据包清单（由脚本生成，**不要手改**） |
 | `scripts/` | 见 §9 命令表 |
 | `docs/screenshots/` | 阶段验收截图 |
 
-**仓库根有一个垃圾文件，建议清掉**（失控重定向产生的）：
-`ntent .srclibpacks.ts  Select-Object -First 260`（本轮实测仍在，未跟踪）。
+> 📌 **仓库根曾经有一个垃圾文件**（`ntent .srclibpacks.ts  Select-Object -First 260`，
+> 失控重定向产生的）。✅ **阶段54 实测确认已不存在** —— 仓库根只剩
+> `.gitattributes` 与 `.gitignore` 两个文件。
+> ⚠️ 顺便更正本文档此前的一句话：它写「本轮实测仍在，未跟踪」，但那次「实测」
+> 已经过期。这正是 §0「文档约定」要防的那类错误 —— **别再把文件系统状态写进正文**。
 
 ---
 
@@ -343,21 +444,68 @@
 
 ---
 
-## 8. 下一步计划（阶段 53+）
+## 8. 下一步计划（阶段 55+）
 
-1. **数据包托管迁移** —— 评估脱离 GitHub Release（当前靠 `gh-proxy.com` 镜像）。
+> 阶段54 是**修补批次**，下面这些才是**功能推进**。按「投入产出比 × 风险」排序。
+
+1. **数据包托管迁移**（最高优先级）—— 评估脱离 GitHub Release（当前靠 `gh-proxy.com` 镜像）。
    ⚠️ 清单的 `directBaseUrl` 字段已**真接入代码**（阶段53，见 §3.2）——
    但那是**降级**，不是**换托管**：前者是「镜像挂了切直连」，后者是「换到 Cloudflare R2
    / 阿里云 OSS / 腾讯云 COS 等更可控的源」。两者独立，换托管仍待评估。
-2. **Tauri 自动更新**（updater）。
-3. **复杂 AI 空间查询** —— 多图层叠加、缓冲区、空间关系（相交/包含/邻近）。
-4. **GeoJSON 导出** —— 与已实现的 CSV 导出并列，让 GIS 软件（QGIS 等）能直接读。
-5. **GEM 可再生能源引入** —— 现包只有煤炭 / 油气 / 生物质三类；
-   扩到全能源会显著增大体积（迁移注释里提过「扩到三类电源就会顶破 50 MB 红线」），
-   需先解决分发策略。⚠️ 风/光/水/核/储**不在开放 API 里**，要走 GIPT 的填表门控，
-   合规与自动化链路都要重新评估。
-6. **阶段51 遗留**：11px 溢出（见 §2）、原生标题栏主题同步（见 §2）。
-7. **文档债务**：README 的「已知限制」与体积表已过时（见 §11）。
+
+   🔴 **为什么它排第一**：整条分发链路是**单点依赖**一个免费第三方代理。
+   SHA256 保证了**完整性**（镜像篡改会被 `CHECKSUM_MISMATCH` 拦下），但**可用性**
+   完全押在它身上；且降级链的另一端是 GitHub，国内同样不可控 ⇒
+   **降级在关键时刻可能降不动**。这是当前唯一的「外部单点故障」。
+
+   ✅ **利好**：代码侧几乎不用改 —— `gen_packs_manifest.mjs` 的 `DEFAULT_BASE_URL`
+   被注释明确标为「整个下载分发链路的**唯一配置点**」。迁移 = 上传 170 MB +
+   改 1 个常量 + 重跑脚本。
+
+   💡 顺带建议的小重构：把清单 `release` 从「两个字段（`baseUrl`/`directBaseUrl`）」
+   升级为**候选源数组**（`bases: [{url, priority}]`）。语义更清晰，也天然支持多源。
+   ⚠️ `public/packs_manifest.json` 是**脚本生成**的，**不能手改**。
+
+2. **Tauri 自动更新**（updater）—— 与第 1 条同批做（更新清单也放同一个托管上）。
+   ⚠️ **与「零新增依赖」红线冲突，需单独授权**。`installMode: currentUser` 与
+   NSIS updater 兼容 ✅。
+   📌 **为什么重要**：这正是阶段54 发现的「安装包还停在 0.1.0」的另一面 ——
+   没有 updater，「重新打包」的收益只能靠用户手动重装兑现。
+
+3. **GeoJSON 导出** —— 与已实现的 CSV 导出并列。
+   ⚠️ **范围限制必须先想清楚**：
+   - 电厂（SQLite 34,936 条）→ 可完整导出 ✅
+   - **OSM 电网要素（切片里的 430,969 个）→ 导不了**：它们在 PMTiles 里，
+     且 z<8 瓦片**刻意降采样**（省略 140,614 个要素），只能靠
+     `queryRenderedFeatures` 拿到当前渲染的部分，**必然漏数据**
+   ⇒ 建议**第一版只导电厂**（与 CSV 口径一致），UI 上写清范围。
+     诚实说明限制，好过一个会漏数据的「完整导出」。
+
+4. **复杂 AI 空间查询** —— 多图层叠加、缓冲区、空间关系（相交/包含/邻近）。
+   🔴 **核心障碍**：数据是**分裂的** —— 电厂在 SQLite（可 SQL），电网在 PMTiles
+   （只能 MapLibre 查）。跨两者做空间关系**没有统一查询引擎**。
+   ⇒ **路径1（推荐）**：把需求**限制在 SQLite 能做的那一半**。「某电厂 50km 内的
+   其他电厂」完全可在 SQL 里做：`idx_power_plants_lat_lon` 先粗筛经纬度包围盒，
+   再精算 Haversine。提示词加 `bufferKm` 维度，复用现有 bbox 注入机制。
+   **不需要 SpatiaLite / 任何新依赖。**
+   ⇒ 路径2（引入 SpatiaLite）触发依赖红线 + 体积增长 + 迁移不可逆，**暂不建议**。
+
+5. **GEM 可再生能源引入** —— ⚠️ **这是合规问题，不是技术问题**。
+   风/光/水/核/储**不在开放 API 里**，只在需填表申请的 GIPT（182,400 机组）。
+   ⇒ **第一步是读条款（能否再分发？许可是否仍是 CC BY 4.0？），不是写代码。**
+   **在许可明确前，不要下载并分发。**
+
+   🟢 **技术侧的好消息（本文档此前写错了，此处更正）**：
+   旧文写「扩到三类电源就会顶破 50 MB 红线」—— 那是**阶段48 把 GEM 塞进 SQLite
+   种子库**时的判断。阶段50 起 GEM 走 `packs/` 按需下载、**不进安装包**
+   ⇒ **扩容不再受 50 MB 红线约束**。这个前提变化当时没被记录，是本轮体检发现的。
+
+6. **数据看板动态化** —— `StatsDashboard.tsx` 仍是**写死的 WRI 快照**
+   （带「静态原型」徽标）。索引已就绪（`idx_power_plants_fuel_cover`，阶段47 专为此加），
+   成本低、用户感知强。**建议尽早做**。
+
+7. **阶段54 遗留**：原生对话框的点击路径未验证（见 §2 阶段54 遗留）、
+   §11.3 的 5 个小项。
 
 ---
 
@@ -365,18 +513,43 @@
 
 ### 环境准备（每个新终端都要做，node / python 都不在 PATH）
 
+🔴 **别照抄路径 —— 先查**。本文档此前写死「node 在 `%LOCALAPPDATA%\Programs\nodejs`、
+python 在 `%LOCALAPPDATA%\Programs\Python\Python311`」，**阶段54 实测这台机器上两处都不存在**
+（node 在 `D:\Node,js`，python 在 `C:\Python314`）。所以改成下面的探测式写法：
+
 ```powershell
-$env:Path = "$env:LOCALAPPDATA\Programs\nodejs;" `
+# 1) 先问系统
+Get-Command node,npm,python,git -ErrorAction SilentlyContinue | Select-Object Name,Source
+# 2) 找不到再按候选位置逐个探（存在性一目了然）
+@("D:\Node,js\node.exe","$env:LOCALAPPDATA\Programs\nodejs\node.exe",
+  "C:\Python314\python.exe","$env:LOCALAPPDATA\Programs\Python\Python311\python.exe",
+  "D:\Git\cmd\git.exe") |
+  ForEach-Object { "{0,-6} {1}" -f (Test-Path $_), $_ }
+```
+
+探到之后，把实际路径填进这个前缀里（下面用本机 2026-09-18 实测值作示例）：
+
+```powershell
+$env:Path = "D:\Node,js;" `
   + [System.Environment]::GetEnvironmentVariable('Path','Machine') + ';' `
   + [System.Environment]::GetEnvironmentVariable('Path','User')
 [Console]::OutputEncoding=[System.Text.Encoding]::UTF8
 ```
 
-| 工具 | 路径 |
-|---|---|
-| Node 20.20.2 / npm 10.8.2 | `%LOCALAPPDATA%\Programs\nodejs\`（便携版，**不在 PATH**） |
-| Python 3.11.9 | `%LOCALAPPDATA%\Programs\Python\Python311\python.exe`（**不在 PATH**） |
-| git | `D:\Git\cmd\git.exe` |
+| 工具 | 本机实测（2026-09-18） | 备注 |
+|---|---|---|
+| node / npm | `D:\Node,js`（**v26.9.0**） | 便携版，**不在 PATH** |
+| python | `C:\Python314\python.exe`（3.14） | **不在 PATH**；⚠️ `run_pipeline.mjs` 里另有候选逻辑 |
+| git | `D:\Git\cmd\git.exe` | **不在 PATH**；⚠️ 沙箱会屏蔽 D 盘，调用需非沙箱模式 |
+
+> ⚠️ **版本差异会咬人**：文档原写「Node 20.20.2 / npm 10.8.2、Python 3.11.9」，
+> 本机已是 Node 26 / Python 3.14。若脚本行为与文档不符，**先核对版本再怀疑代码**。
+>
+> ⚠️ **脚本里写死解释器路径是个已存在的隐患**：`scripts/run_pipeline.mjs` 的
+> `pythonPath()` 候选表只有 `%LOCALAPPDATA%\Programs\Python\Python311\python.exe`
+> 一个绝对路径（其余靠 `PYTHON` 环境变量或 PATH 兜底）。本机没有那个路径时，
+> 它会落到裸 `python` —— 是否能跑取决于 PATH。
+> 用 `$env:PYTHON = "C:\Python314\python.exe"` 可显式指定，这是目前最稳的用法。
 
 ### 开发 / 构建
 
@@ -395,22 +568,32 @@ npm run tauri build      # 出 NSIS 安装包
 node scripts/fetch_basemap.mjs        # 生成 resources/maps/basemap.pmtiles（全新克隆必跑）
 node scripts/fetch_glyphs.mjs         # 生成离线中文字形（缺了不崩，会告警回退）
 node scripts/gen_packs_manifest.mjs   # 重新生成 public/packs_manifest.json
+$env:PYTHON = "C:\Python314\python.exe"   # ← 先看一下 §9 顶部关于解释器路径的告警
 python scripts/serve_packs.py         # 本地提供 Range 支持，用于验证下载/断点续传
-node scripts/install_packs.mjs        # 把 data/packs/*.pmtiles 装到用户目录
+node scripts/install_packs.mjs --user-dir   # 投放 8 个包到用户目录（**运行时第一顺位**）
+node scripts/install_packs.mjs --list       # 只列现状；默认目标是 dev 的 target/debug/packs
 python scripts/make_seed_db.py        # 重建 seed 库（从已迁移的 live DB 走 VACUUM INTO）
 python scripts/import_gem_plants.py   # 抓取 GEM 三类电源 → 电站级 GeoJSON
 ```
+
+> 阶段54 修了 `install_packs.mjs` 的两个盲区：此前它**只认 `osm-*.pmtiles`**
+> （GEM 包永远投放不了），且**没有一条路径能投进用户目录**。
+> 现在两类包都处理，`--user-dir` 直投 `%APPDATA%\<identifier>\packs\`；
+> `--only` 也接受别名（`gem-plants` / `gem` 都行）。
 
 ### 只读复核手法（很值钱，零依赖、绕开应用本身）
 
 ```powershell
 # 用 Python 内置 sqlite3 只读打开，检查迁移版本 / 表 / 行数
-$py = "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe"
+$py = "C:\Python314\python.exe"   # ← 换成 §9 探测到的实际路径
 #   db = %APPDATA%\com.pstar119.globalpowergis\global_power_gis.db
 #   连接串用 Path(db).as_uri() + "?mode=ro"
+#   ⚠️ 多行脚本写进临时 .py 文件再跑，比 here-string 更省事：
+#      用 create_file 写到 data/（该目录被 gitignore），跑完删掉
 
 # 用 Node 直接读清单求和（不要手算）
-node -e "const p=require('./public/packs_manifest.json').packs;console.log(p.length, p.reduce((a,b)=>a+(b.features||0),0))"
+node -e "const p=require('./public/packs_manifest.json').packs;console.log(p.length, p.reduce((a,b)=>a+(b.features||0),0), p.reduce((a,b)=>a+b.bytes,0))"
+# 期望：8  815728  178588968
 ```
 
 > ⚠️ **PowerShell 里写多行 Python 别用 `& $py -c "..."`**（引号会被吞，报 `SyntaxError`）。
@@ -427,16 +610,35 @@ npm run tauri dev
 
 ---
 
-## 10. 提交状态
+## 10. 提交状态（**现查，勿抄**）
 
-- **阶段 50–52 的改动均已提交，全部未 push。**
-- 当前 `HEAD`：`3219cef`（`feat: CSV 导出（另存为对话框，破例新增 dialog + fs 插件）`）
-- `origin/master`：`dd15d2d`（`docs: 修订 README 过时内容 + 新增 PROJECT_HANDOFF.md`）
-- **领先 origin 3 个提交**：
-  - `3219cef` —— feat: CSV 导出
-  - `42cc5a6` —— feat(map): AI 工作台改为地图上方横向条（阶段52 乙方案）
-  - `e31e881` —— feat(theme): 切换主题时同步 Tauri 原生窗口标题栏
-- 工作区**干净**（无未暂存、无未跟踪文件）。
+‼️ 本节此前写着「HEAD 是 `3219cef`、领先 origin 3 个提交」—— **那是错的**，
+实际当时已全部 push。这类信息**每做一次提交就失效**，所以按 §0 的文档约定
+不再写具体值，改为给命令：
+
+```powershell
+$git = 'D:\Git\cmd\git.exe'   # git 不在 PATH；且沙箱会屏蔽 D 盘，需非沙箱模式执行
+& $git log --oneline -5                      # 最近提交
+& $git status --short                        # 工作区是否干净（无输出 = 干净）
+& $git log --oneline origin/master..HEAD     # 领先 origin 几个提交（无输出 = 已同步）
+& $git log --oneline HEAD..origin/master     # 落后多少个（无输出 = 不落后）
+```
+
+### 产物（现查）
+
+```powershell
+# 安装包文件名 / 体积 / 构建时间 —— 一眼看出产物是否落后于代码
+Get-ChildItem src-tauri\target\release\bundle\nsis\*.exe |
+  Select-Object Name, Length, LastWriteTime
+# 裸主程序（用于横向对比体积变化）
+Get-Item src-tauri\target\release\global-power-gis.exe |
+  Select-Object Name, Length, LastWriteTime
+```
+
+> 🔎 **判断产物是否落后，只看一个信号**：产物 `LastWriteTime` 是否**晚于**
+> 最后一次提交的时间。阶段54 体检时就是这个信号暴露了「安装包还停在 v0.1.0」
+> —— 三个版本号（`package.json` / `Cargo.toml` / `tauri.conf.json`）都是 0.2.0，
+> 只有产物是旧的。
 
 ### 打包注意（未变）
 
@@ -444,21 +646,48 @@ npm run tauri dev
 `link.exe` / `icu_properties_data` 的 `拒绝访问 (os error 5)`，**原样重试一次即过**。
 另：**应用还在运行会锁住 exe**，也会报同样的错 —— 先看有没有残留进程再归因。
 
-⚠️ **新增 dialog + fs 插件后**，`cargo build` 会**首次拉取新 crate 并编译**（约 1~3 分钟）。
-之后增量编译，不影响日常。
+⚠️ **新增依赖后**，`cargo build` 会**首次拉取新 crate 并编译**（约 1~3 分钟）。
+之后增量编译，不影响日常。阶段54 删掉 `tauri-plugin-fs` 的直接依赖**不会**让编译更快
+—— 它仍是 `tauri-plugin-dialog` 的传递依赖，照样要编译。
 
 ---
 
-## 11. 文档待修正项（README 已过时之处）
+## 11. 文档卫生（阶段54 已清理，此处留档防复发）
 
-以下是**本轮实测发现的、README 与代码不一致**的地方，尚未修改 README：
+### 11.1 阶段54 修掉的 10 处不一致
 
-| # | README 的说法 | 仓库真值 |
+| # | 位置 | 原说法 | 真值 |
+|---|---|---|---|
+| 1 | `README` 当前阶段 | 阶段52「进行中」 | 实际已到阶段53/54 |
+| 2 | `README` 说明区 | 「界面为**固定深色主题**」 | 🔴 阶段51 已实现浅色切换 |
+| 3 | `README` 说明区 | 「设置项**全部** `disabled`」 | 仅 3 组静态占位；主题/数据包/关于/AI 已生效 |
+| 4 | `README` 依赖表 | dialog + fs 两个插件 | 前端那一半已删（见 §0） |
+| 5 | `README` 体积表 | 长三角 `4.68 MB` | `7.49 MiB`（正文已改，此处核对一致） |
+| 6 | 本文档 §10 | HEAD `3219cef`、**领先 origin 3 个提交** | 🔴 **已全部 push，0 领先** |
+| 7 | 本文档 §3.2 | 本机已有 **4 个数据包** | packs 目录**为空** |
+| 8 | 本文档 §5 | 仓库根有垃圾文件「本轮实测仍在」 | 已不存在 |
+| 9 | 本文档 §9 | node/python 绝对路径 | 🔴 两处路径在本机**都不存在** |
+| 10 | 本文档 §2 | 图层控制溢出 **11px** | 🔴 实测 **65px**（阶段52 布局改动后失效） |
+
+### 11.2 数字过期的**三类成因**（比逐条改更重要）
+
+| 成因 | 例子 | 对策 |
 |---|---|---|
-| 1 | `README.md:283-292`、`346`：**「变电站与电厂的圆点『点不开』…… 已列入阶段40 待办」** | 🔴 **已过时** —— **阶段41 已修复**。现在统一走地图级回调 `showOsmPointOrLine()`（`MapPage.tsx:1161`），**点优先**（`HIT_BBOX_PAD=7` 扩大命中区），核心区与区域包共用同一路径，并已补上指针反馈 |
-| 2 | `README.md:45` 体积表：长三角 OSM 电网切片 **4.68 MB** | 🔴 **已过期** —— 实测 `osm_grid.pmtiles` = **7.49 MiB**（核心区在阶段43 加入了铁路/管道） |
-| 3 | `README.md`「当前阶段」写**阶段48-A** | 已落到**阶段51**（本文档 §2） |
-| 4 | `README.md:339` 的 `430,969 / 116.52 MB` | ✅ **正确**，但必须带「电力要素」口径（见 §3.1） |
-| 5 | README「数据来源与许可」未记录阶段52 破例新增的 dialog + fs 插件 | 🆕 **需补**：加一句「本项目原本零新增依赖，阶段52 为 CSV 导出的另存为对话框破例新增 2 个插件」，并说明破例经用户授权 |
+| **易失状态**被写进正文 | HEAD 哈希、领先几个提交、本机装了几个包 | §0 文档约定：禁止写，改给命令 |
+| **布局/实现改动**让旧测量失效 | 11px → 65px（AI 工作台改横向条） | 数字旁**必须带测量条件**（窗口尺寸、面板状态、`max-height`） |
+| **环境差异** | node/python 路径、版本号 | 给探测命令，不给固定值 |
 
-> 建议在阶段52 开头一并修掉这 4 条，避免下一位接手者被第 1 条误导去「修一个已经修好的 bug」。
+### 11.3 仍值得跟进的小项（非缺陷，未处理）
+
+| # | 事项 | 说明 |
+|---|---|---|
+| 1 | ~~`scripts/run_pipeline.mjs:158` 写死 `Python311` 绝对路径~~ | ✅ **阶段54 已修** —— 改为「`$env:PYTHON` 优先 → 扫 `Python3*` 常见目录 → 裸 `python`」三级，并打印实际用到的解释器。实测本机自动探测到 `C:\Python314\python.exe`（旧代码会静默落到裸 `python` 而失败） |
+| 2 | `index.html` 的 `data-theme` 由 JS 设置，无内联引导脚本 | 浅色用户启动理论上会闪一帧深色背景。**先观察再改** —— Tauri 本地资源加载极快、此时 `#root` 为空，大概率不可感知 |
+| 3 | ~~`index.html` 的 `<html lang="en">` 而界面全中文~~ | ✅ **阶段54 已改为 `zh-CN`**（无障碍正确性，非外观问题） |
+| 4 | `index.html` favicon 指向 `public/vite.svg` | Vite 默认残留，与 README「图标为占位」说法一致，等正式图标时一并换 |
+| 5 | 数据包本地校验尚无脚本 | 目前只能手工 `Get-FileHash` 逐包核对。建议加 `scripts/verify_packs_local.mjs` 把「清单 vs 本地文件」自动化 |
+| 6 | `bundle\nsis\` 里同时留着旧的 `0.1.0` 安装包 | 阶段54 重建时发现新包是**追加**而非替换。分发时务必认版本号；建议打包后手工清掉旧包，或在脚本里加一步 |
+
+> 📌 第 5、6 条是**防 P0 类问题复发**的那两条：阶段54 的体检就是靠手工比对
+> 才发现「本机一个包都没有」与「安装包还停在 0.1.0」。自动化后，
+> 这两类问题在打包前就能暴露，不必靠下一次人肉体检。

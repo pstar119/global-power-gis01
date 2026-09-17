@@ -4,7 +4,39 @@
 
 ## 当前阶段
 
-**阶段52 —— CSV 导出与 AI 工作台布局重构**（2026-09-17，进行中，v0.2.0）
+**阶段54 —— 修补批次：权限收敛 / 图层溢出 / 投放脚本 / 文档治本**（2026-09-18，v0.2.0）
+
+本阶段做了什么（都是「修补」，不是新功能）：
+
+- **CSV 导出的写盘动作下沉到 Rust** —— 顺带删掉 `fs:write-all` 这条过宽权限
+  （前端原本可以在任意路径写文件），前端也不再需要任何文件插件
+- **修「图层控制」的溢出** —— 「输电线路（按电压分级）」改为可折叠，
+  1280×800 下默认路径从**溢出 65px 变成 0**
+  （⚠️ 旧文档记的「11px」是阶段52 布局改动前的数，已作废）
+- **修数据包投放脚本的两个盲区** —— 此前 `gem-plants.pmtiles` 永远投放不了，
+  且没有一条路径能投到运行时优先级最高的**用户目录**
+- **文档治本** —— 见下方「文档约定」
+
+阶段53 完成：数据包下载**多源降级**（镜像失败自动切直连）。
+
+### 文档约定（阶段54 起执行）
+
+> **凡是写进文档的数字，都要能立刻用一条命令验证；不能验证的，就别写进去。**
+
+以下三类是**易失状态**，每做一次提交 / 每清一次目录就过时一次，因此
+**禁止**写进文档正文，一律给出查询命令：
+
+| 易失状态 | 现查命令 |
+|---|---|
+| 当前提交、领先/落后 origin 几个提交 | `D:\Git\cmd\git.exe log --oneline -3`（见 `PROJECT_HANDOFF.md` §9） |
+| 本机装了哪些数据包 | `node scripts/install_packs.mjs --list` |
+| 构建产物的版本与体积 | `Get-ChildItem src-tauri\target\release\bundle\nsis\*.exe \| Select-Object Name,Length,LastWriteTime` |
+| 工具链绝对路径 | 见 `PROJECT_HANDOFF.md` §9 的环境自检 |
+
+**为什么定这条规矩**：阶段54 体检时发现 10 处文档与仓库不一致，其中
+「HEAD 是 `3219cef`、领先 origin 3 个提交」「本机已有 4 个数据包」这两条
+在写下后的**一天内**就失效了。逐条改数字只能撑到下一次提交 —— 所以要改的是
+**记录什么**，而不是记录得准不准。
 
 已接入的能力：
 
@@ -41,15 +73,30 @@
 
 ![阶段33：左侧 AI 工作台折叠后只剩导轨](docs/screenshots/phase33-workbench-collapsed.png)
 
-## 分发包（第一版完整可分发离线版）
+## 分发包
 
-安装包：`src-tauri/target/release/bundle/nsis/Global Power GIS_0.1.0_x64-setup.exe`
+安装包：`src-tauri/target/release/bundle/nsis/Global Power GIS_0.2.0_x64-setup.exe`
 
-> ⚠️ 下列体积为阶段50 记录值；版本已 bump 到 **0.2.0**，**需重建后**文件名与体积才更新。
+> 📌 **下列体积是 2026-09-18（阶段54）的实测值**，会随每次重建变化。
+> **核对当前产物请用命令，别照抄**（见 `PROJECT_HANDOFF.md` §10「产物（现查）」）：
+>
+> ```powershell
+> Get-ChildItem src-tauri\target\release\bundle\nsis\*.exe |
+>   Select-Object Name, Length, LastWriteTime
+> ```
 
-- 体积 **46.54 MB**（NSIS，中文安装界面）；SHA256 `03DC2631BE5BC9B49EFFD3E5D02844A9556A34DF2767C371578BD9F43FB66DB0`
-- 裸主程序 9.26 MB；其余为下面几份资源的 LZMA 压缩后体积
-- 预算红线 50 MB，当前余量 **3.46 MB**
+- 体积 **48,357,753 B = 46.12 MiB**（NSIS，中文安装界面）
+- SHA256 `A1FB8E0F99A1B720EE5161E4F6F51B22E3C6B3943EC0DFC734849D886383130D`
+- 裸主程序 **9,921,024 B = 9.46 MiB**；其余为下面几份资源的 LZMA 压缩后体积
+- 预算红线 50 MB，当前余量 **3.88 MB**
+
+> 🔎 **对比阶段50（46.54 MiB）反而小了 0.42 MB**，尽管阶段52 新增了 dialog 插件。
+> 同时裸主程序**大了 0.20 MiB**（9.26 → 9.46 MiB，插件与 `export.rs` 的代码）。
+> ⇒ 两者方向相反是正常的：**别用裸 exe 的增量去推安装包的增量**，
+> 资源段的 LZMA 压缩率与前端 bundle 大小都会影响最终结果。要结论就重新打包量一次。
+>
+> ⚠️ `bundle\nsis\` 目录里**同时留着旧的 `0.1.0` 安装包**（阶段50 的产物）。
+> 它不带阶段52 的 CSV 导出修复，**分发时务必认版本号**。
 
 关键资源随包分发（可核：`src-tauri/target/release/nsis/x64/installer.nsi` 里的 `File /a` 指令）：
 
@@ -102,15 +149,44 @@
 
 ### 安装包红线自检（在裸 exe 二进制里逐字符串搜）
 
-| 关键字 | 结果 |
-|---|---|
-| `9222` | 未命中 ✅ |
-| `remote-debugging` | 未命中 ✅ |
-| 硬编码 API Key（`sk-*` / `Bearer *` / `api_key=`） | 源码扫描零命中 ✅ |
-| `additionalBrowserArgs` | 命中，但那是 Tauri 自身给 WebView2 传 `--disable-features=…` 的字段名；本项目 `tauri.conf.json` 未配置该项 |
+🔴 **别用 `Select-String -Encoding Byte`** —— PowerShell 5.1 的 `-Encoding` 不接受
+`Byte`，命令会**直接报错**，而报错时它一行都不输出，看起来就像「全部未命中」。
+**这是个会让人拿到假通过的坑**（阶段54 实测踩到）。可用的写法：
+
+```powershell
+$exe   = (Get-Item src-tauri\target\release\global-power-gis.exe).FullName
+$bytes = [System.IO.File]::ReadAllBytes($exe)
+$latin = [System.Text.Encoding]::GetEncoding(28591).GetString($bytes)   # latin1：字节↔字符一一对应
+foreach ($k in @('127.0.0.1:8099','9222','remote-debugging','api_key=')) {
+  "{0,-22} {1}" -f $k, $(if ($latin.Contains($k)) { '命中 ❌' } else { '未命中 ✅' })
+}
+```
+
+阶段54（2026-09-18）实测结果 —— 同时列出**应当命中**的项，避免「全都没命中」这种
+无意义的绿灯：
+
+| 关键字 | 应当 | 实测 |
+|---|---|---|
+| `127.0.0.1:8099` | 未命中 | ✅ 未命中（构建期无 `PACKS_BASE_URL` 污染） |
+| `9222` | 未命中 | ✅ 未命中 |
+| `remote-debugging` | 未命中 | ✅ 未命中 |
+| `api_key=` | 未命中 | ✅ 未命中 |
+| `export_csv_file` | **命中** | ✅ 命中（阶段54 新增的 Rust 命令确实进包） |
+| `tauri.localhost` | **命中** | ✅ 命中（生产版前端源，预期内） |
+
+> 📌 上一行那两个「应当命中」的项是**对照**：只搜「不该出现的东西」全都搜不到，
+> 也可能是因为搜错了地方。加一组「必须出现」的项，绿灯才有意义。
+>
+> ⚠️ 另：`additionalBrowserArgs` 此前被记为「命中但无害」（Tauri 给 WebView2 传
+> `--disable-features=…` 的字段名，本项目未配置该项）。本轮未复测这一条 ——
+> 它不是泄漏项，留在这里只作历史记录。
 
 打包注意：`target/release` 从零重建时，实时防护会偶发抢占新产物，报
-`link.exe` / `icu_properties_data` 的 `拒绝访问 (os error 5)`，**原样重试一次即过**（本阶段实测）。
+`link.exe` / `icu_properties_data` 的 `拒绝访问 (os error 5)`，**原样重试一次即过**（实测）。
+
+> ℹ️ 另有一条**无害**的链接器警告：`正在创建库 …global_power_gis_lib.dll.lib 和对象 …dll.exp`
+> —— 这是 `crate-type` 含 `cdylib`/`staticlib` 时的正常产物（供移动端复用），
+> 不是错误，阶段54 打包时出现过。
 
 取数与切片流程见 [`README_OSM.md`](./README_OSM.md)。
 
@@ -183,18 +259,31 @@ scripts/gen_packs_manifest.mjs   刷新清单里的 sizeMb / sha256 / bytes
 | 语言 | TypeScript |
 | 构建工具 | Vite 8 |
 | 包管理器 | npm |
-| 文件对话框 | `@tauri-apps/plugin-dialog` + `@tauri-apps/plugin-fs`（阶段52 破例） |
+| 文件对话框 | 原生「另存为」由 **Rust 侧** `tauri-plugin-dialog` 提供 —— 前端**不装**任何文件插件 |
 
 ### 关于依赖
 
-项目长期执行「**零新增依赖**」原则。**阶段52 破例新增 2 对包**（npm + cargo 各 2 个），
-经用户明确授权：
+项目长期执行「**零新增依赖**」原则，**阶段52 曾破例**，**阶段54 已把破例收窄**：
 
-- `@tauri-apps/plugin-dialog` / `tauri-plugin-dialog` —— 弹原生「另存为」对话框
-- `@tauri-apps/plugin-fs` / `tauri-plugin-fs` —— 写文件到用户选定路径
+| 阶段 | 依赖 | 现状 |
+|---|---|---|
+| 52 破例 | `@tauri-apps/plugin-dialog` / `tauri-plugin-dialog` | 🟡 **前端那一半已删**，cargo 侧保留（Rust 拿它弹原生对话框） |
+| 52 破例 | `@tauri-apps/plugin-fs` / `tauri-plugin-fs` | ✅ **已删**（npm + cargo 直接依赖 + `fs:write-all` 权限） |
 
-破例理由：CSV 导出必须让用户自选保存位置，浏览器原生 `<a download>` 只能写到系统默认
-下载目录，无法满足。
+破例的原始理由：CSV 导出必须让用户自选保存位置，浏览器原生 `<a download>` 只能写到
+系统默认下载目录，无法满足。
+
+**阶段54 为什么要再动它**：`plugin-fs` 带来的 `fs:write-all` 是「前端任意脚本可写任意
+路径」，且**无法用 `fs:scope` 收紧**（用户要自选位置，白名单不可能预先知道）。
+把「选路径 + 写盘」整体搬到 Rust 后，**路径不再经过前端**，权限随之删除。
+
+> ⚠️ 这里有个容易做错的「简化」：让前端弹完对话框、把路径传给 Rust 写 ——
+> 那样前端仍能构造任意路径，只是把 `fs:write-all` 换了个名字，**不是真的收敛**。
+> 细节见 `src-tauri/src/export.rs` 头部。
+
+> 🔴 顺带更正一个容易高估的收益：`tauri-plugin-fs` 是 `tauri-plugin-dialog` 的
+> **传递依赖**，删掉直接依赖后它**照样被编译进二进制** ⇒ 本次**不省体积**，
+> 收益是**权限收敛**。
 
 ⚠️ 这些是**先例，不是「可以随便加」**。后续任何新增依赖仍需单独授权。
 
@@ -348,7 +437,10 @@ node scripts/fetch_basemap.mjs                   # 生成 src-tauri/resources/ma
 
 ## 说明
 
-- 界面为**固定深色主题**，不跟随系统浅色模式
+- **深色 / 浅色主题可切换**（设置页 → 外观主题），并会同步 Tauri 原生标题栏。
+  ⚠️ **默认仍是深色，且刻意不跟随 `prefers-color-scheme`** —— 主题引入前本项目是固定
+  深色，若跟随系统，浅色系统上的老用户会在升级后被被动换一套外观。要跟随系统得显式
+  加一个 "auto" 选项，那是另一个需求（见 `src/lib/theme.ts`）。
 - **已内置真实数据**（不再是占位，阶段37–39 完成）：
   - **全球电厂 34,936 条** —— WRI Global Power Plant Database，入库于 `power_plants` 表
   - **全国 7 大区域电网数据包** —— OSM **纯电力要素**（线路 / 变电站 / 电厂）共
@@ -364,5 +456,10 @@ node scripts/fetch_basemap.mjs                   # 生成 src-tauri/resources/ma
     统一走地图级回调 `showOsmPointOrLine()`（点优先，`HIT_BBOX_PAD=7`）
 - ⚠️ **低缩放有刻意的降采样**（不是数据缺失）：z < 8 的瓦片按**电压等级由高到低**封顶
   **2 万要素/瓦片**，全国视角下合计省略 **140,614** 个要素；**z ≥ 8 完整保留**，放大即可见全部
-- 设置项**仍为禁用占位**（`SettingsPage.tsx` 全部 `disabled`），属已知未完成项
+- 设置页**只有 3 组下拉是禁用占位**（`SETTING_GROUPS`，`disabled`），属已知未完成项；
+  同页的**外观主题 / 数据包管理 / 数据库自检 / 关于 / AI 查询面板均已生效**
+  （阶段54 更正：此前本文写「设置项全部 disabled」，与实际不符）。
 - 应用图标为手写 SVG 生成的占位图标，后续可替换为正式品牌图标
+- 「图层控制」在 1280×800 下的溢出已修（阶段54）：`输电线路（按电压分级）` 改为
+  **默认折叠**。⚠️ 展开该层后仍会滚动 65px —— 那 116px 是真实内容，
+  `max-height` 641px 是硬上限；折叠只保证**默认路径**不出现滚动条。
