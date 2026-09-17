@@ -1,5 +1,12 @@
 <!doctype html>
-<html lang="en">
+<!-- 阶段54：`lang` 从 `en` 改为 `zh-CN`。
+     ‼️ 界面文案**全部是中文**，标成 `en` 会让读屏软件用英文发音规则读中文，
+     也会影响浏览器/WebView 的断行与字体回退选择。这是个无障碍正确性问题，
+     不是「反正没人看」的属性。
+     ⚠️ 未做（有意）：主题的**内联引导脚本**。浅色用户理论上会闪一帧深色背景，
+     但 Tauri 本地资源加载极快、此时 `#root` 为空只闪底色，**大概率不可感知** ——
+     先观察，别提前优化（见 PROJECT_HANDOFF §11.3）。 -->
+<html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
