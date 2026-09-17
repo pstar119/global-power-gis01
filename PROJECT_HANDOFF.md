@@ -1,7 +1,7 @@
 # Global Power GIS — 项目交接文档
 
 > 用途：开启新对话时无缝交接。**只读本文档 + 仓库现状即可恢复全部上下文。**
-> 最后更新：2026-09-17（阶段 51 完成时，本轮做过一次全量只读复核）
+> 最后更新：2026-09-17（阶段 52 中途，含 CSV 导出与破例依赖）
 > 当前版本：**v0.2.0**
 
 ---
@@ -13,6 +13,19 @@
 - ✅ **本轮已实测核实**：带出处（文件:行 / 命令输出）。
 - ⚠️ **有出处但含义需注意**：项目里确有该数字，但口径容易记错（已标注）。
 - ❓ **未核实**：来自口头描述或历史文档，落地前请先查证。
+
+### 依赖清单（阶段 52 起有破例）
+
+阶段 50 之前项目执行「零新增依赖」。**阶段 52 破例新增 2 对包**（npm + cargo 各 2 个），
+用于 CSV 导出的「另存为」对话框：
+
+- `@tauri-apps/plugin-dialog` / `tauri-plugin-dialog` —— 弹原生「另存为」对话框
+- `@tauri-apps/plugin-fs` / `tauri-plugin-fs` —— 写文件到用户选定路径
+
+破例理由：CSV 导出必须让用户自选保存位置，浏览器原生 `<a download>` 只能写到系统默认
+下载目录，无法满足。破例经**用户明确授权**（2026-09-17）。
+
+**⚠️ 后续若再想加依赖，仍需单独授权，不得援引本次破例为「可以随便加」的先例。**
 
 ### 最容易记错的数字（四个）
 
@@ -45,7 +58,7 @@
 
 ## 2. 当前阶段
 
-**阶段 51：UI/UX 最终打磨与产品化定型**（✅ 已完成，**未提交**）
+**阶段 51：UI/UX 最终打磨与产品化定型**（✅ 已完成，已提交 e31e881）
 
 四项任务与验收结论：
 
@@ -61,9 +74,30 @@
 1. **1280×800 边界情况**：用户手动展开「图层控制」后，面板 `693 / 704` → 溢出 **11px**，
    来源是「电力设施」组内部的 5 条电压分级勾选框。**未修**（怕无谓扩大改动面）。
    若要修：给这层加第三层折叠即可（`fuelMenuOpen` 已有可照抄的模式）。
-2. **原生标题栏仍是深色**：`tauri.conf.json` 的 `app.windows[0].theme` 写死 `"Dark"`（本轮实测确认），
-   切到浅色主题时**窗口标题栏不会跟着变**。要么改配置，要么在运行时用 Tauri API 同步。
-3. **未提交**：阶段 50–51 全部改动仍在工作区（见 §10）。
+2. ~~**原生标题栏仍是深色**~~ —— ✅ **阶段52 已修复**（`e31e881`）：
+   新增 `syncNativeTheme()` 动态同步，`capabilities` 已放行
+   `core:window:allow-set-theme`。
+3. ~~**未提交**~~ —— ✅ **阶段52 已提交**（`e31e881` / `42cc5a6` / `3219cef`），详见 §10。
+
+---
+
+### 阶段 52（进行中）
+
+**阶段 52：CSV 导出与 AI 工作台布局重构**
+
+| # | 任务 | 状态 |
+|---|---|---|
+| 1 | 主题切换同步 Tauri 原生标题栏 | ✅ 已提交 e31e881 |
+| 2 | AI 工作台改为地图上方横向条（乙方案） | ✅ 已提交 42cc5a6 |
+| 3 | CSV 导出（另存为对话框，破例新增 dialog + fs） | ✅ 已提交 3219cef |
+| 4 | 数据包托管迁移评估 | ⏸ 未开始 |
+| 5 | 复杂 AI 空间查询 | ⏸ 未开始 |
+| 6 | GeoJSON 导出 | ⏸ 未开始 |
+| 7 | GEM 可再生能源引入 | ⏸ 未开始 |
+
+**阶段 52 遗留**：
+- `fs:write-all` 权限是全放开（因为用户可能选任意路径），后续可考虑用 `fs:scope` 收紧
+- 待评估：新增的 dialog + fs 插件对安装包体积的影响（待下次打包实测）
 
 ---
 
@@ -174,6 +208,18 @@
   scripts/gen_packs_manifest.mjs   刷新清单里的 sizeMb / sha256 / bytes
   ```
 
+### 3.6 数据导出（阶段 52）
+
+- **地图页「当前视野」面板**右侧有「导出」按钮，导出**当前视野内的全部电厂**
+- 走**原生「另存为」对话框**（用户自选路径），默认文件名
+  `当前视野电厂_z{zoom}_{timestamp}.csv`
+- **CSV 列**（9 列）：GPPD ID / 电厂名称 / 国家/地区 / 燃料类型 / 装机容量 / 纬度 /
+  经度 / 投运年份 / 所有者
+- 坐标精度 **5 位**（约 1m）；z < 8 时文件名带 `_z5` 之类标记
+- **AI 查询结果**的 CSV 导出（设置页 `AiQueryPanel`）**也走同一套** `downloadCsv`
+- 实现文件：`src/lib/csvExport.ts`（从 `AiQueryPanel.tsx` 抽出，两处共用）
+- ⚠️ 依赖 `@tauri-apps/plugin-dialog` + `@tauri-apps/plugin-fs`（见 §0 依赖清单）
+
 ---
 
 ## 4. 技术栈
@@ -184,6 +230,7 @@
 | 前端 | **React 19.1.0** + **TypeScript ~6.0.3** + **Vite 8.3.0** |
 | 地图 | **MapLibre GL 6.9.0** + **pmtiles 4.5.0** |
 | 数据 | **SQLite（sqlx + `tauri-plugin-sql`，features `["sqlite"]`）** + seed 库 + PMTiles |
+| 文件对话框 | **@tauri-apps/plugin-dialog 2.7.3** + **@tauri-apps/plugin-fs 2.5.2**（阶段52 破例） |
 | AI | **Ollama**（本地）+ 可选云端 API |
 | 窗口 | 1280×800，min 1000×700 |
 
@@ -210,6 +257,7 @@
 | `src/lib/nlq.ts` | 自然语言查询编排 |
 | `src/lib/theme.ts` | 🆕 阶段51：主题 store（零依赖，模块级订阅表） |
 | `src/lib/packs.ts` | 数据包元信息、URL 拼接、`PackKind = "region" \| "gem"` |
+| `src/lib/csvExport.ts` | 🆕 阶段52：CSV 导出（dialog + fs），两处共用 |
 | `src-tauri/tauri.conf.json` | 版本 / 标识 / 窗口 / CSP / asset 白名单 / `bundle.resources` |
 | `src-tauri/src/lib.rs` | **手写显式迁移数组** `migrations()`（v1–v9，`include_str!`） |
 | `src-tauri/src/packs.rs` | `pack_download` / `resolve_pack_resource` / `ensure_*` |
@@ -224,9 +272,16 @@
 
 ## 6. 严格红线（逐条，不得违反）
 
-1. **零新增依赖。** 不引入任何新的 npm / cargo 依赖。
-   （现有 `maplibre-gl` / `pmtiles` / `plugin-sql` / `tauri-plugin-sql` 都是**逐阶段授权**引入的，
-   不是「可以随便加」的先例。）
+1. **零新增依赖（阶段52 起已有 4 项破例授权）。**
+   不引入任何新的 npm / cargo 依赖，除非用户**明确授权**。
+
+   **已有的逐阶段授权清单**：
+   - `maplibre-gl` / `pmtiles`（阶段早期，地图与切片）
+   - `plugin-sql` / `tauri-plugin-sql`（阶段早期，数据库）
+   - `@tauri-apps/plugin-dialog` / `tauri-plugin-dialog`（**阶段52 破例**，另存为对话框）
+   - `@tauri-apps/plugin-fs` / `tauri-plugin-fs`（**阶段52 破例**，写文件到用户路径）
+
+   ⚠️ 这些是**先例，不是「可以随便加」**。每次新增仍需单独授权。
 2. **不碰 `public/osm/smoketest_power.geojson`。**
    - 实际路径：**`public/osm/smoketest_power.geojson`（560,577 B）** —— ✅ 本轮实测。
      - 🔴 **不是 `data/osm/`**：`data/osm/` 下放的是抓取/切片**中间产物**（`core_*` 等），
@@ -286,14 +341,13 @@
 
 ---
 
-## 8. 下一步计划（阶段 52+）
+## 8. 下一步计划（阶段 53+）
 
 1. **数据包托管迁移** —— 评估脱离 GitHub Release（当前靠 `gh-proxy.com` 镜像），
    清单已预留 `directBaseUrl` 字段做降级重试。
 2. **Tauri 自动更新**（updater）。
 3. **复杂 AI 空间查询** —— 多图层叠加、缓冲区、空间关系（相交/包含/邻近）。
-4. **导出** —— 查询结果 / 当前视野导出 CSV / GeoJSON。
-   （AI 结果的 CSV 导出**已实现**，见 §3.3；待办的是「当前视野」这类非 AI 路径的导出。）
+4. **GeoJSON 导出** —— 与已实现的 CSV 导出并列，让 GIS 软件（QGIS 等）能直接读。
 5. **GEM 可再生能源引入** —— 现包只有煤炭 / 油气 / 生物质三类；
    扩到全能源会显著增大体积（迁移注释里提过「扩到三类电源就会顶破 50 MB 红线」），
    需先解决分发策略。⚠️ 风/光/水/核/储**不在开放 API 里**，要走 GIPT 的填表门控，
@@ -371,27 +425,23 @@ npm run tauri dev
 
 ## 10. 提交状态
 
-- **阶段 50–51 全部改动尚未提交。**
-- ✅ 本轮实测：`HEAD = ed1572f`（`Migrate GEM plants runtime to PMTiles and enable migration 009`），
-  **本地领先 `origin/master` 1 个提交**（该提交**尚未 push**）。
-- 工作区：**11 个已修改 + 2 个未跟踪**
-  - 已修改：`package.json`、`src-tauri/Cargo.lock`、`src-tauri/Cargo.toml`、
-    `src-tauri/tauri.conf.json`、`src/App.css`、`src/components/WelcomeWizard.tsx`、
-    `src/components/WelcomeWizard.module.css`、`src/pages/MapPage.tsx`、
-    `src/pages/MapPage.module.css`、`src/pages/SettingsPage.tsx`、
-    `src/pages/SettingsPage.module.css`
-  - 未跟踪：`src/lib/theme.ts`、`ntent .srclibpacks.ts  Select-Object -First 260`（垃圾文件）
-  - 本轮新增/重写：`PROJECT_HANDOFF.md`（本文件）
-- 提交前请 `git add -A` 并确认没有把 `data/`、`public/osm/`、`.pmtiles` 放进暂存区。
-- ⚠️ `Cargo.toml` 版本号变更会触发 **Rust 全量重建**（首次 `tauri build` 会比较久），属预期。
-- ✅ 已核实**无验收钩子残留**：源码里 `__map` / `9222` / `remote-debugging` 命中 **0 次**；
-  `tauri.conf.json` 里**没有** `additionalBrowserArgs`。
+- **阶段 50–52 的改动均已提交，全部未 push。**
+- 当前 `HEAD`：`3219cef`（`feat: CSV 导出（另存为对话框，破例新增 dialog + fs 插件）`）
+- `origin/master`：`dd15d2d`（`docs: 修订 README 过时内容 + 新增 PROJECT_HANDOFF.md`）
+- **领先 origin 3 个提交**：
+  - `3219cef` —— feat: CSV 导出
+  - `42cc5a6` —— feat(map): AI 工作台改为地图上方横向条（阶段52 乙方案）
+  - `e31e881` —— feat(theme): 切换主题时同步 Tauri 原生窗口标题栏
+- 工作区**干净**（无未暂存、无未跟踪文件）。
 
-### 打包注意
+### 打包注意（未变）
 
 `target/release` 从零重建时，实时防护会偶发抢占新产物，报
 `link.exe` / `icu_properties_data` 的 `拒绝访问 (os error 5)`，**原样重试一次即过**。
 另：**应用还在运行会锁住 exe**，也会报同样的错 —— 先看有没有残留进程再归因。
+
+⚠️ **新增 dialog + fs 插件后**，`cargo build` 会**首次拉取新 crate 并编译**（约 1~3 分钟）。
+之后增量编译，不影响日常。
 
 ---
 
@@ -405,5 +455,6 @@ npm run tauri dev
 | 2 | `README.md:45` 体积表：长三角 OSM 电网切片 **4.68 MB** | 🔴 **已过期** —— 实测 `osm_grid.pmtiles` = **7.49 MiB**（核心区在阶段43 加入了铁路/管道） |
 | 3 | `README.md`「当前阶段」写**阶段48-A** | 已落到**阶段51**（本文档 §2） |
 | 4 | `README.md:339` 的 `430,969 / 116.52 MB` | ✅ **正确**，但必须带「电力要素」口径（见 §3.1） |
+| 5 | README「数据来源与许可」未记录阶段52 破例新增的 dialog + fs 插件 | 🆕 **需补**：加一句「本项目原本零新增依赖，阶段52 为 CSV 导出的另存为对话框破例新增 2 个插件」，并说明破例经用户授权 |
 
 > 建议在阶段52 开头一并修掉这 4 条，避免下一位接手者被第 1 条误导去「修一个已经修好的 bug」。
