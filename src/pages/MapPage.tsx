@@ -2988,6 +2988,46 @@ function MapPage({
     );
 
   /**
+   * 阶段54：「输电线路（按电压分级）」的展开状态（第三层，与 fuelMenuOpen 同一层）。
+   *
+   * ‼️ 为什么加这一层 —— 修掉 1280×800 下**手动展开「图层控制」后的溢出**。
+   *
+   *    实测（2026-09-18，1280×800，AI 工作台折叠，`.layerPanel` 的 max-height = 641px）：
+   *
+   *    | 状态                              | clientHeight | scrollHeight | 溢出  |
+   *    |-----------------------------------|--------------|--------------|-------|
+   *    | 本层折叠（**本次改动后的默认**）  | 590          | 590          | **0** |
+   *    | 本层展开（= 改动前的默认）        | 641          | 706          | 65    |
+   *    | 再展开「统计筛选」                | 641          | 1059         | 418   |
+   *    | 再展开「图例」                    | 641          | 1110         | 469   |
+   *
+   *    🔴 **旧文档记的「溢出 11px」已过期** —— 那是阶段52 把 AI 工作台改成
+   *       地图上方横向条**之前**的数。布局一变，可用高度少了约 52px，
+   *       真实溢出是 **65px**（= 这 5 条电压档的整块高度 116px 减去原有余量）。
+   *       ⇒ 以后引用这个数字前先重测，别照抄 PROJECT_HANDOFF §2。
+   *
+   * ⚠️ **默认折叠，是对既有行为的改变，必须知情**：
+   *    这 5 条电压分级此前是**始终可见**的，现在需要多一次点击。
+   *    接受这个代价的理由有三条：
+   *      ① 「输电线路」总开关本身就能全开/全关线路（`toggleAllTiers`），
+   *         电压分级是**细化**而不是唯一入口；
+   *      ② 图例里同样有电压分级的色块说明，且图例本就默认折叠 ——
+   *         口径一致，不是只为这一处破例；
+   *      ③ 与同层的「统计筛选」(`fuelMenuOpen`) 默认值一致（都是 false）。
+   *
+   * ⚠️ **不改变任何图层的可见性**：折叠只隐藏复选框，勾选状态照旧（同 panelOpen 的约定）。
+   *    「输电线路」总开关的 `anyTierOn` 计算也**不依赖**本状态。
+   *
+   * 残余（如实记录，不假装修干净）：
+   *    ① 本层展开后仍溢出 65px —— 这 116px 是**真实内容**，不加宽面板/不缩字号
+   *       就压不下去（`max-height` 641px 是硬上限）。折叠只是让**默认路径**干净。
+   *    ② 「统计筛选」有 **15 个**燃料项（约 353px），展开后必然溢出 ——
+   *       这是阶段47-1 已记录并接受的立场：用户主动全展开时可以滚动，
+   *       `.layerPanel` 本就有 `overflow-y: auto` 兜底。
+   */
+  const [tierMenuOpen, setTierMenuOpen] = useState(false);
+
+  /**
    * 阶段46：「按能源细分」子菜单的展开状态（第三层）。
    * 与 openGroups 同级但**故意不复用**：openGroups 管的是分组（第二层），
    * 复用会让「收起分组」与「收起能源细分」互相牵连。
@@ -4950,10 +4990,29 @@ function MapPage({
                       {/* 阶段30：输电线路按电压分级。
                           用原生 `<input type="checkbox">`：语义与无障碍最好，也不必为「选中态」自造样式。
                           色块取自与地图**同一份** `OSM_LINE_TIERS[].color`，所以开关本身就是图例，
-                          永远不会和地图上的颜色脱节。 */}
+                          永远不会和地图上的颜色脱节。
+                          阶段54：本组改为**可折叠**（第三层，默认折叠），
+                          把 1280×800 下这块 116px 的内容从默认路径上摘掉（溢出 65px → 0）。
+                          实测数据与代价见 `tierMenuOpen` 的注释。 */}
                       <div className={styles.tierGroup}>
-                        <p className={styles.legendTitle}>输电线路（按电压分级）</p>
-                        <ul className={styles.tierList}>
+                        <button
+                          type="button"
+                          className={styles.subHeader}
+                          aria-expanded={tierMenuOpen}
+                          aria-controls="tier-sub-menu"
+                          onClick={() => setTierMenuOpen((v) => !v)}
+                        >
+                          <span>输电线路（按电压分级）</span>
+                          <span className={styles.chevron} aria-hidden="true">
+                            {tierMenuOpen ? "▼" : "▶"}
+                          </span>
+                        </button>
+
+                        <ul
+                          id="tier-sub-menu"
+                          className={`${styles.tierList} ${styles.subList}`}
+                          hidden={!tierMenuOpen}
+                        >
                           {OSM_LINE_TIERS.map((tier) => (
                             <li key={tier.vclass}>
                               <label className={styles.tierItem}>
