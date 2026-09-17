@@ -107,6 +107,29 @@ function WelcomeWizard({ api, onFinish }: WelcomeWizardProps) {
     [regionPacks, selected, installedSet],
   );
 
+  /**
+   * 阶段51：thematic（GEM）也**参与下载**，但**绝不进 `targets`**。
+   *
+   * ‼️ 为什么不并进 targets：`finishBbox` 由区域包的 bbox 并集算出，
+   *    而 GEM 的 bbox 是全世界（-180,-85,180,85）—— 一旦进去，向导结束时地图会直接
+   *    缩到世界视图，用户刚选的“华东”被**静默吞掉**（50-B.2 记过这个坑）。
+   *    ⇒ 下载队列 = 区域 targets + 单独勾选的 thematic；bbox 只由区域算。
+   */
+  const thematicTargets = useMemo(
+    () => thematicPacks.filter((p) => selected.includes(p.key) && !installedSet.has(p.key)),
+    [thematicPacks, selected, installedSet],
+  );
+
+  /** 阶段51：区域包全选 / 取消全选 —— **只作用于区域包**，不碰 thematic。 */
+  const allRegionsSelected =
+    regionPacks.length > 0 && regionPacks.every((p) => selected.includes(p.key));
+  const toggleAllRegions = () =>
+    setSelected((prev) =>
+      allRegionsSelected
+        ? prev.filter((k) => !regionPacks.some((p) => p.key === k))
+        : [...new Set([...prev, ...regionPacks.map((p) => p.key)])],
+    );
+
   const totalBytes = targets.reduce((sum, p) => sum + (p.bytes ?? 0), 0);
 
   /** 串行下载：对镜像更友好，也让「已完成 N/M」这个读数稳定可信。 */
@@ -114,7 +137,7 @@ function WelcomeWizard({ api, onFinish }: WelcomeWizardProps) {
     stoppedRef.current = false;
     setStep("downloading");
     const done: string[] = [];
-    for (const pack of targets) {
+    for (const pack of [...targets, ...thematicTargets]) {
       if (stoppedRef.current) break;
       const ok = await download(pack);
       if (ok) done.push(pack.key);
@@ -299,6 +322,20 @@ function WelcomeWizard({ api, onFinish }: WelcomeWizardProps) {
           </div>
         ) : (
           <>
+            <div className={styles.pickAllBar}>
+              <label className={styles.pickAllLabel}>
+                <input
+                  type="checkbox"
+                  className={styles.check}
+                  checked={allRegionsSelected}
+                  onChange={toggleAllRegions}
+                />
+                全选 / 取消全选（{regionPacks.length} 个区域）
+              </label>
+              <span className={styles.pickAllHint}>
+                GEM 是独立全局包，需在下方单独勾选
+              </span>
+            </div>
             <ul className={styles.list}>{regionPacks.map(renderRow)}</ul>
             {/* 阶段50-B.2：thematic 数据**单独一块**，不进“选择区域”。
                 ‼️ 行内的下载按钮仍可用（`renderRow` 直接调 `download(pack)`），
@@ -306,7 +343,7 @@ function WelcomeWizard({ api, onFinish }: WelcomeWizardProps) {
                    它是全局图层，与初始视野无关。 */}
             {thematicPacks.length > 0 && (
               <div className={styles.doneBox}>
-                <p className={styles.doneTitle}>主题数据（可选，不影响初始视野）</p>
+                <p className={styles.doneTitle}>主题数据（独立全局包 · 需单独勾选 · 不影响初始视野）</p>
                 <ul className={styles.list}>{thematicPacks.map(renderRow)}</ul>
               </div>
             )}

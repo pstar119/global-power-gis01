@@ -1,6 +1,6 @@
 [package]
 name = "global-power-gis"
-version = "0.1.0"
+version = "0.2.0"
 description = "全球电力设施 GIS 桌面工具"
 authors = ["pstar119"]
 edition = "2021"

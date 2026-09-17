@@ -44,6 +44,7 @@ import {
   type QueryContext,
   type ViewportBbox,
 } from "../lib/nlq";
+import { type Theme, onThemeChange, readTheme } from "../lib/theme";
 import MapQueryBox from "../components/MapQueryBox";
 import StatsDashboard from "../components/StatsDashboard";
 import styles from "./MapPage.module.css";
@@ -143,7 +144,8 @@ const LAYER_SWATCH: Record<string, string> = {
  *
  * 许可：CC BY 4.0（要求署名，见弹窗与数据源 attribution）。
  *
- * ⚠️ 阶段50-C.1 / C.2-A：这里**只剩一个常量**。
+ * ⚠️ 阶段50-C.1 / C.2-A：GEM 的**通道 id 只剩 `GEM_PLANT_SOURCE` 这一个**
+ *    （同段后面还有署名串与许可 URL 两个非 id 常量）。
  *    原来的 `gem-coal` GeoJSON 源、`gem-coal-rings` 与 `gem-coal-planned-halo`
  *    两个图层已整体删除 —— GEM 现在只有**一条**通道：PMTiles vector。
  *    那两个图层原本承担的填色/线宽/双环编码，已全部由
@@ -166,9 +168,12 @@ const GEM_STATUS_LABEL: Record<string, string> = {
  * ‼️ 旧的 GeoJSON/SQLite 通路（建图期空源 + `loadGemPlants()` + `setData` 注入）
  *    已在 50-C.0 / 50-C.1 删除 —— 两者**不再并存**。
  *
- * ‼️ 为什么 id 全部另起一套、不复用 `GEM_PLANT_*`（PMTiles 通路）：
- *    两者是**两条独立的数据通路**，将来要能单独关掉其中一条来对比 / 排障。
- *    共用 id 会把「换数据源」变成一次不可回退的全量替换。
+ * ‼️ 阶段50-C 自审更正：旧版这里写的是「id 全部另起一套、不复用 `GEM_PLANT_*`，
+ *    因为两者是两条独立的数据通路」—— **该说法已失效**：
+ *      · 50-C.1 删掉旧通道后 GEM 只剩**一条**通路（与本文件上方的说明互相矛盾）；
+ *      · `gemPmtilesSourceId()` **就是直接返回 `GEM_PLANT_SOURCE`**，并没有另起一套。
+ *    现在真正“另起一套”的只有 `source-layer` —— 那是归档内部的 MVT 图层名，
+ *    由切片器决定，与 MapLibre 样式里的 source/layer id 是**两回事**。
  *
  * ⚠️ `GEM_PMTILES_SOURCE_LAYER` 必须与切片时 `--kind gem` 的 `--layer` 一致。
  *    实测（把归档解开逐层打印）：`build_pmtiles.mjs --kind gem` 产出的归档里
@@ -1601,6 +1606,90 @@ const BASEMAP_PAINT = {
   boundary: "#39434f",
 } as const;
 
+/**
+ * 阶段51：浅色离线底图配色。
+ *
+ * ‼️ **只给底图用。** 数据图层（电厂燃料色 / 电压档色 / GEM 三色 / 变电站青 / 线路灰）
+ *    两个主题**共用同一套十六进制值**，一个都没改 —— 这就是「配色不变」红线的边界：
+ *    底图是参照物，必须跟着主题走；数据是语义，不能变。
+ *
+ * 沿用深色版的设计思路：整体明度对比压低，并刻意避开数据用色
+ *（青蓝 #3fd0c9 与金色 #ffb300 附近），免得底图与数据点抢注意力。
+ */
+const BASEMAP_PAINT_LIGHT = {
+  background: "#f6f6f4",
+  earth: "#f2efe9",
+  landcover: "#e6f0df",
+  landuse: "#eceae3",
+  water: "#cfe0ee",
+  river: "#9dc0dc",
+  roadMinor: "#e4e2dd",
+  roadMajor: "#ffffff",
+  boundary: "#bfc4c9",
+} as const;
+
+/** 地名文字的三级色（国家 / 省州 / 其他）—— 深浅两套。 */
+const BASEMAP_LABEL_TEXT = {
+  dark: ["#e8eef6", "#c3cdda", "#a7b3c2"],
+  light: ["#11202e", "#33475c", "#5a6b7d"],
+} as const;
+
+/**
+ * 阶段51：把底图切到指定主题。
+ *
+ * ‼️ 为什么用 `setPaintProperty` 而不是重建地图：重建会丢掉相机（中心/缩放）、
+ *    打断 GEM 的挂载生命周期、重跑全部归档探测，而且「下载完成后重挂」那条路径
+ *    还会与在途的重建竞态。改 paint 是幂等且瞬时的。
+ *
+ * ‼️ 这里**一个数据图层都不碰** —— 只动背景 + 9 个底图图层 + 地名文字。
+ *    图层 id 也一个都没改。
+ *
+ * ⚠️ 图层可能还没建好（地图尚未 load、或底图归档缺失时只有 background）——
+ *    逐个 `getLayer` 判空跳过，不报错。
+ */
+function applyBasemapTheme(map: MapLibreMap, theme: Theme): void {
+  const p = theme === "light" ? BASEMAP_PAINT_LIGHT : BASEMAP_PAINT;
+  const t = BASEMAP_LABEL_TEXT[theme];
+  /**
+   * ‼️ 为什么**不**用一个 `set(id, prop, value)` 小工具来收拢下面 11 次调用：
+   *    `setPaintProperty` 的取值类型是**按属性名收窄**的（`background-color`
+   *    与 `fill-color` 接受的联合并不相同）。一旦把 prop / value 抽成变量，
+   *    类型就宽化成「所有 paint 属性的并集」，回传时必然 TS2345 —— 实测两次都撞在这。
+   *    所以这里**逐条字面量调用**，让每个属性各自接受正确的类型检查；
+   *    代价是每行都要判空，用下面这个 `has()` 收拢。
+   *
+   * ⚠️ 图层可能还没建好（地图未 load；底图归档缺失时更是只有 background）——
+   *    判空跳过即可，不报错。
+   */
+  const has = (id: string) => Boolean(map.getLayer(id));
+  if (has("background")) map.setPaintProperty("background", "background-color", p.background);
+  if (has("basemap-earth")) map.setPaintProperty("basemap-earth", "fill-color", p.earth);
+  if (has("basemap-landcover"))
+    map.setPaintProperty("basemap-landcover", "fill-color", p.landcover);
+  if (has("basemap-landuse")) map.setPaintProperty("basemap-landuse", "fill-color", p.landuse);
+  if (has("basemap-water")) map.setPaintProperty("basemap-water", "fill-color", p.water);
+  if (has("basemap-river")) map.setPaintProperty("basemap-river", "line-color", p.river);
+  if (has("basemap-road-minor"))
+    map.setPaintProperty("basemap-road-minor", "line-color", p.roadMinor);
+  if (has("basemap-road-major"))
+    map.setPaintProperty("basemap-road-major", "line-color", p.roadMajor);
+  if (has("basemap-boundary"))
+    map.setPaintProperty("basemap-boundary", "line-color", p.boundary);
+  if (has(BASEMAP_LABEL_LAYER_ID)) {
+    map.setPaintProperty(BASEMAP_LABEL_LAYER_ID, "text-color", [
+      "match",
+      ["get", "kind"],
+      "country",
+      t[0],
+      "region",
+      t[1],
+      t[2],
+    ]);
+    // 描边用主题背景色：浅色底图上没有 halo 的文字在某些色块上会读不清
+    map.setPaintProperty(BASEMAP_LABEL_LAYER_ID, "text-halo-color", p.background);
+  }
+}
+
 /** 背景图层：无论底图是否可用都要有，否则数据点会浮在白色上 */
 const BACKGROUND_LAYER: LayerSpecification = {
   id: "background",
@@ -2601,7 +2690,8 @@ function addGemPlantLayers(
       //    C.2-A 曾把旧 ring 的 `zoom × status` 线宽表达式逐字迁移过来；
       //    C.2-B 确定「status 不参与 paint」，所以那两层 `match` 全部撤掉。
       //    取 1.6：等于旧表达式在 z3 + operating 下的值，是它的中性档。
-      "circle-stroke-width": 1.6,
+      //    阶段51：1.6 → **1.5**（用户指定，让叠加时与 WRI 实心圆的层次更清楚）。
+      "circle-stroke-width": 1.5,
       // 阶段50-C.2-B：**status 不再参与透明度**（原先是一条 4 档 match）。
       //    显式写 1 而不是删掉这个键：删掉只是回到同一个默认值，
       //    但看不出「这里被有意置平」，下次很容易又被加回去。
@@ -3981,6 +4071,27 @@ function MapPage({
   };
 
   /**
+   * 阶段51：主题切换 → 底图重新着色。
+   *
+   * ‼️ 为什么单独一个 effect、不塞进建图那个巨型 effect：建图 effect 依赖为空、
+   *    终生只跑一次；而主题是**可变的**。混在一起要么拿不到最新主题，
+   *    要么让建图 effect 跟着主题重跑（= 重建地图，灾难）。
+   *
+   * ⚠️ 首次挂载时也要**补一次着色**：样式是在建图时按深色构建的，
+   *    若用户在浅色主题下启动，不补这一下就会一直停在深色底图。
+   * ⚠️ 订阅回调里用的是 `mapRef.current` 之外捕获的 map：本 effect 只在 mapReady
+   *    翻转时建一次订阅，而地图实例在整个生命周期内不变（重建走的是 remount）。
+   */
+  useEffect(() => {
+    if (!mapReady) return;
+    const map = mapRef.current;
+    if (!map) return;
+    const paint = (t: Theme) => applyBasemapTheme(map, t);
+    paint(readTheme());
+    return onThemeChange(paint);
+  }, [mapReady]);
+
+  /**
    * 阶段39：加载区域包清单，并探测**本机装了哪些包**。
    *
    * 清单随前端分发（`public/packs_manifest.json`，2.6 KB），但「本机有没有这个包」清单里
@@ -4318,7 +4429,7 @@ function MapPage({
       if (!gemWantedRef.current) return; // 这期间开关被关了，不挂了
       addGemPlantLayers(m, entry.key, archive, popupRef.current);
       // 与区域包同理：`addLayer` 会把新图层**追加到样式最顶**，
-      // 得把地名标签提回来，否则 GEM 的环会盖住地名。
+      // 得把地名标签提回来，否则 GEM 的点会盖住地名。
       if (m.getLayer(BASEMAP_LABEL_LAYER_ID)) m.moveLayer(BASEMAP_LABEL_LAYER_ID);
     });
   }, [mapReady, packsManifest, packsAvailable, visibleLayers]);

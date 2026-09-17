@@ -54,10 +54,64 @@
   padding: 0.5rem 0.75rem;
   border: 1px solid var(--gpg-border);
   border-radius: 6px;
-  background-color: #3c3c3c;
+  /* 阶段51：原来写死的 #3c3c3c 在浅色主题下会变成深色控件，改用令牌 */
+  background-color: var(--gpg-control-bg);
   color: var(--gpg-text);
   font: inherit;
   font-size: 0.85rem;
+}
+
+/* ---------- 阶段51：关于面板 ---------- */
+
+.aboutTitle {
+  margin: 0;
+  color: var(--gpg-text);
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.aboutVersion {
+  margin: 0;
+  color: var(--gpg-muted);
+  font-size: 0.85rem;
+}
+
+.aboutTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+}
+
+.aboutTable th,
+.aboutTable td {
+  padding: 5px 10px 5px 0;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--gpg-border);
+}
+
+.aboutTable th {
+  width: 84px;
+  color: var(--gpg-muted);
+  font-weight: 500;
+}
+
+.aboutTable td {
+  color: var(--gpg-text);
+}
+
+/* 第三列（许可）固定窄列，避免长文本把名称列挤断 */
+.aboutTable td:last-child {
+  width: 76px;
+  color: var(--gpg-muted);
+  white-space: nowrap;
+}
+
+.aboutNote {
+  margin: 0;
+  color: var(--gpg-muted);
+  font-size: 0.78rem;
+  line-height: 1.5;
 }
 
 .settingSelect:disabled {

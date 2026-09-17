@@ -19,7 +19,7 @@
   -webkit-text-size-adjust: 100%;
   text-size-adjust: 100%;
 
-  /* ---- 全局配色令牌（深色） ---- */
+  /* ---- 全局配色令牌（深色 = 默认，不跟随系统） ---- */
   --gpg-bg: #1e1e1e; /* 全局底色 / 主内容区 */
   --gpg-sidebar-bg: #252526; /* 侧边栏 */
   --gpg-topbar-bg: #252526; /* 顶栏（与侧边栏同色，形成“外壳”层） */
@@ -30,7 +30,46 @@
   --gpg-hover: #2a2d2e; /* 悬停底色 */
   --gpg-active-bg: #094771; /* 选中项底色 */
   --gpg-active-fg: #ffffff; /* 选中项文字 */
-  --gpg-accent: #007acc; /* 科技蓝：焦点环 / 描边 */
+  --gpg-accent: #007acc; /* 科技蓝：焦点环 / 描边。两个主题同值，它是品牌色 */
+  /* 阶段51：下面 5 个是主题切换新拆出来的，深色值 = 原先写死的那几个 */
+  --gpg-control-bg: #3c3c3c; /* input / button 底色（原写死） */
+  --gpg-control-active-bg: #4a4a4d; /* button:active（原写死） */
+  --gpg-link-hover: #4daafc; /* a:hover（原写死） */
+  --gpg-shadow: rgba(0, 0, 0, 0.45); /* 浮层阴影 */
+  --gpg-map-bg: #1a1a1a; /* 地图视窗兜底底色（原 .viewport 写死的值，深色下与改动前完全一致） */
+}
+
+/*
+ * 阶段51：浅色主题。
+ *
+ * ‼️ 只覆盖**同名令牌**，不改任何选择器结构、不改任何布局 —— 所以 11 个
+ *    CSS Modules 文件（共 265 处 `var(--gpg-*)`）**一行都不用改**。
+ *
+ * ‼️ 注意 `color-scheme` 必须跟着切：它控制 WebView 的原生滚动条、输入框光标、
+ *    自动填充背景。不切的话浅色主题里会拖着一堆深色原生控件，很刺眼。
+ *
+ * ⚠️ 数据图层配色（燃料色 / 电压档色 / GEM 三色 / 变电站青）**不在这里** ——
+ *    那是地图语义色，两个主题共用同一套，改它们会让图例与地图脱节。
+ */
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --gpg-bg: #f3f3f3;
+  --gpg-sidebar-bg: #e9e9e9;
+  --gpg-topbar-bg: #e9e9e9;
+  --gpg-panel-bg: #ffffff;
+  --gpg-border: #cfcfcf;
+  --gpg-text: #1f1f1f;
+  --gpg-muted: #5c5c5c;
+  --gpg-hover: #e2e2e2;
+  --gpg-active-bg: #cce4f7;
+  --gpg-active-fg: #0b3b60;
+  /* --gpg-accent 刻意同值：#007acc 是品牌色，且在白底上对比度仍达 4.0:1 */
+  --gpg-control-bg: #ffffff;
+  --gpg-control-active-bg: #dcdcdc;
+  --gpg-link-hover: #005a9e;
+  --gpg-shadow: rgba(0, 0, 0, 0.18);
+  --gpg-map-bg: #f6f6f4; /* 与浅色底图背景层同色 */
 }
 
 /* 布局基础：必须让 html / body / #root 撑满窗口，
@@ -53,7 +92,7 @@ a {
 }
 
 a:hover {
-  color: #4daafc;
+  color: var(--gpg-link-hover);
 }
 
 input,
@@ -65,7 +104,7 @@ button {
   font-weight: 500;
   font-family: inherit;
   color: var(--gpg-text);
-  background-color: #3c3c3c;
+  background-color: var(--gpg-control-bg);
   transition: border-color 0.2s, background-color 0.2s;
 }
 
@@ -79,7 +118,7 @@ button:hover {
 
 button:active {
   border-color: var(--gpg-accent);
-  background-color: #4a4a4d;
+  background-color: var(--gpg-control-active-bg);
 }
 
 input,

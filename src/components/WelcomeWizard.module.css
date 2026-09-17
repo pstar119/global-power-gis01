@@ -337,7 +337,8 @@
   border: none;
   background: none;
   box-shadow: none;
-  color: #7cc0ff;
+  /* 阶段51：原先写死的 #7cc0ff 在浅色主题下几乎看不见，改用令牌 */
+  color: var(--gpg-link-hover);
 }
 
 .tip {
@@ -350,4 +351,29 @@
 
 .tip code {
   color: var(--gpg-text);
+}
+
+/* ---------- 阶段51：区域包全选条 ---------- */
+
+.pickAllBar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  padding: 0 1.125rem 8px;
+}
+
+.pickAllLabel {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--gpg-text);
+  font-size: 0.82rem;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.pickAllHint {
+  color: var(--gpg-muted);
+  font-size: 0.72rem;
 }
