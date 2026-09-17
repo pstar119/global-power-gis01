@@ -187,6 +187,8 @@ pub fn run() {
                 .add_migrations(DB_URL, migrations())
                 .build(),
         )
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_fs::init())
         .setup(|app| {
             // 首次运行播种：必须在任何数据库连接建立之前执行。
             //

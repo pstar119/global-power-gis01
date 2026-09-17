@@ -45,6 +45,7 @@ import {
   type ViewportBbox,
 } from "../lib/nlq";
 import { type Theme, onThemeChange, readTheme } from "../lib/theme";
+import { downloadCsv } from "../lib/csvExport";
 import MapQueryBox from "../components/MapQueryBox";
 import StatsDashboard from "../components/StatsDashboard";
 import styles from "./MapPage.module.css";
@@ -3090,6 +3091,74 @@ function MapPage({
   /** 阶段48：左侧面板顶部「当前视野」区块的展开 / 折叠 */
   const [viewOpen, setViewOpen] = useState(true);
 
+  /** 阶段52：导出当前视野电厂（exporting = 进行中，exportHint = 结果提示） */
+  const [exporting, setExporting] = useState(false);
+  const [exportHint, setExportHint] = useState<string | null>(null);
+
+  /**
+   * 阶段52：导出当前视野内的全部电厂为 CSV。
+   *
+   * ‼️ 为什么用 SQL 而不是 `queryRenderedFeatures`：电厂走 cluster 数据源，
+   *    低缩放下只能拿到聚合圆（带 `point_count`），导不出单个电厂。
+   *    与 `loadPlantStatsInBox` 同一条理由。
+   * ⚠️ 范围取 `viewportRef.current`（权威视野）而非展示副本 —— 展示副本有 200ms
+   *    防抖，会让导出范围与用户按下按钮那一刻的画面不一致。
+   * ⚠️ 边界值走 `?` 占位符绑定（与 loadPlantStatsInBox 的内联数值写法不同，
+   *    这里更严——无论如何都不需要拼接 SQL 字符串）。
+   */
+  const handleExportViewport = async () => {
+    const ctx = viewportRef?.current;
+    // `viewport` 在 QueryContext 上是可选的，必须单独取出并守卫
+    const bbox = ctx?.viewport;
+    if (!ctx || !bbox || exporting) return;
+
+    setExporting(true);
+    setExportHint(null);
+    try {
+      const { minLon, minLat, maxLon, maxLat } = bbox;
+      const db = await Database.load(DB_URL);
+      const rows = await db.select<Array<Record<string, unknown>>>(
+        `SELECT gppd_idnr, name, country, primary_fuel, capacity_mw,
+                lat, lon, commissioning_year, owner
+           FROM power_plants
+          WHERE lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?`,
+        [minLat, maxLat, minLon, maxLon],
+      );
+
+      const columns = [
+        "gppd_idnr", "name", "country", "primary_fuel",
+        "capacity_mw", "lat", "lon", "commissioning_year", "owner",
+      ];
+
+      // 坐标精度：5 位（~1m）
+      const rounded = rows.map((r) => ({
+        ...r,
+        lat: typeof r.lat === "number" ? Number(r.lat.toFixed(5)) : r.lat,
+        lon: typeof r.lon === "number" ? Number(r.lon.toFixed(5)) : r.lon,
+      }));
+
+      const z = ctx.zoom ?? 0;
+      const zoomTag = z < 8 ? `_z${z.toFixed(0)}` : "";
+
+      const res = await downloadCsv(columns, rounded, {
+        filenamePrefix: "当前视野电厂",
+        filenameSuffix: zoomTag,
+      });
+      if (res.ok) {
+        const suffix = z < 8 ? "（当前缩放 z<8，坐标精度按源数据）" : "";
+        setExportHint(res.message + suffix);
+      } else {
+        setExportHint(res.message);
+      }
+    } catch (err) {
+      setExportHint(`导出失败：${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setExporting(false);
+      // 提示 6 秒后自动消失
+      window.setTimeout(() => setExportHint(null), 6000);
+    }
+  };
+
   /**
    * 阶段48：把原始燃料统计套上「统计筛选」，并整理成可直接渲染的形状。
    *
@@ -4700,23 +4769,34 @@ function MapPage({
             原先是左下角独立的 `.statsPanel`，现合并到这里：
             ① 同一类信息不再占两处；② 左下角让出来后本面板可用高度多出约 84px。 */}
         <section className={styles.viewPanel} aria-label="当前视野统计" aria-live="polite">
-          <button
-            type="button"
-            className={styles.viewHeader}
-            aria-expanded={viewOpen}
-            aria-controls="viewport-stats-body"
-            onClick={() => setViewOpen((v) => !v)}
-          >
-            <span className={styles.viewTitle}>当前视野</span>
-            <span className={styles.viewHeadRight}>
-              <span className={styles.viewTotal}>
-                {fuelView ? `${fuelView.count.toLocaleString()} 座` : "—"}
+          <div className={styles.viewHeader}>
+            <button
+              type="button"
+              className={styles.viewHeaderToggle}
+              aria-expanded={viewOpen}
+              aria-controls="viewport-stats-body"
+              onClick={() => setViewOpen((v) => !v)}
+            >
+              <span className={styles.viewTitle}>当前视野</span>
+              <span className={styles.viewHeadRight}>
+                <span className={styles.viewTotal}>
+                  {fuelView ? `${fuelView.count.toLocaleString()} 座` : "—"}
+                </span>
+                <span className={styles.chevron} aria-hidden="true">
+                  {viewOpen ? "▼" : "▶"}
+                </span>
               </span>
-              <span className={styles.chevron} aria-hidden="true">
-                {viewOpen ? "▼" : "▶"}
-              </span>
-            </span>
-          </button>
+            </button>
+            <button
+              type="button"
+              className={styles.viewExportBtn}
+              onClick={() => void handleExportViewport()}
+              disabled={exporting || !viewStats}
+              title={viewStats ? "导出当前视野内的电厂为 CSV" : "视野统计尚未就绪"}
+            >
+              {exporting ? "导出中…" : "导出"}
+            </button>
+          </div>
 
           <div id="viewport-stats-body" className={styles.viewBody} hidden={!viewOpen}>
             {!viewStats || !fuelView ? (
@@ -4788,6 +4868,11 @@ function MapPage({
                   </p>
                 )}
               </>
+            )}
+
+            {/* 阶段52：导出结果提示（6 秒后自动消失） */}
+            {exportHint && (
+              <p className={styles.viewNote}>{exportHint}</p>
             )}
           </div>
         </section>

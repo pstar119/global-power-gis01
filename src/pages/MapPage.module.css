@@ -84,13 +84,23 @@
 }
 
 /* ⚠️ 折叠开关是 <button>，必须抹平默认外观并**显式**覆盖 :hover/:active
-   —— App.css 的 `button:hover`(0,1,1) 优先级高于本类 (0,1,0)。 */
+   —— App.css 的 `button:hover`(0,1,1) 优先级高于本类 (0,1,0)。
+   阶段52：本类改为**外层容器**（div），button 外观下移到 .viewHeaderToggle。 */
 .viewHeader {
   display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.25rem;
+  width: 100%;
+}
+
+.viewHeaderToggle {
+  display: flex;
+  flex: 1 1 auto;
   align-items: baseline;
   justify-content: space-between;
   gap: 0.5rem;
-  width: 100%;
+  min-width: 0;
   padding: 0.1rem 0.2rem;
   border: 1px solid transparent;
   border-radius: 4px;
@@ -102,11 +112,35 @@
   transition: background-color 0.15s ease;
 }
 
-.viewHeader:hover,
-.viewHeader:active {
+.viewHeaderToggle:hover,
+.viewHeaderToggle:active {
   border-color: transparent;
   background-color: var(--gpg-hover);
   box-shadow: none;
+}
+
+/* 阶段52：导出当前视野电厂。刻意做得比折叠开关更“轻”，不抢主行的视觉权重。 */
+.viewExportBtn {
+  flex: 0 0 auto;
+  padding: 0.1rem 0.4rem;
+  border: 1px solid var(--gpg-border);
+  border-radius: 4px;
+  background-color: transparent;
+  color: var(--gpg-muted);
+  font: inherit;
+  font-size: 0.68rem;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.viewExportBtn:hover:not(:disabled) {
+  background-color: var(--gpg-hover);
+  color: var(--gpg-text);
+}
+
+.viewExportBtn:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .viewTitle {

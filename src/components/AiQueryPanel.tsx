@@ -29,87 +29,17 @@ import {
   runAiQuery,
   type QueryState,
 } from "../lib/aiQuery";
+import { downloadCsv } from "../lib/csvExport";
 import styles from "./AiQueryPanel.module.css";
 
-type Row = Record<string, unknown>;
-
 /**
- * CSV 单元格转义（RFC 4180）。
- *
- * ⚠️ 电厂名称里出现逗号或引号是很常见的事（如 `Test, Inc.`），
- *    不转义的话 Excel 打开会**整行错列**。规则：
- *      含 , " \r \n 时用双引号包裹，且内部的双引号要翻倍。
+ * 阶段52：`csvCell` / `csvValue` / `downloadCsv` 已抽到 `../lib/csvExport`，
+ * 与地图页「当前视野导出」共用同一份实现（否则两份会分道扬镳）。
+ * ⚠️ `type Row` 随之删除 —— 它只被 `downloadCsv` 用过，留着会被 noUnusedLocals 判为未使用。
  */
-function csvCell(value: unknown): string {
-  const s = value == null ? "" : String(value);
-  return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-}
-
-/**
- * 把单元格换成**适合 CSV 的原始值**。
- *
- * ⚠️ 与表格显示的 `formatCell` 刻意不同：容量导出原始 MW 数值，不带单位。
- *    CSV 的用途是丢给 Excel 做透视表/排序，带 "955.7 GW" 这种字符串无法计算。
- *    国家与燃料这类**标签列**仍导出中文，保持可读。
- */
-function csvValue(key: string, value: unknown): unknown {
-  if (value == null) return "";
-  if (key === "country") return countryLabel(String(value));
-  if (key === "primary_fuel") return fuelLabel(String(value));
-  if (key === "capacity_mw" || key === "total_capacity_mw") {
-    const n = Number(value);
-    return Number.isFinite(n) ? n : "";
-  }
-  return value;
-}
 
 /** 导出成功后给用户的提示 */
 type ExportState = { ok: boolean; message: string } | null;
-
-/**
- * 把查询结果拼成 CSV 并触发下载。
- *
- * 红线：不引 papaparse / xlsx，不装 plugin-dialog，全部原生能力。
- */
-function downloadCsv(
-  columns: readonly string[],
-  rows: readonly Row[],
-): { ok: boolean; message: string } {
-  if (columns.length === 0 || rows.length === 0) {
-    return { ok: false, message: "当前没有可导出的数据。" };
-  }
-
-  const header = columns.map((c) => csvCell(COLUMN_LABELS[c] ?? c)).join(",");
-  const body = rows.map((row) =>
-    columns.map((c) => csvCell(csvValue(c, row[c]))).join(","),
-  );
-
-  // ⚠️ BOM 必不可少：不加的话 Excel 会把 UTF-8 当成 ANSI 读，中文全是乱码。
-  //    \r\n 也是刻意的（RFC 4180），部分 Excel 版本会把 \n 当成行内换行。
-  const csv = "\uFEFF" + [header, ...body].join("\r\n");
-
-  try {
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    const ts = new Date()
-      .toISOString()
-      .slice(0, 16)
-      .replace(/[:T]/g, "-");
-    a.download = `电力设施查询_${ts}.csv`;
-    a.click();
-
-    // ⚠️ 必须**延迟** revoke：下载是异步发起的，立刻撤销会让下载取消或拿到空文件。
-    setTimeout(() => URL.revokeObjectURL(url), 0);
-    return { ok: true, message: `已导出 ${rows.length} 行（含表头，UTF-8 BOM）。` };
-  } catch (err) {
-    return {
-      ok: false,
-      message: `导出失败：${err instanceof Error ? err.message : String(err)}`,
-    };
-  }
-}
 
 /** 单元格按列做人类可读的格式化 */
 function formatCell(key: string, value: unknown): string {
@@ -555,7 +485,7 @@ function AiQueryPanel({
                 type="button"
                 className={styles.exportBtn}
                 onClick={() =>
-                  setExportState(downloadCsv(columns, state.rows))
+                  void downloadCsv(columns, state.rows).then(setExportState)
                 }
               >
                 导出 CSV
