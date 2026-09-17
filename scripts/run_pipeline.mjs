@@ -19,7 +19,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -152,16 +152,63 @@ function parseArgs(argv) {
 }
 
 // ---------------------------------------------------------------- 运行器
+
+/**
+ * 找一个可用的 Python 解释器。
+ *
+ * 🔴 **阶段54 修**：此前候选表里只有**一个**绝对路径 ——
+ *    `%LOCALAPPDATA%\Programs\Python\Python311\python.exe`。实测（2026-09-18）
+ *    这台机器上 python 装在 `C:\Python314\python.exe`，**那条路径根本不存在**，
+ *    于是函数静默落到裸 `python` —— 而 python 不在 PATH，
+ *    结果是整条流水线在第一步就崩，报的还是「找不到命令」这种与根因无关的错。
+ *
+ * 现在的顺序（**显式优先，猜测在后**）：
+ *   1. `$env:PYTHON` —— 用户显式指定，永远最高优先。这是最稳的用法。
+ *   2. 常见安装目录里**扫**一遍（`%LOCALAPPDATA%\Programs\Python\Python3*`
+ *      与 `C:\Python3*`）—— 不再写死小版本号。
+ *   3. 裸 `python` —— 交给 PATH 碰运气，并在下面打印实际用到的解释器，
+ *      以便「跑的是哪个 Python」不再靠猜。
+ */
 function pythonPath() {
-  const cands = [
-    process.env.PYTHON,
-    join(process.env.LOCALAPPDATA ?? "", "Programs", "Python", "Python311", "python.exe"),
-  ].filter(Boolean);
-  for (const c of cands) if (isAbsolute(c) && existsSync(c)) return c;
+  // 1) 显式指定
+  const explicit = process.env.PYTHON;
+  if (explicit && isAbsolute(explicit) && existsSync(explicit)) return explicit;
+
+  // 2) 扫常见目录。⚠️ 用 readdirSync 才能适配任意小版本（3.11 / 3.14 / …）
+  const roots = [
+    join(process.env.LOCALAPPDATA ?? "", "Programs", "Python"),
+    "C:\\",
+    "D:\\",
+  ];
+  for (const root of roots) {
+    if (!root || !existsSync(root)) continue;
+    let entries;
+    try {
+      entries = readdirSync(root, { withFileTypes: true });
+    } catch {
+      continue; // 目录不可读（权限/不存在）——跳过，不要因此崩掉
+    }
+    for (const e of entries) {
+      if (!e.isDirectory() || !/^Python3/i.test(e.name)) continue;
+      const cand = join(root, e.name, "python.exe");
+      if (existsSync(cand)) return cand;
+    }
+  }
+
+  // 3) 兜底：交给 PATH（并在调用处打印实际解释器）
   return "python";
 }
 
 const PY = pythonPath();
+
+/**
+ * 打印实际用到的解释器。
+ *
+ * ‼️ 阶段54 加：此前「跑的是哪个 Python」只能靠猜，而候选表写死的那条路径
+ *    在本机并不存在 —— 于是「流水线崩了」和「解释器选错了」之间的因果
+ *    要花很久才能建立。打一行出来，这类问题一眼可见。
+ */
+console.log(`[pipeline] Python = ${PY}${process.env.PYTHON ? "（来自 $env:PYTHON）" : ""}`);
 
 /**
  * ⚠️ 必须带 `-u`：驱动用管道接住子进程 stdout，此时 Python 会切成**块缓冲**，
