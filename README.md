@@ -4,7 +4,7 @@
 
 ## 当前阶段
 
-**阶段51 —— UI/UX 最终打磨与产品化定型**（2026-09-17，已完成，v0.2.0，未提交）
+**阶段52 —— CSV 导出与 AI 工作台布局重构**（2026-09-17，进行中，v0.2.0）
 
 已接入的能力：
 
@@ -183,6 +183,20 @@ scripts/gen_packs_manifest.mjs   刷新清单里的 sizeMb / sha256 / bytes
 | 语言 | TypeScript |
 | 构建工具 | Vite 8 |
 | 包管理器 | npm |
+| 文件对话框 | `@tauri-apps/plugin-dialog` + `@tauri-apps/plugin-fs`（阶段52 破例） |
+
+### 关于依赖
+
+项目长期执行「**零新增依赖**」原则。**阶段52 破例新增 2 对包**（npm + cargo 各 2 个），
+经用户明确授权：
+
+- `@tauri-apps/plugin-dialog` / `tauri-plugin-dialog` —— 弹原生「另存为」对话框
+- `@tauri-apps/plugin-fs` / `tauri-plugin-fs` —— 写文件到用户选定路径
+
+破例理由：CSV 导出必须让用户自选保存位置，浏览器原生 `<a download>` 只能写到系统默认
+下载目录，无法满足。
+
+⚠️ 这些是**先例，不是「可以随便加」**。后续任何新增依赖仍需单独授权。
 
 ## 运行方式
 
