@@ -67,7 +67,30 @@ export function setTheme(t: Theme): void {
     /* 存储不可用时也不该让 UI 崩掉 —— 主题仍然在本次会话内生效 */
   }
   applyTheme(t);
+  void syncNativeTheme(t);
   for (const fn of listeners) fn(t);
+}
+
+/**
+ * 阶段52：同步 Tauri 原生窗口标题栏主题。
+ *
+ * ‼️ `@tauri-apps/api` 已在 package.json 依赖里，**不算新增依赖**。
+ *    `getCurrentWindow().setTheme()` 会同时改窗口标题栏、边框、系统菜单的明暗。
+ *
+ * ⚠️ 用**动态 import** 而不是顶层 import —— theme.ts 由 main.tsx 最早期导入，
+ *    动态 import 只在真正需要时才加载 Tauri API，也不拖慢首帧。
+ *    在浏览器 dev 模式（非 Tauri 环境）下动态 import 会 reject，被 catch 吞掉。
+ *
+ * ⚠️ 需要 capabilities 里放行 `core:window:allow-set-theme`。
+ *    权限不足时 API 会 reject，同样被 catch —— 主题仍然在前端生效。
+ */
+async function syncNativeTheme(t: Theme): Promise<void> {
+  try {
+    const { getCurrentWindow } = await import("@tauri-apps/api/window");
+    await getCurrentWindow().setTheme(t);
+  } catch {
+    /* 非 Tauri 环境或权限未放行 —— 静默，不影响前端主题 */
+  }
 }
 
 /**
@@ -77,4 +100,6 @@ export function setTheme(t: Theme): void {
  *    否则浅色用户会先看到一帧深色再跳变（闪白/闪黑）。
  *    本模块由 `main.tsx` 在最早期导入，所以这个时机是确定的。
  */
-applyTheme(readTheme());
+const bootTheme = readTheme();
+applyTheme(bootTheme);
+void syncNativeTheme(bootTheme);
