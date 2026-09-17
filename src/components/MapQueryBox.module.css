@@ -1,16 +1,17 @@
-/* ---------- 阶段33：左侧「AI 工作台」（可折叠） ----------
-   与阶段31 的浮动框相比改为左侧停靠：GIS 用户是看着地图提问的，
-   把工作台固定在左边缘、并让图层控制/视野统计右移，三者互不遮挡。 */
+/* ---------- 阶段52：地图上方「AI 工作台」（可折叠） ----------
+   阶段33 原为左侧停靠；阶段52 改为地图上方横向条（乙方案），
+   高度固定 116px、跨满地图宽；图层控制/视野统计改为向下让位。 */
 
 .box {
   position: absolute;
   top: 12px;
   left: 12px;
-  bottom: 60px;
+  right: 12px;
+  height: 116px;
   z-index: 2;
-  width: 320px;
-  max-height: calc(100% - 72px);
-  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
   padding: 0.5rem 0.625rem;
   border: 1px solid var(--gpg-border);
   border-radius: 8px;
@@ -19,15 +20,18 @@
   backdrop-filter: blur(4px);
   color: var(--gpg-text);
   font-size: 0.8125rem;
+  overflow: hidden;
 }
 
-/* 折叠态：竖向窄条，完全不占地图宽度 */
+/* 折叠态：左上角小按钮，不占地图纵向空间 */
 .rail {
   position: absolute;
   top: 12px;
   left: 12px;
   z-index: 2;
-  padding: 0.625rem 0.375rem;
+  display: inline-flex;
+  align-items: center;
+  padding: 0.375rem 0.75rem;
   border: 1px solid var(--gpg-border);
   border-radius: 8px;
   background-color: rgba(37, 37, 38, 0.94);
@@ -35,9 +39,8 @@
   backdrop-filter: blur(4px);
   color: var(--gpg-muted);
   font: inherit;
-  font-size: 0.7rem;
-  letter-spacing: 0.08em;
-  writing-mode: vertical-rl;
+  font-size: 0.75rem;
+  letter-spacing: 0.06em;
   cursor: pointer;
 }
 
@@ -48,18 +51,19 @@
 
 .head {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
-  justify-content: space-between;
   gap: 0.5rem;
-  margin-bottom: 0.375rem;
 }
 
 .title {
   margin: 0;
+  flex: 0 0 auto;
   color: var(--gpg-muted);
   font-size: 0.7rem;
   font-weight: 600;
   letter-spacing: 0.08em;
+  white-space: nowrap;
 }
 
 .collapse {
@@ -85,7 +89,6 @@
 /* ---------- 阶段33：会话历史（默认露最近 5 轮） ---------- */
 
 .history {
-  margin-top: 0.5rem;
   padding-top: 0.375rem;
   border-top: 1px solid var(--gpg-border);
 }
@@ -125,11 +128,6 @@
   color: var(--gpg-muted);
   font-size: 0.7rem;
   line-height: 1.4;
-}
-
-.row {
-  display: flex;
-  gap: 0.375rem;
 }
 
 .input {
@@ -178,14 +176,28 @@
 
 /* 只读的视野上下文读数 */
 .ctx {
-  margin: 0.375rem 0 0;
+  margin: 0;
+  flex: 0 0 auto;
   color: var(--gpg-muted);
-  font-size: 0.75rem;
-  line-height: 1.4;
+  font-size: 0.7rem;
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 阶段52：乙方案 —— 工作台下方内容区，超出高度时内部滚动 */
+.body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  overflow-y: auto;
 }
 
 .status {
-  margin: 0.375rem 0 0;
+  margin: 0;
   font-size: 0.75rem;
   line-height: 1.4;
 }
@@ -196,7 +208,7 @@
 
 .table {
   width: 100%;
-  margin-top: 0.375rem;
+  margin-top: 0;
   border-collapse: collapse;
   font-size: 0.75rem;
   line-height: 1.4;
@@ -218,7 +230,6 @@
   display: flex;
   flex-wrap: wrap;
   gap: 0.375rem;
-  margin-top: 0.5rem;
 }
 
 .chip {

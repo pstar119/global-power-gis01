@@ -947,17 +947,22 @@
   line-height: 1.3;
 }
 
-/* ---------- 阶段33：AI 工作台展开时，把左侧浮动面板右推 ----------
-   工作台固定在左边缘（展开 320px），图层控制与视野统计随之右移，避免三者抢空间。 */
+/* ---------- 阶段52：乙方案 —— AI 工作台改为地图上方横向条 ---------
+   展开态：工作台 top:12px、高 116px，跨满地图宽。
+   图层控制面板必须向下让位到 top:140px（= 12 + 116 + 12）。
+   max-height 里扣的 196px = 140（顶部让位）+ 56（底部给比例尺让位）。 */
 .withBench .layerPanel,
 .withBench .statsPanel {
-  left: 352px;
+  top: 140px;
+  left: 12px;
+  max-height: calc(100% - 196px);
 }
 
-/* 阶段36：工作台**折叠成竖向导轨**时（`.rail` 宽约 32px，left 12px），
-   两个面板必须避开它，否则会与导轨重叠。
-   顺带说明：折叠态 64px 远小于展开态 352px，所以用户看到「地图可用区域变宽了」。 */
+/* 折叠态：工作台只剩一行小按钮（约 30px 高，top:12px）。
+   图层控制面板让到 top:52px。max-height 里扣的 108px = 52 + 56。 */
 .railOnly .layerPanel,
 .railOnly .statsPanel {
-  left: 64px;
+  top: 52px;
+  left: 12px;
+  max-height: calc(100% - 108px);
 }
