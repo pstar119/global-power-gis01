@@ -94,6 +94,7 @@
 | 5 | 复杂 AI 空间查询 | ⏸ 未开始 |
 | 6 | GeoJSON 导出 | ⏸ 未开始 |
 | 7 | GEM 可再生能源引入 | ⏸ 未开始 |
+| 8 | 数据包多源降级（镜像失败切直连） | ✅ 已提交 59a8368 |
 
 **阶段 52 遗留**：
 - `fs:write-all` 权限是全放开（因为用户可能选任意路径），后续可考虑用 `fs:scope` 收紧
@@ -128,12 +129,13 @@
 | 裸主程序 | **9,713,664 B = 9.26 MiB** | ✅ 本轮实测 |
 | 安装包内容 | **只有 3 项**：seed 库 + `basemap.pmtiles` + `osm_grid.pmtiles` | ✅ 本轮实测 `tauri.conf.json` 的 `bundle.resources` |
 | 数据包数量 | **8 个**（7 区域 + 1 GEM = **170.32 MiB**），全部按需下载 | ✅ 本轮实测清单求和 |
-| 数据包托管 | GitHub Release `v1.0-packs`，默认走 `gh-proxy.com` 加速镜像，`directBaseUrl` 为降级备用（**当前无代码读取**，阶段48 预留字段） | ✅ 本轮实测 `manifest.release` |
+| 数据包托管 | GitHub Release `v1.0-packs`，默认走 `gh-proxy.com` 加速镜像；`directBaseUrl` 为降级备用 —— **阶段53 起已接入代码**（见下行） | ✅ 本轮实测 `manifest.release` |
 | 下载目录 | `%APPDATA%\com.pstar119.globalpowergis\packs\`<br>（本机实测已有 4 个包：gem + 华东 / 华南 / 华中） | ✅ 本轮实测 |
 | 资源解析顺序 | ① `%APPDATA%\...\packs\` → ② `$RESOURCE/packs/` | ✅ `src-tauri/src/packs.rs` `resolve_pack_resource` |
 | 包是否已装 | 运行时用 **127 字节 Range 探测**（只读，从不下载） | ✅ `MapPage.tsx` `ensurePmtilesArchive` |
 | 渲染 | PMTiles 流式渲染（`asset:` 协议 + vector source） | ✅ |
 | 传输 | 断点续传 + SHA256 校验 + 原子 rename | ✅ |
+| 传输（阶段53） | **多源降级**：镜像（`baseUrl`）失败自动切直连（`directBaseUrl`）重试一次；仅网络类错误触发重试，校验类不重试 | ✅ |
 | 资源协议白名单 | `$RESOURCE/maps/**`、`$RESOURCE/packs/**`、`$APPDATA/packs/**` | ✅ `tauri.conf.json` |
 | 数据库版本 | `_sqlx_migrations` 到 **v9**，v1–v9 **9/9 success=1** | ✅ 本轮实测 |
 | 现存索引 | `idx_power_plants_gppd_idnr` / `idx_power_plants_lat_lon` / **`idx_power_plants_fuel_cover`** | ✅ 本轮实测 |
@@ -343,8 +345,10 @@
 
 ## 8. 下一步计划（阶段 53+）
 
-1. **数据包托管迁移** —— 评估脱离 GitHub Release（当前靠 `gh-proxy.com` 镜像），
-   清单已预留 `directBaseUrl` 字段做降级重试。
+1. **数据包托管迁移** —— 评估脱离 GitHub Release（当前靠 `gh-proxy.com` 镜像）。
+   ⚠️ 清单的 `directBaseUrl` 字段已**真接入代码**（阶段53，见 §3.2）——
+   但那是**降级**，不是**换托管**：前者是「镜像挂了切直连」，后者是「换到 Cloudflare R2
+   / 阿里云 OSS / 腾讯云 COS 等更可控的源」。两者独立，换托管仍待评估。
 2. **Tauri 自动更新**（updater）。
 3. **复杂 AI 空间查询** —— 多图层叠加、缓冲区、空间关系（相交/包含/邻近）。
 4. **GeoJSON 导出** —— 与已实现的 CSV 导出并列，让 GIS 软件（QGIS 等）能直接读。
