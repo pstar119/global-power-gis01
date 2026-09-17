@@ -30,8 +30,16 @@ serde_json = "1"
 #    PMTiles 以 octet-stream 直传，不需要 gzip/json 特性。
 ureq = { version = "3", default-features = false, features = ["native-tls"] }
 sha2 = "0.10"
+# 阶段52：CSV 导出的原生「另存为」对话框。
+# ‼️ 阶段54：**只留 dialog，本 crate 的直接依赖里已删掉 `tauri-plugin-fs`** ——
+#    写盘动作已下沉到 `src/export.rs`（路径由 Rust 侧对话框产生、Rust 侧写），
+#    前端不再需要写文件能力，于是 `fs:write-all` 这个过宽权限一并删掉。
+#    ⚠️ 别再因为「要给用户选路径」而加回 fs 插件 —— 那会重新引入
+#       「前端可写任意路径」，而真正的正解是在 Rust 侧写（见 export.rs 的头部说明）。
+#    🔴 **别指望删掉它能让体积变小**：`tauri-plugin-fs` 是 `tauri-plugin-dialog`
+#       的传递依赖（见 Cargo.lock），删直接依赖后它照样被编译链接。
+#       本次收益是**权限收敛**，不是体积。
 tauri-plugin-dialog = "2.7.3"
-tauri-plugin-fs = "2.5.2"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

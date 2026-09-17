@@ -4,6 +4,7 @@ use tauri::path::BaseDirectory;
 use tauri::{AppHandle, Manager};
 use tauri_plugin_sql::{Migration, MigrationKind};
 
+mod export;
 mod packs;
 
 /// 本地 SQLite 数据库。
@@ -187,8 +188,13 @@ pub fn run() {
                 .add_migrations(DB_URL, migrations())
                 .build(),
         )
+        // ‼️ 阶段54：`tauri_plugin_fs` 已**移除** —— CSV 导出改为在 Rust 侧
+        //    弹对话框并写盘（见 `export.rs`），前端不再需要写文件的能力，
+        //    于是 `fs:write-all` 这个「可写任意路径」的过宽权限也随之删掉。
+        //    ⚠️ `tauri_plugin_dialog` 必须保留：`export.rs` 用它的 Rust API
+        //       (`DialogExt`) 弹原生「另存为」。删掉的只是它在**前端**的那一半
+        //       （npm 包 + capability 放行）—— Rust 侧调插件不过 ACL。
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init())
         .setup(|app| {
             // 首次运行播种：必须在任何数据库连接建立之前执行。
             //
@@ -206,6 +212,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             greet,
+            export::export_csv_file,
             packs::pack_dir,
             packs::pack_status,
             packs::pack_download,

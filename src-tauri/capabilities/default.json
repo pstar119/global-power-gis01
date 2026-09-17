@@ -7,8 +7,6 @@
     "core:default",
     "opener:default",
     "sql:default",
-    "core:window:allow-set-theme",
-    "dialog:allow-save",
-    "fs:write-all"
+    "core:window:allow-set-theme"
   ]
 }
