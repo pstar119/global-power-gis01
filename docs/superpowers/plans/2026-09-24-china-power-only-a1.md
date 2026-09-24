@@ -164,7 +164,7 @@ import { extname } from "node:path";
 import { verifyArchive, tileX, tileY, zxyToTileId } from "./lib/pmtiles-writer.mjs";
 
 const FORBIDDEN_FTYPES = ["railway", "pipeline"];
-const EXPECTED_LINE_PROPS = ["osm_id", "name", "vclass", "voltage_kv", "line_kind", "circuits", "cables", "wires", "operator"];
+const EXPECTED_LINE_PROPS = ["osm_id", "name", "ref", "operator", "vclass", "voltage_kv", "line_kind", "circuits", "cables", "wires"];
 
 const path = process.argv[2];
 if (!path) {
@@ -234,7 +234,9 @@ Run（PowerShell，注意 node 不在 PATH）：
 ```powershell
 & "D:\Node,js\node.exe" scripts/verify_power_only.mjs data/packs/osm-huadong.pmtiles
 ```
-Expected：`forbidden ftypes:` 里出现 `layer:railway` 或 `layer:pipeline`（**当前归档含这两类**），或 `verdict: FAIL`。
+Expected：**`verdict: PASS`** —— 归档分支只做结构检查（`ok>0` 且 `gridTiles>0`）。
+⚠️ 这里**不会**失败：归档内所有 ftype 同在 `grid` 层，图层名区分不出铁路/管道。
+真正的"改前确实不纯电力"由下一步的 GeoJSON 门禁给出（那才是权威内容检查）。
 
 - [ ] **Step 3: 再跑一次 GeoJSON（当前中间产物同样含两类）**
 
