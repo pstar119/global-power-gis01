@@ -106,9 +106,11 @@ CHUNK_WAIT = 2.0
 # 抓取类别（阶段43）
 # ------------------------------------------------------------------
 # 阶段28~42 只有电力一条路。阶段43 增加铁路与管道两类基础设施。
-# 刻意**复用本脚本**而不是另写一个，理由是把 429 退避、`remark` 铁律、
-# 失败块必须响亮的报错、按 osm_id 跨块去重、断点续抓这些踩过坑的逻辑
-# 复制成第二份 —— 复制出来的那份迟早会与这份不一致，那就是下次丢数据的入口。
+# 阶段56-A1（2026-09-24）：**铁路与油气管道已整体撤销**（用户决定只做电力）。
+#    撤销必须彻底：类别表、查询构造、要素构造一并删除，不留"留着不用"的死代码 ——
+#    那种代码会让后来者以为还在抓，而 `--category rail` 一旦还能用就说明没删干净。
+#    注意：铁路/管道的抓取产物（`data/osm/` 下的 `*_rail` / `*_pipeline`）**不参与**归档制备，
+#    因为它们在 prepare 阶段才被合并；**本脚本不需要重抓**（见 A1 计划的实测依据）。
 #
 # ⚠️ `kind` 是产出文件的桶名，`ftype` 是写进 GeoJSON 的判别字段（前端按它分图层）。
 #    电力必须沿用历史的 lines/substations/plants 桶名 ——
@@ -117,10 +119,8 @@ CHUNK_WAIT = 2.0
 POWER_KIND_TO_FTYPE = {"lines": "line", "substations": "substation", "plants": "plant"}
 CATEGORY_KINDS: dict[str, list[str]] = {
     "power": ["lines", "substations", "plants"],
-    "rail": ["railway"],
-    "pipeline": ["pipeline"],
 }
-CATEGORY_LABEL = {"power": "电力设施", "rail": "铁路干线", "pipeline": "油气管道"}
+CATEGORY_LABEL = {"power": "电力设施"}
 
 
 def ftype_of(kind: str) -> str:
@@ -128,17 +128,18 @@ def ftype_of(kind: str) -> str:
 
 
 def geom_path(out_dir: str, name: str, category: str, kind: str) -> str:
-    """产物路径。电力保持 `<name>_power_<kind>.geojson`（历史产物不能改名）；
-    铁路/管道各自只有一个桶，用 `<name>_rail.geojson` / `<name>_pipeline.geojson`。"""
+    """产物路径。电力保持 `<name>_power_<kind>.geojson`（历史产物不能改名）。
+    阶段56-A1：铁路/管道已撤销，本函数只剩电力一条路径。"""
     if category == "power":
         return os.path.join(out_dir, f"{name}_power_{kind}.geojson")
     return os.path.join(out_dir, f"{name}_{category}.geojson")
 
 
 def meta_path(out_dir: str, name: str, category: str = "power") -> str:
-    """meta 路径。‼️ 必须按类别分开：
-    同一 name 先抓 power 再抓 rail 时，若两者都写 `<name>_power_meta.json`，
-    后者会直接覆盖前者的 bbox / 要素数 / 电压直方图 —— 这属于静默丢数据。"""
+    """meta 路径。‼️ 按类别分开命名（历史教训：不同类别共用 `<name>_power_meta.json`
+    时后者会直接覆盖前者的 bbox / 要素数 / 电压直方图 —— 那属于静默丢数据）。
+    阶段56-A1 起只剩 power 一类，但保留按类别命名的能力：将来若再加类别，
+    这条隔离规则必须已经在那儿。"""
     if category == "power":
         return os.path.join(out_dir, f"{name}_power_meta.json")
     return os.path.join(out_dir, f"{name}_{category}_meta.json")
@@ -339,34 +340,7 @@ def common_props(element: dict[str, Any]) -> dict[str, Any]:
     return props
 
 
-def infra_line_feature(element: dict[str, Any], geom_type: str) -> dict[str, Any] | None:
-    """铁路 / 管道：都是 LineString，且都**不带 vclass**。
-
-    为什么不复用 common_props：那个函数会按 voltage 算出 vclass，
-    而铁路/管道没有电压概念。硬塞一个 'unknown' 会污染前端的电压分档统计，
-    也会让「空 vclass」这个信号失去意义（它本来专门用来标记缺 voltage 的电力要素）。
-    """
-    tags = element.get("tags", {}) or {}
-    coords = way_to_linestring(element)
-    if not coords:
-        return None
-    props: dict[str, Any] = {
-        "osm_id": f"{element.get('type','?')}/{element.get('id','?')}",
-        "name": tags.get("name") or None,
-    }
-    if geom_type == "railway":
-        props["railway_kind"] = tags.get("railway")
-        # usage 区分 main / branch。实测支线只占主线 7.0%，保留它但不做过滤。
-        props["usage"] = tags.get("usage") or None
-    else:
-        props["substance"] = tags.get("substance")
-    return {"type": "Feature", "properties": props, "geometry": {"type": "LineString", "coordinates": coords}}
-
-
 def build_feature(element: dict[str, Any], geom_type: str) -> dict[str, Any] | None:
-    if geom_type in ("railway", "pipeline"):
-        return infra_line_feature(element, geom_type)
-
     props = common_props(element)
     tags = element.get("tags", {}) or {}
 
@@ -379,6 +353,10 @@ def build_feature(element: dict[str, Any], geom_type: str) -> dict[str, Any] | N
         props["cables"] = tags.get("cables") or None
         props["wires"] = tags.get("wires") or None
         props["circuits"] = tags.get("circuits") or None
+        # 阶段56-A1：新增采集 frequency。它是"直流/交流"唯一的硬信号
+        # （`frequency=0` ⇒ 直流）。本计划内**不重抓**，所以这一轮产物里不会有它；
+        # 直交流分档属 A2，届时要靠这次留下的能力补齐。
+        props["frequency"] = tags.get("frequency") or None
         return {"type": "Feature", "properties": props, "geometry": {"type": "LineString", "coordinates": coords}}
 
     # point 类（变电站 / 电厂）
@@ -448,23 +426,6 @@ def queries_for(
     #    ⚠️ 但它**不省 Overpass 的空间检索**，所以单块耗时未必显著下降，
     #       具体倍数以 scripts/measure_count_cost.py 的实测为准，不要凭想象断言。
     tail = "out count;" if count_only else "out geom;"
-
-    if category == "rail":
-        # 只取铁路干线。两条口径都是**在服务器端筛掉**，不是抓回来再过滤：
-        #   `service` 存在 = 侧线/站线/场线（编组站里最密的那批）。
-        #   实测（阶段43，长三角 12 格全量、无外推）：侧线占 railway=rail 的
-        #   38.3% 条数、**70% 的坐标点数** —— 不排除的话体积与视觉噪声都大幅上升。
-        #   ‼️ 城市轨道（subway / light_rail / tram / monorail / narrow_gauge / funicular）
-        #   **故意不抓**：用户判定地铁轻轨对电网骨干的视觉干扰大于价值，留作后续独立可选包。
-        #   参考量级：被排除的城市轨道在长三角是 2,999 条 / 73,452 点 / 7,110 km。
-        return {"railway": (f'{head}' f'(way["railway"="rail"]["service"!~"."]{f};);' f"{tail}")}
-
-    if category == "pipeline":
-        # 只取油气管道。`substance` 只认 gas|oil：
-        #   实测长三角全部管道 1,143 条（去重后）里，无 substance 标签 623 条、
-        #   steam 195、heat 101、water 83、hot_water 56 —— 都是市政/供热管网。
-        #   混进来既误导、又会把真正只有 85 条的油气长输淹没掉。
-        return {"pipeline": (f'{head}' f'(way["man_made"="pipeline"]["substance"~"^(gas|oil)$"]{f};);' f"{tail}")}
 
     return {
         "lines": (
@@ -800,11 +761,7 @@ def main() -> int:
         "--category",
         default="power",
         choices=sorted(CATEGORY_KINDS),
-        help=(
-            "抓取类别：power 电力（历史默认）/ "
-            "rail 铁路干线（railway=rail，排除 service 侧线、不含地铁轻轨）/ "
-            "pipeline 油气管道（man_made=pipeline 且 substance=gas|oil）"
-        ),
+        help="抓取类别：power 电力设施（线路 / 变电站 / 电厂）。阶段56-A1 起只剩这一类 —— 铁路与油气管道已整体撤销",
     )
     ap.add_argument("--grid", default="4x4", help="把 bbox 切成几块抓，格式 NxM（默认 4x4）")
     ap.add_argument(
