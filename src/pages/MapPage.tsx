@@ -406,52 +406,27 @@ const OSM_LINES_HIT_LAYER_ID = "osm-lines-hit";
 const OSM_LINES_HIT_WIDTH = 14;
 
 /**
- * 阶段43：其他基础设施 —— 铁路干线 与 油气长输管道。
+ * 阶段43 曾在此定义「铁路干线 / 油气长输管道」两个背景图层、它们的展示色与面板开关。
  *
- * 抓取口径（已实测、不是猜的）：
- *  铁路 `way[railway=rail]["service"!~"."]` —— 排除侧线/站线/场线。
- *      阶段43 实测（长三角 12 格全量）：侧线占 railway=rail 的 38.3% 条数、
- *      **70% 的坐标点数**。城市轨道（subway/light_rail/tram/...）**不入库**：
- *      用户判定地铁轻轨对电网骨干的视觉干扰大于价值（长三角为 2,999 条 / 73,452 点）。
- *  管道 `way[man_made=pipeline]["substance"~"^(gas|oil)$"]` —— 全量仅 85 条。
- *      ⚠️ 长三角油气总里程 2,540 km 里，单条「西气东输」占 2,378 km（93.6%），
- *      所以这个图层视觉上会是「一根横穿全国的线 + 少量短线」，属于数据本身特征。
+ * 🔴 阶段56-A1（2026-09-24）**整体撤销**：用户决定只做电力 ——
+ *    数据侧（`fetch_osm_power.py` 的类别、`prepare_osm_geojson.mjs` 的合并表、
+ *    `build_pmtiles.mjs` 的白名单）与显示侧（本文件的图层/配色/开关/图例）一并移除。
+ *    抓取口径与实测数据（侧线占 38.3%、油气管道全区域 85 条等）作为历史记录保留在
+ *    `README_OSM.md` 的阶段43 章节，那里已标注撤销。
  *
- * 两个图层都**默认关闭**（不在 visibleLayers 初始值里），且**置于电力图层下方**：
- * 它们是背景参照物，不该与电压分级的线条争夺注意力。
- *
- * ‼️ 铁路用**虚线**是刻意的：只有虚线才能在低缩放级别下与四档电压线一眼可分，
- *    而且它不占用任何一档电压的颜色。
+ * ⚠️ 不要再从"历史好看"出发把它们加回来：它们是**已发布的删除**，
+ *    加回意味着 7 个区域包与核心区归档都要重新抓取与重传。
  */
-const OSM_RAILWAY_LAYER_ID = "osm-railways";
-/**
- * 铁路展示色：**低饱和中性灰**。
- * 它必须既能当背景参照物，又绝不能与四档电压色争注意力；配合
- * `line-dasharray`（见 addRailwayLayer）在低缩放级别下与电压线一眼可分。
- */
-const OSM_RAILWAY_COLOR = "#9c9c9c";
-const OSM_PIPELINE_LAYER_ID = "osm-pipelines";
-/**
- * 管道展示色：**低饱和暗紫**。
- * 与铁路同属「背景基础设施」，刻意避开任何一档电压色，也不使用高亮色。
- */
-const OSM_PIPELINE_COLOR = "#b98c9f";
-
-/** 面板上的两个开关名。刻意**不并进 `LAYERS`** —— 那个数组同时是「默认可见」清单。 */
-const INFRA_LAYERS = ["铁路", "油气管道"] as const;
-const INFRA_SWATCH: Record<string, string> = {
-  铁路: OSM_RAILWAY_COLOR,
-  油气管道: OSM_PIPELINE_COLOR,
-};
 
 /**
  * 阶段45：图层面板的**分组制**。
  *
  * ❗ 折叠是**纯 UI 行为** —— 收起一个组不会改变任何图层的可见性。
- *    否则用户收起「基础设施」时铁路会跟着消失，看起来像 bug。
+ *    （阶段56-A1 起只剩「电力设施」与「环境与底图」两组：原「基础设施」组
+ *      随铁路/油气管道的整体撤销而删除。）
  *
- * ⚠️ 用户描述里说「四个组」但只列了三个（电力设施 / 基础设施 / 环境与底图），
- *    这里按**实际列出的三个**实现。电压分级被归入「电力设施」组内，
+ * ⚠️ 用户描述里说「四个组」但只列了三个（当时含基础设施），
+ *    这里按**实际列出的组**实现。电压分级被归入「电力设施」组内，
  *    因为它本来就是输电线路的子项，单独成组会与主开关重复。
  */
 interface LayerGroupDef {
@@ -464,7 +439,6 @@ interface LayerGroupDef {
 }
 const LAYER_GROUPS: readonly LayerGroupDef[] = [
   { id: "power", label: "电力设施", defaultOpen: true },
-  { id: "infra", label: "基础设施", defaultOpen: false },
   {
     id: "env",
     label: "环境与底图",
@@ -542,8 +516,6 @@ function packLayerIds(key: string) {
     lines: OSM_LINE_TIERS.map((t) => packLayerId(t.id, key)),
     substations: packLayerId(OSM_SUBSTATION_LAYER_ID, key),
     plants: packLayerId(OSM_PLANT_LAYER_ID, key),
-    railways: packLayerId(OSM_RAILWAY_LAYER_ID, key),
-    pipelines: packLayerId(OSM_PIPELINE_LAYER_ID, key),
     hit: packLayerId(OSM_LINES_HIT_LAYER_ID, key),
   };
 }
@@ -2247,41 +2219,9 @@ function addOsmGridLayers(
   // 矢量瓦片必须额外指定 source-layer；GeoJSON 不能设（设了反而报错）
   const layerRef = archive ? { "source-layer": OSM_GRID_SOURCE_LAYER } : {};
 
-  // ---- 阶段43：铁路 / 油气管道（背景参照，画在**电力图层下方**）----
-  // ‼️ 必须加在电压档循环**之前**：MapLibre 先加的在下，
-  //    若加在循环之后，虚线铁路会盖在 735kV 粉线上。
-  // ‼️ layout.visibility 直接写 none：面板默认不包含这两项，
-  //    不等显隐 effect 跑第一轮就不会闪一下。
-  map.addLayer({
-    id: OSM_RAILWAY_LAYER_ID,
-    type: "line",
-    source: OSM_SOURCE,
-    ...layerRef,
-    filter: ["==", ["get", "ftype"], "railway"],
-    layout: { "line-cap": "butt", "line-join": "round", visibility: "none" },
-    paint: {
-      "line-color": OSM_RAILWAY_COLOR,
-      "line-opacity": 0.75,
-      // 虚线：低缩放级别下与四档电压实线一眼可分（不占任何一档电压的颜色）
-      "line-dasharray": [2, 1.6],
-      "line-width": ["interpolate", ["linear"], ["zoom"], 4, 0.4, 8, 0.9, 11, 1.4],
-    },
-  });
-
-  map.addLayer({
-    id: OSM_PIPELINE_LAYER_ID,
-    type: "line",
-    source: OSM_SOURCE,
-    ...layerRef,
-    filter: ["==", ["get", "ftype"], "pipeline"],
-    layout: { "line-cap": "round", "line-join": "round", visibility: "none" },
-    paint: {
-      "line-color": OSM_PIPELINE_COLOR,
-      "line-opacity": 0.9,
-      // 实线（与铁路的虚线相反）：数量极少（全区域 85 条），需要显眼
-      "line-width": ["interpolate", ["linear"], ["zoom"], 4, 0.6, 8, 1.3, 11, 2.2],
-    },
-  });
+  // ---- 阶段56-A1：铁路 / 油气管道图层已整体撤销（曾在此处 addLayer）----
+  // ‼️ 曾经必须先于电压档循环添加，否则虚线铁路会盖在 735kV 线上 —— 这个顺序约束
+  //    随图层一起消失了，不要再为了它调整下面的循环。
 
   // ‼️ 自下而上加层，让 735kV 画在最顶（详见 `OSM_LINE_TIERS_BOTTOM_UP`）。
   //    ⚠️ 必须与 `addPackLayers` 用同一个数组，否则核心区与区域包画序不一致。
@@ -2440,36 +2380,7 @@ function addPackLayers(
   // 区域包用带 `--<region>` 后缀的 id，**不覆盖核心区的 id**
   const id = (base: string) => packLayerId(base, key);
 
-  // ---- 阶段43：铁路 / 油气管道（与 `addOsmGridLayers` 同规格，只是 id 带包后缀）----
-  // ⚠️ 结构与数值必须与 `addOsmGridLayers` 保持一致 —— 改动其中一个请对照另一个。
-  map.addLayer({
-    id: id(OSM_RAILWAY_LAYER_ID),
-    type: "line",
-    source: sourceId,
-    ...layerRef,
-    filter: ["==", ["get", "ftype"], "railway"],
-    layout: { "line-cap": "butt", "line-join": "round", visibility: "none" },
-    paint: {
-      "line-color": OSM_RAILWAY_COLOR,
-      "line-opacity": 0.75,
-      "line-dasharray": [2, 1.6],
-      "line-width": ["interpolate", ["linear"], ["zoom"], 4, 0.4, 8, 0.9, 11, 1.4],
-    },
-  });
-
-  map.addLayer({
-    id: id(OSM_PIPELINE_LAYER_ID),
-    type: "line",
-    source: sourceId,
-    ...layerRef,
-    filter: ["==", ["get", "ftype"], "pipeline"],
-    layout: { "line-cap": "round", "line-join": "round", visibility: "none" },
-    paint: {
-      "line-color": OSM_PIPELINE_COLOR,
-      "line-opacity": 0.9,
-      "line-width": ["interpolate", ["linear"], ["zoom"], 4, 0.6, 8, 1.3, 11, 2.2],
-    },
-  });
+  // ---- 阶段56-A1：区域包侧的铁路 / 油气管道图层同样已整体撤销 ----
 
   // ‼️ 用自下而上的顺序：先加的在下面，让 735kV 最后加、画在最顶。
   //    详见 `OSM_LINE_TIERS_BOTTOM_UP` 的说明（原先低压盖高压）。
@@ -2956,8 +2867,8 @@ function MapPage({
    *    ⇒ 原本**溢出 219px、必须内部滚动**。折叠后 `.layerGroups`（约 454px）与
    *    同一开关控制的 `.legend`（约 88px）一起收起，内容降到约 372px ⇒ **不再滚动**。
    *
-   *    ⚠️ 折叠**只隐藏内容，不删除任何东西**：分组标题（电力设施 / 基础设施 /
-   *       环境与底图）、按电压分级、按能源细分、图例与视觉约定说明全部原样保留，
+   *    ⚠️ 折叠**只隐藏内容，不删除任何东西**：分组标题（电力设施 / 环境与底图）、
+   *       按电压分级、按能源细分、图例与视觉约定说明全部原样保留，
    *       展开后立刻回到原位。也**不改变任何图层的可见性**。
    */
   const [panelOpen, setPanelOpen] = useState(false);
@@ -4446,9 +4357,6 @@ function MapPage({
         }
         m.setLayoutProperty(ids.substations, "visibility", on("变电站") ? "visible" : "none");
         m.setLayoutProperty(ids.plants, "visibility", on("电厂") ? "visible" : "none");
-        // 阶段43：新加载的区域包也要按当前开关设一次，否则默认关闭的铁路/管道会自己冒出来
-        m.setLayoutProperty(ids.railways, "visibility", on("铁路") ? "visible" : "none");
-        m.setLayoutProperty(ids.pipelines, "visibility", on("油气管道") ? "visible" : "none");
         m.setLayoutProperty(ids.hit, "visibility", LINE_TIER_KEYS.some((k) => on(k)) ? "visible" : "none");
 
         // 光标反馈（与核心区那几个 hit 层一致）。
@@ -4582,10 +4490,8 @@ function MapPage({
     //    这里只认当前 key，无需再判旧名。
     apply([gemPlantsLayerId()], on(GEM_PLANT_LAYER_NAME));
 
-    // 阶段43：铁路 / 油气管道。两个独立开关，**默认关闭**（不在 visibleLayers 初始值里）。
-    // 它们没有命中热区/弹窗，所以不需要像线路那样联动 hit 层。
-    apply([OSM_RAILWAY_LAYER_ID], on("铁路"));
-    apply([OSM_PIPELINE_LAYER_ID], on("油气管道"));
+    // 阶段56-A1：铁路 / 油气管道两个开关已整体撤销（数据与显示一并移除），
+    // 原先这里为它们做的可见性同步随之删除。
 
     // ⚠️ 输电线路的热区层必须跟着视觉线一起开关，否则会出现
     //    「线看不见了、却还能点到它的弹窗」的幽灵交互。
@@ -4609,8 +4515,6 @@ function MapPage({
       }
       apply([packLayerId(OSM_SUBSTATION_LAYER_ID, key)], on("变电站"));
       apply([packLayerId(OSM_PLANT_LAYER_ID, key)], on("电厂"));
-      apply([packLayerId(OSM_RAILWAY_LAYER_ID, key)], on("铁路"));
-      apply([packLayerId(OSM_PIPELINE_LAYER_ID, key)], on("油气管道"));
       apply([packLayerId(OSM_LINES_HIT_LAYER_ID, key)], LINE_TIER_KEYS.some((k) => on(k)));
     }
 
@@ -4935,7 +4839,7 @@ function MapPage({
         </button>
 
         {/* 阶段45：分组制的图层控制。
-            折叠仅隐藏内容，**不改变图层可见性**（收起「基础设施」不会让铁路消失）。 */}
+            折叠仅隐藏内容，**不改变图层可见性**（收起「环境与底图」不会让底图消失）。 */}
         <div id="map-layer-groups" className={styles.layerGroups} hidden={!panelOpen}>
           {LAYER_GROUPS.map((group) => {
             const open = openGroups.includes(group.id);
@@ -5081,32 +4985,7 @@ function MapPage({
                     </>
                   )}
 
-                  {/* ---------- 基础设施：默认关闭的背景参照 ---------- */}
-                  {group.id === "infra" && (
-                    <div className={styles.tierGroup}>
-                      <p className={styles.legendTitle}>默认关闭（背景参照）</p>
-                      <ul className={styles.tierList}>
-                        {INFRA_LAYERS.map((name) => (
-                          <li key={name}>
-                            <label className={styles.tierItem}>
-                              <input
-                                type="checkbox"
-                                className={styles.tierCheck}
-                                checked={visibleLayers.includes(name)}
-                                onChange={() => toggleLayer(name)}
-                              />
-                              <span
-                                className={styles.layerSwatch}
-                                style={{ background: INFRA_SWATCH[name] }}
-                                aria-hidden="true"
-                              />
-                              {name}
-                            </label>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
+                  {/* ---------- 基础设施：阶段56-A1 整体撤销（铁路/油气管道已不做）---------- */}
 
                   {/* ---------- 环境与底图：预留占位 ---------- */}
                   {group.placeholder && (
