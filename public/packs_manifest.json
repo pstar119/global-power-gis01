@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-09-16T16:01:40.161Z",
+  "generatedAt": "2026-09-24T17:55:42.676Z",
   "generatedBy": "scripts/gen_packs_manifest.mjs",
   "note": "区域数据包元信息清单。pack 是否已安装需在运行时用 127 字节 Range 探测判定，本文件只描述「有哪些包、覆盖哪里」。",
   "release": {
@@ -31,12 +31,12 @@
       ],
       "file": "packs/osm-huadong.pmtiles",
       "chunks": 64,
-      "features": 168445,
-      "sizeMb": 28.92,
-      "maxTileKb": 402.4,
+      "features": 82571,
+      "sizeMb": 27.06,
+      "maxTileKb": 424.3,
       "downloadUrl": "https://gh-proxy.com/https://github.com/pstar119/global-power-gis01/releases/download/v1.0-packs/osm-huadong.pmtiles",
-      "sha256": "122e64a45e80d4dcef35be5d98336b8f3605874f0836a000662156b67574b893",
-      "bytes": 30322201
+      "sha256": "9f5106f1e65c240545de987036c623c699b4c397610fed412fd23e1905aeb9cd",
+      "bytes": 28370448
     },
     {
       "key": "huazhong",
@@ -51,12 +51,12 @@
       ],
       "file": "packs/osm-huazhong.pmtiles",
       "chunks": 42,
-      "features": 110667,
-      "sizeMb": 19.74,
-      "maxTileKb": 384.5,
+      "features": 51029,
+      "sizeMb": 18.14,
+      "maxTileKb": 401,
       "downloadUrl": "https://gh-proxy.com/https://github.com/pstar119/global-power-gis01/releases/download/v1.0-packs/osm-huazhong.pmtiles",
-      "sha256": "e7e641c12fabfaca5767858138d9cfd685f1c397b5ac30ae4fb3b1080f3d2942",
-      "bytes": 20703503
+      "sha256": "90524d5defb397d621f8b8d780a4b79ff1c599725ab64db51c10a244b5e1b064",
+      "bytes": 19024845
     },
     {
       "key": "huanan",
@@ -71,12 +71,12 @@
       ],
       "file": "packs/osm-huanan.pmtiles",
       "chunks": 52,
-      "features": 82870,
-      "sizeMb": 14.02,
-      "maxTileKb": 378.7,
+      "features": 40323,
+      "sizeMb": 13.14,
+      "maxTileKb": 329.7,
       "downloadUrl": "https://gh-proxy.com/https://github.com/pstar119/global-power-gis01/releases/download/v1.0-packs/osm-huanan.pmtiles",
-      "sha256": "1f880ee4bc9909ccc5aa1816b0180f0993dfb503a233cbdd59510975bf537743",
-      "bytes": 14703680
+      "sha256": "8c8460c7591661db41e26fcd8e70981cd27fbfc63acb5ab3eee0a6b413bda957",
+      "bytes": 13781506
     },
     {
       "key": "huabei",
@@ -91,12 +91,12 @@
       ],
       "file": "packs/osm-huabei.pmtiles",
       "chunks": 32,
-      "features": 114052,
-      "sizeMb": 20.62,
-      "maxTileKb": 407.6,
+      "features": 55576,
+      "sizeMb": 19.29,
+      "maxTileKb": 421.4,
       "downloadUrl": "https://gh-proxy.com/https://github.com/pstar119/global-power-gis01/releases/download/v1.0-packs/osm-huabei.pmtiles",
-      "sha256": "8da3096d2430685fe56cb20fdf7f74c42dba463695133f339b8892ae11d07c87",
-      "bytes": 21617044
+      "sha256": "9477f1162b6c25d325b6fc6f000ab35b3c8f04c30bbaf07814d1260c947829d9",
+      "bytes": 20226892
     },
     {
       "key": "dongbei",
@@ -111,12 +111,12 @@
       ],
       "file": "packs/osm-dongbei.pmtiles",
       "chunks": 112,
-      "features": 65517,
-      "sizeMb": 15.35,
-      "maxTileKb": 378.3,
+      "features": 27135,
+      "sizeMb": 12.98,
+      "maxTileKb": 290.7,
       "downloadUrl": "https://gh-proxy.com/https://github.com/pstar119/global-power-gis01/releases/download/v1.0-packs/osm-dongbei.pmtiles",
-      "sha256": "e661ebc57f86e55c6784afc20dc627050ca9f6f55c5880fb8fcc0d7857ae6999",
-      "bytes": 16097341
+      "sha256": "d4fbbd26bf8b99afaf0a52d1e5b188744cf3970ade298b24fafd1864b91bccb7",
+      "bytes": 13606491
     },
     {
       "key": "xinan",
@@ -131,12 +131,12 @@
       ],
       "file": "packs/osm-xinan.pmtiles",
       "chunks": 216,
-      "features": 160936,
-      "sizeMb": 35.17,
-      "maxTileKb": 397.3,
+      "features": 63654,
+      "sizeMb": 33.12,
+      "maxTileKb": 400.9,
       "downloadUrl": "https://gh-proxy.com/https://github.com/pstar119/global-power-gis01/releases/download/v1.0-packs/osm-xinan.pmtiles",
-      "sha256": "caed355562cac6df64575777b982433bfa19437398e6423f4e2a99aa40b0d628",
-      "bytes": 36873541
+      "sha256": "941d421263e5d3e99d0a3169f7dcc6f9d268419fb95e67a8962eecc42ab1fce3",
+      "bytes": 34723937
     },
     {
       "key": "xibei",
@@ -151,12 +151,12 @@
       ],
       "file": "packs/osm-xibei.pmtiles",
       "chunks": 288,
-      "features": 113241,
-      "sizeMb": 29.43,
-      "maxTileKb": 403.7,
+      "features": 61257,
+      "sizeMb": 31.24,
+      "maxTileKb": 420.4,
       "downloadUrl": "https://gh-proxy.com/https://github.com/pstar119/global-power-gis01/releases/download/v1.0-packs/osm-xibei.pmtiles",
-      "sha256": "26df1b9e759b627e7166fae13fcbd5e9097a9a3721ea13fedd975bb3cb6ed0c2",
-      "bytes": 30857329
+      "sha256": "7c9584731ccac3cfba8625fb7dbf0604cf6e52ba7365f48f976ef462a73173fc",
+      "bytes": 32752352
     },
     {
       "key": "gem",

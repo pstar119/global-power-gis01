@@ -18,11 +18,13 @@ import {
   effectiveBasesOf,
   fileNameOf,
   friendlyError,
+  installStateOf,
   isRetryableNetworkError,
   loadManifest,
   type DownloadProgress,
   type PackEntry,
   type PackFileStatus,
+  type PackInstallState,
   type PacksManifest,
   urlOf,
 } from "../lib/packs";
@@ -42,6 +44,14 @@ export interface PackDownloadsApi {
   errors: Record<string, string>;
   /** false = 不是 Tauri 环境（纯浏览器打开），下载功能不可用 */
   bridgeOk: boolean;
+  /**
+   * 阶段56-A3：单个包的四态安装状态（missing / partial / installed / **outdated**）。
+   *
+   * ‼️ 与 `statuses[file].exists` 的区别：`exists` 只回答"文件在不在"，
+   *    而"在"可能意味着"是上一版的" —— 见 `installStateOf` 的注释。
+   *    UI 上判断"要不要显示已下载 / 要不要给更新按钮"一律用本函数，不要再用 `exists`。
+   */
+  stateOf: (pack: PackEntry) => PackInstallState;
   downloadUrlOf: (pack: PackEntry) => string | null;
   refresh: (list: string[]) => Promise<void>;
   download: (pack: PackEntry) => Promise<boolean>;
@@ -77,6 +87,11 @@ export function usePackDownloads(): PackDownloadsApi {
   const downloadUrlOf = useCallback(
     (pack: PackEntry) => urlOf(pack, effectiveBase),
     [effectiveBase],
+  );
+
+  const stateOf = useCallback(
+    (pack: PackEntry) => installStateOf(pack, statuses[fileNameOf(pack)]),
+    [statuses],
   );
 
   const refresh = useCallback(async (list: string[]) => {
@@ -241,6 +256,7 @@ export function usePackDownloads(): PackDownloadsApi {
     phases,
     errors,
     bridgeOk,
+    stateOf,
     downloadUrlOf,
     refresh,
     download,

@@ -40,6 +40,7 @@ function PackManager() {
     phases,
     errors,
     bridgeOk,
+    stateOf,
     downloadUrlOf,
     download,
     cancel,
@@ -83,9 +84,17 @@ function PackManager() {
           const phase = phases[file] ?? "idle";
           const pr = progress[file];
           const err = errors[file];
-          const done = phase === "done" || st?.exists;
+          /**
+           * 阶段56-A3（设计 §5.4）：**四态**而不是"在/不在"。
+           * ‼️ `outdated` = 文件在、但字节数与清单不符 ⇒ 是上一版的数据。
+           *    它必须显示成「需更新」而不是「已下载」，否则老用户永远不知道自己
+           *    用的是旧归档（旧版含铁路/管道、且没有直流信息），而界面上一切正常。
+           */
+          const state = stateOf(pack);
+          const outdated = state === "outdated";
+          const done = state === "installed" || phase === "done";
           const busy = phase === "downloading";
-          const resumable = !st?.exists && (st?.partBytes ?? 0) > 0;
+          const resumable = state === "partial";
           const sizeText = pack.bytes ? mb(pack.bytes) : pack.sizeMb ? `${pack.sizeMb} MB` : "—";
           const url = downloadUrlOf(pack);
 
@@ -102,16 +111,26 @@ function PackManager() {
               <div className={styles.statusLine}>
                 <span
                   className={
-                    done ? styles.badgeDone : busy ? styles.badgeBusy : resumable ? styles.badgePart : styles.badgeIdle
+                    done
+                      ? styles.badgeDone
+                      : busy
+                        ? styles.badgeBusy
+                        : outdated
+                          ? styles.badgeOutdated
+                          : resumable
+                            ? styles.badgePart
+                            : styles.badgeIdle
                   }
                 >
                   {done
                     ? "已下载"
                     : busy
                       ? `下载中 ${(pr?.percent ?? 0).toFixed(1)}%`
-                      : resumable
-                        ? `未完成（可续传 ${mb(st?.partBytes ?? 0)}）`
-                        : "未下载"}
+                      : outdated
+                        ? "需更新"
+                        : resumable
+                          ? `未完成（可续传 ${mb(st?.partBytes ?? 0)}）`
+                          : "未下载"}
                 </span>
 
                 {!done && !busy && bridgeOk && (
@@ -122,7 +141,7 @@ function PackManager() {
                     disabled={!url}
                     title={url ?? "清单里没有该包的下载地址"}
                   >
-                    {resumable || err ? "重试 / 续传" : "下载"}
+                    {outdated ? "更新" : resumable || err ? "重试 / 续传" : "下载"}
                   </button>
                 )}
                 {busy && bridgeOk && (
@@ -130,12 +149,23 @@ function PackManager() {
                     取消
                   </button>
                 )}
-                {done && bridgeOk && (
+                {(done || outdated) && bridgeOk && (
                   <button type="button" className={styles.btnDanger} onClick={() => void remove(file)}>
                     删除
                   </button>
                 )}
               </div>
+
+              {/* 过期时把**凭据**摆出来：本机字节数 vs 清单字节数。
+                  只说"需更新"而不给数字，用户没法判断是不是误报。 */}
+              {outdated && (
+                <p className={styles.note}>
+                  本机 <code className={styles.code}>{mb(st?.bytes ?? 0)}</code> ≠ 清单{" "}
+                  <code className={styles.code}>{mb(pack.bytes ?? 0)}</code>
+                  —— 该包是上一版的数据（可能仍含已撤销的铁路/管道、且没有直流分档）。
+                  重新下载会**原子替换**，失败时旧文件保持不动。
+                </p>
+              )}
 
               {busy && (
                 <div className={styles.barOuter} role="progressbar" aria-valuenow={pr?.percent ?? 0}>

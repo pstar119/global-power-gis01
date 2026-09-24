@@ -218,3 +218,44 @@ export function isRetryableNetworkError(raw: string): boolean {
 export function mb(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
+
+/* ============================================================================
+ * 阶段56-A3（设计 §5.4 / G8）：包指纹失效策略
+ * ============================================================================
+ * 背景：运行时原本只探测「文件存不存在」⇒ **升级后老包永远算"已安装"**，
+ * 于是老用户会一直用旧归档（上一阶段的铁路/管道、没有直流信息的线路），
+ * 而界面上显示"已下载"，看不出任何异常。
+ *
+ * 做法（**零 Rust 改动**）：`pack_status` 已经回传每个包的 `bytes`，
+ * 拿它与清单里的 `bytes` 比对即可判定"这个包是上一版的"。
+ *
+ * ⚠️ 判据是**字节数**，不是 SHA256。两条都是事实，别互相冒充：
+ *    · 字节数不同 ⇒ **一定**是不同版本（先验必然）；
+ *    · 字节数相同 ⇏ 内容相同（理论上同长度的不同内容会漏判）。
+ *    之所以不在这里比 SHA256：那是 30 MB × 8 的文件读取+哈希，会卡住渲染；
+ *    而**下载路径本来就逐字节校验 SHA256**（`packs.rs` 只在长度+SHA256 都对时
+ *    才 rename 成正式名），所以"装上的文件"在装的那一刻是可信的 —— 这里要抓的是
+ *    **"装了旧版本"**，字节数足够。
+ */
+export type PackInstallState =
+  /** 正式文件不存在（可能有 .part 可续传） */
+  | "missing"
+  /** 有未完成的 `.part`，可续传 */
+  | "partial"
+  /** 已安装且与清单指纹一致 */
+  | "installed"
+  /** 已安装，但**与清单不一致** ⇒ 是上一版的数据，应标「需更新」而不是「已下载」 */
+  | "outdated";
+
+export function installStateOf(
+  pack: Pick<PackEntry, "bytes">,
+  status: PackFileStatus | undefined,
+): PackInstallState {
+  // ⚠️ 分两步写而不是 `!status?.exists`：后者不会让 TS 把 `status` 收窄成已定义，
+  //    下一行访问 `status.bytes` 会报 TS18048（实测踩到）。
+  if (!status) return "missing";
+  if (!status.exists) return (status.partBytes ?? 0) > 0 ? "partial" : "missing";
+  // 清单没记字节数时**不能**判定过期 —— 宁可显示"已下载"，也不要无凭据地催用户重下 155 MB
+  if (pack.bytes == null || !status.bytes) return "installed";
+  return status.bytes === pack.bytes ? "installed" : "outdated";
+}

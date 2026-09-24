@@ -109,7 +109,8 @@
 | 2 | 补抓换流站 + `frequency`（新类别 `--category converters`） | ✅ | 9 作业零失败块：**70 个换流站 / 115,322 个 way 带 frequency**（`frequency=0` 1,874 条） |
 | 3 | `is_dc` 三步判定 + `converter`/`cable` 图层 + 前端 | ✅ | **`is_dc=true` 线路 1,082 条**；8 个归档逐个断言「z<8 带 is_dc」**100%** |
 | 4 | 重建 7 包 + 核心区并逐个跑门禁 | ✅ | 7 包 **154.96 MB**、核心区 **7.12 MB**；`verify_power_only` ×2 + `verify_pack` **8/8 全绿** |
-| 5 | 清单重算 / 7 包重传 / 重打安装包 / 包指纹失效 | ⏭️ | **A3**（清单仍是 A1 那一版，指纹不符属预期） |
+| 5 | 清单重算 / 包指纹失效策略（G8） | ✅ | 清单已按 A2 产物重算；G8 用 `pack_status` 的 `bytes` 比对清单 ⇒ 过期包显示**「需更新」**而非「已下载」（零 Rust 改动） |
+| 6 | 7 包重传 + GEM 首传 + 重打安装包 | ⏭️ | 本机无 `gh`、无 token（`git push` 走凭据管理器）；命令与复核步骤见 `docs/PACKS_UPLOAD_RUNBOOK.md` |
 
 > ⚠️ **未复测项**：图层面板 1280×800 默认态溢出 —— 本次无浏览器/CDP 通道，
 > 只做了结构压缩（把"展开分级"箭头并进「输电线路」行，省 ~22px 抵消新增两个开关）。
@@ -509,14 +510,19 @@
 > 第 2 条起才是**功能推进**。按「投入产出比 × 风险」排序。
 
 1. **A3：电网数据发布**（阶段56-A3，🔴 紧随 A2）。
-   A2 已把数据与前端做完并验证（8 个归档全绿），但**产物还没发布**：
-   - `node scripts/gen_packs_manifest.mjs` 重算清单（`features` / `bytes` / `sha256` 全部变了）；
-   - 7 个 `osm-*.pmtiles` **重传**到 Release（`docs/PACKS_UPLOAD_RUNBOOK.md`）；
-     上传后必须跑 `node scripts/verify_packs.mjs --remote` 复核；
-   - 重打安装包（核心区归档已变：7.12 MB）；
-   - 包指纹失效策略（设计 §5.4 / G8）：前端拿 `pack_status` 返回的 `bytes` 与清单比对，
-     不一致就标「需更新」而不是「未安装」——**不改 Rust**。
-   - ⚠️ 顺带把第 2 条（`gem-plants.pmtiles` 从未上传）一起处理：都在同一个 Release 上。
+   数据、前端、清单、指纹策略都已完成并验证，**只剩"把产物推出去"这一步**：
+   - ✅ 已做：`node scripts/gen_packs_manifest.mjs` 重算清单（8 个包的新 `features`/`bytes`/`sha256`）；
+     包指纹失效策略（G8，见设计 §9.1）—— 过期包在设置页显示「需更新」+ 本机/清单字节数凭据，
+     一键更新复用既有原子替换下载。
+   - ⏭️ 待做：7 个 `osm-*.pmtiles` **重传** + `gem-plants.pmtiles` **首传**到 Release
+     （`docs/PACKS_UPLOAD_RUNBOOK.md`，三条路：`gh` CLI / 网页 / REST）；
+     上传后跑 `node scripts/verify_packs.mjs --remote` 复核（**当前基线 29 项问题**：
+     远端 7 个包全是旧版指纹、GEM 资产 404）；
+     然后重打安装包（核心区 7.12 MB）并跑 `check_release_redlines.mjs --with-exe`。
+   - ⚠️ 本机现状：**`gh` 未安装、无 `GITHUB_TOKEN`/`GH_TOKEN`**；`git push` 走的是凭据管理器
+     里已存的 GitHub 凭据（所以 REST 路线需要单独准备一个有 `Contents: write` 的 token）。
+   - ⚠️ 上传量约 **162 MB**，且是**对外发布**、不可撤回。
+
 
 2. **上传 `gem-plants.pmtiles`**（🔴 **当前唯一的功能性断点**）。
    阶段55 体检实测：Release `v1.0-packs`（建于 2026-09-14，早于阶段50 的 GEM 打包方案）

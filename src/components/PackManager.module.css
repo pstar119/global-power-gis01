@@ -104,7 +104,8 @@
 .badgeIdle,
 .badgeBusy,
 .badgeDone,
-.badgePart {
+.badgePart,
+.badgeOutdated {
   flex: none;
   min-width: 92px;
   padding: 2px 8px;
@@ -133,6 +134,15 @@
 .badgePart {
   border-color: #d7ba7d;
   color: #d7ba7d;
+}
+
+/* 阶段56-A3（设计 §5.4）：已安装但指纹与清单不符 —— 是上一版的数据。
+   与 badgePart（.part 未完成）用同一档"需要注意"的暖色，但**语义不同**：
+   那个是"没下完"，这个是"下过了、但下的是旧版"。 */
+.badgeOutdated {
+  border-color: #f59e0b;
+  color: #f59e0b;
+  font-weight: 600;
 }
 
 /* ---------- 按钮 ---------- */

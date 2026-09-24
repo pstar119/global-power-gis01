@@ -71,7 +71,7 @@ function WelcomeWizard({ api, onFinish }: WelcomeWizardProps) {
    */
   const stoppedRef = useRef(false);
 
-  const { packs, statuses, progress, phases, errors, bridgeOk, download, cancel } =
+  const { packs, statuses, progress, phases, errors, bridgeOk, stateOf, download, cancel } =
     api;
 
   /**
@@ -181,6 +181,16 @@ function WelcomeWizard({ api, onFinish }: WelcomeWizardProps) {
     const file = fileNameOf(pack);
     const st = statuses[file];
     const busy = phases[file] === "downloading";
+    /**
+     * 阶段56-A3（设计 §5.4）：`installedSet` 与这里的 `done` 仍然按**文件存在**判定，
+     * 只是把"过期"如实显示出来。
+     *
+     * ‼️ 为什么不在这里把过期包当作"没装"（从而进入下载队列）：
+     *    本向导的默认勾选是 `DEFAULT_SELECTED`（华东/华中/华南），一次升级会让
+     *    用户在**首启向导里被悄悄下载 58 MB**。设计 §5.4 要的是"标记需更新 + 提供重下"，
+     *    重下的正经入口是「设置 → 数据包管理」（那里给了逐包凭据与更新按钮）。
+     */
+    const outdated = stateOf(pack) === "outdated";
     const done = st?.exists || phases[file] === "done";
     const pr = progress[file];
     const err = errors[file];
@@ -202,7 +212,7 @@ function WelcomeWizard({ api, onFinish }: WelcomeWizardProps) {
               <span className={styles.prov}>{pack.provinces}</span>
             </span>
             <span className={styles.size}>
-              {pack.sizeMb ? `${pack.sizeMb} MB` : "—"}
+              {outdated ? "需更新" : pack.sizeMb ? `${pack.sizeMb} MB` : "—"}
             </span>
           </label>
         ) : (
@@ -213,7 +223,9 @@ function WelcomeWizard({ api, onFinish }: WelcomeWizardProps) {
             </span>
             <span className={styles.stateText}>
               {done
-                ? "已就绪"
+                ? outdated
+                  ? "需更新"
+                  : "已就绪"
                 : busy
                   ? `${(pr?.percent ?? 0).toFixed(1)}%`
                   : err

@@ -323,7 +323,34 @@ converter:  osm_id, name, operator, vclass, voltage_kv
 
 ### 8.4 本次**未**做（诚实清单）
 
-- §5.4 包指纹失效策略（G8）：按 R1 属 A3。
 - 面板 1280×800 溢出的浏览器实测（见 8.2 第 6 条）。
 - 任何 npm/cargo 新增依赖：**零新增**（红线保持）。
-- `packs_manifest.json` 重算与 7 包重传：A3。
+
+---
+
+## 9. 阶段56-A3（发布）—— 进行中
+
+| 步 | 内容 | 状态 |
+|---|---|---|
+| 1 | `node scripts/gen_packs_manifest.mjs` 重算清单 | ✅ 已重算（8 个包的新 `features`/`bytes`/`sha256`/`sizeMb`；区域包的 `features` 来自 `run_pipeline.mjs --stage prepare,build` 刷新的报表，即**合并后**要素数） |
+| 2 | 7 个 `osm-*.pmtiles` 重传 + `gem-plants.pmtiles` 首传 | ⏭️ 待做（`gh` CLI 未安装、无 token；见下） |
+| 3 | `verify_packs.mjs --remote` 复核 | ⏭️ 上传后必做（**当前基线**：29 项问题 —— 7 个包的远端指纹全是旧版、GEM 资产 404） |
+| 4 | §5.4 / G8 **包指纹失效策略** | ✅ 已实现（见 9.1） |
+| 5 | 重打安装包 + `check_release_redlines.mjs --with-exe` | ⏭️ 待做 |
+
+### 9.1 G8 的实现（零 Rust 改动）
+
+- `src/lib/packs.ts` 新增 `PackInstallState`（`missing` / `partial` / `installed` / **`outdated`**）
+  与纯函数 `installStateOf(pack, status)`：**拿 `pack_status` 已回传的 `bytes` 与清单的 `bytes` 比对**。
+- ⚠️ 判据是**字节数**不是 SHA256，两条别互相冒充：字节数不同 ⇒ 一定是不同版本；
+  字节数相同 ⇏ 内容相同（同长度不同内容会漏判）。不在这里比 SHA256 的理由是
+  8×30 MB 的哈希会卡渲染；而**下载路径本来就逐字节校验 SHA256**（`packs.rs` 只在长度+SHA256
+  都通过时才 rename），所以这里要抓的是"装了旧版本"，字节数足够。
+- `usePackDownloads` 暴露 `stateOf(pack)`；设置页「数据包管理」对过期包显示
+  **「需更新」徽标 + 本机/清单字节数凭据 + 更新按钮**（复用既有 `download()`：
+  成功即原子替换，失败时旧文件不动 —— `packs.rs` 的失败路径只删 `.part`）。
+- 首启向导**不**把过期包当作"没装"（否则一次升级会在向导里悄悄下 58 MB），
+  只在行上标「需更新」，重下的入口是设置页。
+- 实测基线（重算清单后 `verify_packs.mjs --remote`）：**用户目录与远端各 7 个包全部过期、
+  GEM 远端缺失 ⇒ UI 上应显示 7 个「需更新」+ 1 个「已下载」**。
+  ⚠️ 这条是**数值预期**，尚未在运行中的应用里点过（浏览器里没有 Tauri 桥，`pack_status` 不可用）。
