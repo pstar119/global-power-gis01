@@ -57,8 +57,8 @@
 已接入的能力：
 
 - **地图**：离线 PMTiles 底图 + 本地中文字形（无网络也能出中文地名）
-- **电网数据**：长三角真实 OSM 数据（22,380 条要素），本地切为 **7.49 MiB** PMTiles 随安装包分发
-  （阶段43 起核心区切片加入铁路 / 油气管道等非电力要素，体积由 4.68 MB 增至 7.49 MiB）
+- **电网数据**：长三角真实 OSM 数据（25,611 条**电力要素**），本地切为 **5.79 MiB** PMTiles 随安装包分发
+  （阶段56-A1 撤销了阶段43 加入的铁路/油气管道，体积由 7.49 MiB 回落）
 - **电厂数据**：WRI Global Power Plant Database（34,936 行，内置种子库，首次启动自动播种）
 - **GEM 发电设施**（阶段48-A 引入，阶段50 改为 PMTiles 数据包）：Global Energy Monitor
   的三份机组级 tracker（GCPT 煤电 / GOGPT 油气 / GBPT 生物质），
@@ -121,7 +121,7 @@
 | 资源 | 安装后位置 | 体积 |
 |---|---|---|
 | 离线底图 PMTiles | `maps\basemap.pmtiles` | 31.77 MB |
-| 长三角 OSM 电网切片 | `maps\osm_grid.pmtiles` | 7.49 MiB |
+| 长三角 OSM 电网切片 | `maps\osm_grid.pmtiles` | 5.79 MiB |
 | 数据种子库（仅 WRI 电厂 34,936 行） | `seed\global_power_gis.db` | 9.00 MB |
 
 > 种子库在阶段48-A 曾因 GEM 机组级数据从 7.76 MB 涨到 13.86 MB；**阶段50–51 把 GEM 移出种子库**
@@ -486,10 +486,11 @@ node scripts/fetch_basemap.mjs                   # 生成 src-tauri/resources/ma
 - **已内置真实数据**（不再是占位，阶段37–39 完成）：
   - **全球电厂 34,936 条** —— WRI Global Power Plant Database，入库于 `power_plants` 表
   - **全国 7 大区域电网数据包** —— OSM **纯电力要素**（线路 / 变电站 / 电厂）共
-    **430,969 个**、合计 **116.52 MB**，以 PMTiles 存于 `data/packs/osm-<region>.pmtiles`
+    **430,969 个**、合计 **123.15 MiB**，以 PMTiles 存于 `data/packs/osm-<region>.pmtiles`
     （**不进 Git**），前端按需加载。
-    ⚠️ 另有「**清单全要素**」口径 **815,728 个 / 163.25 MiB**（含铁路 / 油气管道等
-    非电力要素），二者统计的不是同一件事，**不可混用**（详见 `PROJECT_HANDOFF.md` §3.1）
+    ✅ 阶段56-A1：**只做电力** —— 铁路与油气管道已从数据与显示中整体撤销，
+    原先并列的「清单全要素 815,728」口径**随之作废**（现在只有电力要素一个口径）。
+    同一次改动还**扩容了电力属性**：`ref` / `operator` / `cables` / `wires` / `circuits` / `plant_output`。
 - 地图支持**按需加载**与**空间查询**：
   - 按需加载：z ≥ 6 且视口覆盖到该区域时才挂载，**最多同时 2 个**包，避免内存爆掉
   - 空间查询：按国家 / 燃料筛选，可限定「**当前视野**」（bbox 条件由 `nlq.ts` 写进 SQL）；
