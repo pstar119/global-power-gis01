@@ -67,6 +67,24 @@
 
 ## Task 1: `kp-kr` 数据面（power + converters → prepare → build）
 
+> ### ✅ 已完成（2026-09-25）—— 实测记录
+>
+> **三轮补齐**才拿到完整覆盖：第 1 轮 power 6 块 + converters 1 块被 504 打回（流水线按设计**拒绝出包**，
+> 状态 `fetch-incomplete`）；第 2 轮清到只剩 1 块（同时捞回电厂 2,634 → **5,357**，证明空洞是真缺失）；
+> 第 3 轮清零 ⇒ `status: ok`（power 30/30、converters 30/30）。
+>
+> | 项 | 实测 |
+> |---|---|
+> | 要素 | **15,863**（合并后 line 8,032 ← 合并前 8,806、substation 2,465、plant 5,361、**converter 5**） |
+> | 包体积 / 瓦片 | **4.51 MB** / 5,569 张；最大单瓦片 **174.7 KB**（< 500 KB）；封顶丢弃 0 |
+> | 长度守恒 | 0.000%；合并率仅 8.8%（邻国 OSM 切分粒度比国内粗） |
+> | 直流口径 | `frequency=="0"` 4 段 ⇒ **4 条直流线路**；端点接换流站 0；**frequency 覆盖 49.55%**（4,363/8,806 段） |
+> | frequency 直方图 | 60Hz 5,198 / 50Hz 154 / 0 12 —— 与韩国 60 Hz 电网的地理事实一致；朝鲜侧多无标注 |
+> | 门禁 | `verify_power_only`(geojson) PASS（`missing=(none)`，含 A2 的 frequency/is_dc 必查项）；`verify_power_only`(pmtiles) PASS；`verify_pack` **8 项全绿**，其中「z<8 线路带 is_dc」= **7,542/7,542 = 100%** |
+>
+> ⚠️ 数据产物在 `data/`、`public/osm/`（**均 gitignore**）⇒ 本任务没有可提交的代码/文档改动，
+> 结论以本表为准；口径数字等 T12 一并写进 README_OSM。
+
 **Files:**
 - 读：`scripts/run_pipeline.mjs`、`scripts/fetch_osm_power.py`、`scripts/prepare_osm_geojson.mjs`、`scripts/build_pmtiles.mjs`
 - 产物：`data/osm/kp-kr_power_*.geojson`、`data/osm/kp-kr_dc_tags.json`、`public/osm/kp-kr_power.geojson`、`data/packs/osm-kp-kr.pmtiles`
