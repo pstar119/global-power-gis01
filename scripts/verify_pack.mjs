@@ -116,15 +116,13 @@ async function main() {
 
   const results = [];
   /** 每个 ftype 实际出现过的属性键（用于校验属性白名单没漏字段） */
-  // 阶段43：新增 railway / pipeline（铁路干线、油气长输管道）。
-  // ⚠️ 这两类**没有 vclass**（它们没有电压概念），所以低级别瓦片里
-  //    它们的属性就只剩 `ftype`。断言只验证 z>=8 的专属属性。
+  // 阶段56-A1：铁路 / 管道两类已整体撤销（只做电力），故不再统计它们的属性。
+  // ⚠️ 低级别瓦片里所有 ftype 的属性都被收敛成 `{ftype, vclass}`，
+  //    所以本断言只验证 z>=8 的专属属性。
   const keysByType = {
     line: new Set(),
     substation: new Set(),
     plant: new Set(),
-    railway: new Set(),
-    pipeline: new Set(),
   };
   /** ‼️ 解码失败必须计数而不能静默跳过 —— 阶段42 的「假断言」就是静默跳过造成的 */
   let decodeFailed = 0;
@@ -324,29 +322,60 @@ async function main() {
   //    只表现为前端的某个字段永远不出现（plant_source 就是这样丢了很久）。
   //    光看「构建 exit=0」永远发现不了，必须在这里把期望的属性钉死。
   const expectProp = {
-    line: "line_kind",
-    substation: "substation_kind",
-    plant: "plant_source",
-    // 阶段43：铁路只看 railway_kind（与 prepare 的 KEEP_PROPS 一一对应）；
-    // 管道看 substance（这是唯一能区分 gas / oil 的字段）
-    railway: "railway_kind",
-    pipeline: "substance",
+    line: ["line_kind"],
+    substation: ["substation_kind"],
+    plant: ["plant_source"],
+  };
+  /**
+   * 阶段56-A1：扩容属性的**存在性**断言。
+   *
+   * 为什么要单独一条而不能直接钉死每个字段：这些属性的覆盖率差异极大
+   * （实测华东包 line 上 cables 38% / circuits 18% / operator 3% / ref 0.2%），
+   * 抽样瓦片里某个字段恰好全缺席是正常的 ⇒ 钉死会造成**假失败**。
+   * 但"一个都没出现"就必须报错 —— 那说明 `keepProps` 又漏了字段
+   * （阶段42 的 plant_source 就是这么静默消失的）。
+   */
+  const expandProp = {
+    line: ["cables", "circuits", "operator", "ref"],
+    plant: ["plant_output"],
   };
   if (results.some((r) => r.z >= 8)) {
     const missing = [];
-    for (const [ftype, key] of Object.entries(expectProp)) {
+    for (const [ftype, keys] of Object.entries(expectProp)) {
       const seen = keysByType[ftype];
       if (seen.size === 0) continue; // 该 ftype 没抽样到，不做判断，避免误报
-      if (!seen.has(key)) missing.push(`${ftype}.${key}`);
+      for (const key of keys) if (!seen.has(key)) missing.push(`${ftype}.${key}`);
     }
     checks.push({
-      断言: "z>=8 的瓦片保留了各 ftype 的专属属性（line_kind / substation_kind / plant_source / railway_kind / substance）",
+      断言: "z>=8 的瓦片保留了各 ftype 的专属属性（line_kind / substation_kind / plant_source）",
       实测: Object.entries(expectProp)
-        .map(([t, k]) =>
-          keysByType[t].size === 0 ? `${t}:未抽样到` : `${t}:${keysByType[t].has(k) ? "有" : "缺"}${k}`,
+        .map(([t, ks]) =>
+          keysByType[t].size === 0
+            ? `${t}:未抽样到`
+            : `${t}:${ks.map((k) => (keysByType[t].has(k) ? `有${k}` : `缺${k}`)).join("/")}`,
         )
         .join("  "),
       通过: missing.length === 0,
+    });
+
+    const expandMiss = [];
+    for (const [ftype, keys] of Object.entries(expandProp)) {
+      const seen = keysByType[ftype];
+      if (seen.size === 0) continue;
+      const hit = keys.filter((k) => seen.has(k));
+      if (hit.length === 0) expandMiss.push(`${ftype}.(${keys.join("|")})`);
+    }
+    checks.push({
+      断言: "z>=8 的瓦片至少命中一个扩容属性（阶段56-A1 的属性扩容确实进了归档）",
+      实测: Object.entries(expandProp)
+        .map(([t, keys]) => {
+          const seen = keysByType[t];
+          if (seen.size === 0) return `${t}:未抽样到`;
+          const hit = keys.filter((k) => seen.has(k));
+          return `${t}:${hit.length ? `命中 ${hit.join(",")}` : "一个都没命中"}`;
+        })
+        .join("  "),
+      通过: expandMiss.length === 0,
     });
   }
 
