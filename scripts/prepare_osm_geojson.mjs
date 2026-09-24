@@ -78,28 +78,31 @@ const cfg = parseArgs(process.argv.slice(2));
  *    两处都改才算改完 —— 阶段42 就是因为只改了这一处，导致 plant_source
  *    在切片时被静默丢掉（打包后前端拿不到该字段，而校验脚本当时假装通过）。
  *    新增 ftype 时请同时检查 `build_pmtiles.mjs`。
+ *
+ * 阶段56-A1（2026-09-24）两处改动：
+ *   ① 删除 `railway` / `pipeline`（铁路与油气管道整体撤销，用户决定只做电力）；
+ *   ② **扩容电力属性**：这些都是抓取阶段早就拿到、却被本白名单丢掉的字段
+ *      （`ref` / `operator` / `cables` / `wires` / `circuits` / `plant_output`），
+ *      所以扩容是**零抓取成本**的 —— 中间产物里本来就有，重跑本脚本即可生效。
+ *      ⚠️ 不要往这里加 `frequency`：A1 **不重抓**，本轮产物里根本没有它，
+ *         加了只会让校验脚本报"属性缺失"的假失败（它属 A2 的补抓范围）。
  */
 const KEEP_PROPS = {
-  line: ["osm_id", "name", "vclass", "voltage_kv", "line_kind"],
-  substation: ["osm_id", "name", "vclass", "voltage_kv", "substation_kind"],
-  plant: ["osm_id", "name", "vclass", "voltage_kv", "plant_source"],
-  // 阶段43：铁路干线（railway=rail，已排除 service 侧线与城市轨道）
-  railway: ["osm_id", "name", "railway_kind", "usage"],
-  // 阶段43：油气长输管道（man_made=pipeline 且 substance=gas|oil）
-  pipeline: ["osm_id", "name", "substance"],
+  line: ["osm_id", "name", "ref", "operator", "vclass", "voltage_kv", "line_kind", "cables", "wires", "circuits"],
+  substation: ["osm_id", "name", "operator", "vclass", "voltage_kv", "substation_kind"],
+  plant: ["osm_id", "name", "vclass", "voltage_kv", "plant_source", "plant_output"],
 };
 
 /**
- * 输入文件表。`power: true` 的条目参与电压分档，缺 `vclass` 会被补成 unknown；
- * 铁路/管道没有电压概念，**不参与**分档 —— 否则电压直方图会被这两种要素污染，
- * 而且「缺 vclass」这个信号本来专门用来标记缺 voltage 标签的电力要素。
+ * 输入文件表。`power: true` 的条目参与电压分档，缺 `vclass` 会被补成 unknown。
+ *
+ * 阶段56-A1：只剩电力三类。铁路/管道两条已删除 —— 它们的中间产物仍留在 `data/osm/`
+ * 作为历史记录，但**不再进入归档**（本表是唯一的入口，删掉即彻底不参与）。
  */
 const FILES = [
   { ftype: "line", src: (n) => `${n}_power_lines.geojson`, power: true },
   { ftype: "substation", src: (n) => `${n}_power_substations.geojson`, power: true },
   { ftype: "plant", src: (n) => `${n}_power_plants.geojson`, power: true },
-  { ftype: "railway", src: (n) => `${n}_rail.geojson`, power: false },
-  { ftype: "pipeline", src: (n) => `${n}_pipeline.geojson`, power: false },
 ];
 
 const round6 = (n) => Math.round(n * 1e6) / 1e6;
