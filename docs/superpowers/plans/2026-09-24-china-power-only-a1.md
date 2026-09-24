@@ -448,7 +448,8 @@ plant:      ["osm_id", "name", "vclass", "voltage_kv", "plant_source", "plant_ou
 ```powershell
 & "D:\Node,js\node.exe" scripts/verify_power_only.mjs data/packs/osm-huadong.pmtiles
 ```
-Expected：`forbidden ftypes: (none)`、`verdict: PASS`。
+Expected（按修订版脚本对归档的输出）：`archive: readback ok=<n> missing=<m> gridTiles=<k> z0-12`（`ok>0` 且 `gridTiles>0`）、`verdict: PASS`。
+⚠️ 归档分支**不打印** `forbidden ftypes` 的结论（归档内所有 ftype 同在 `grid` 层）—— 内容门禁在 Step 3 之外的 Task 3（GeoJSON）。
 
 - [ ] **Step 4: 跑既有包体检，确认切片参数未被破坏**
 
@@ -507,7 +508,9 @@ Expected：两条命令退出码均为 0。
 
 用既有 CDP 手法打开 dev/预览页，检查：
 - 图层面板只剩「电力设施 / 环境与底图」两组，且「电力设施」里无铁路/管道项；
-- 地图上不再出现灰色铁路线与粉色管道线（放大到长三角 z10 对比 Task 5 前的截图）；
+- **地图上不再出现**灰色铁路线与粉色管道线（放大到长三角 z10）。
+  ⚠️ 本步骤验证的是**界面不再呈现**（图层已删）；**数据层面**的"包内不再含铁路/管道"由 **Task 6** 重建归档后断言
+  （本任务的归档仍是旧数据，因此这里看不到"数据变化"是**预期**，不是失败）；
 - 1280×800 默认态面板**不溢出**（`clientHeight === scrollHeight`）。
 
 - [ ] **Step 5: 提交**
