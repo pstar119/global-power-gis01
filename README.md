@@ -4,6 +4,20 @@
 
 ## 当前阶段
 
+**阶段55 —— 发布前体检：发现「GEM 包从未上传」，并补上数据包校验**（2026-09-18，v0.2.0）
+
+- 🔴 体检实测：Release `v1.0-packs` **只有 7 个区域包，`gem-plants.pmtiles` 从未上传**，
+  而清单照样给它写了下载地址 ⇒ **新装用户点「GEM Plants」必然失败**
+  （开发机复现不了：本机那个文件是脚本**投放**的，不是下载来的）。
+  ⏳ **待执行：上传该资产**（手册：[`docs/PACKS_UPLOAD_RUNBOOK.md`](./docs/PACKS_UPLOAD_RUNBOOK.md)）
+- 🆕 `scripts/verify_packs.mjs` —— 清单 vs **本地磁盘** vs **远端 Release 资产**三方校验；
+  「缺哪个包」直接点名。**发布前必跑**，见下方「文档约定」
+- 🆕 `docs/PACKS_UPLOAD_RUNBOOK.md` —— 数据包上传与复核手册（gh CLI / 网页 / REST 三条路）
+- 清掉 `bundle\nsis\` 里阶段50 遗留的 `0.1.0` 安装包，并重打 0.2.0
+  （对齐上一阶段漏进产物的 `lang="zh-CN"`）
+
+### 阶段54（上一阶段）
+
 **阶段54 —— 修补批次：权限收敛 / 图层溢出 / 投放脚本 / 文档治本**（2026-09-18，v0.2.0）
 
 本阶段做了什么（都是「修补」，不是新功能）：
@@ -30,6 +44,7 @@
 |---|---|
 | 当前提交、领先/落后 origin 几个提交 | `D:\Git\cmd\git.exe log --oneline -3`（见 `PROJECT_HANDOFF.md` §9） |
 | 本机装了哪些数据包 | `node scripts/install_packs.mjs --list` |
+| **数据包是否真的都在远端**（清单说得对 ≠ 用户下得到） | `node scripts/verify_packs.mjs --remote` |
 | 构建产物的版本与体积 | `Get-ChildItem src-tauri\target\release\bundle\nsis\*.exe \| Select-Object Name,Length,LastWriteTime` |
 | 工具链绝对路径 | 见 `PROJECT_HANDOFF.md` §9 的环境自检 |
 
@@ -120,6 +135,19 @@
 | MapLibre source | `gem-pmtiles` —— **PMTiles vector source**（`pmtiles://` 协议） |
 | `source-layer` | `gem` |
 | MapLibre layer | `gem-plants` —— 单一 circle 图层，**默认关闭** |
+
+> 🔴 **阶段55 体检发现（已知断点，随手可修）**：`gem-plants.pmtiles` **从未上传到
+> Release `v1.0-packs`**（该 Release 建于 2026-09-14，早于阶段50 的 GEM 打包方案，
+> 此后只补过 7 个区域包）。而清单照样给它写了 `downloadUrl`，所以
+> **新装用户点「GEM Plants」会去下载一个不存在的文件**。
+>
+> 这个断点**在开发机上永远复现不了**：本机的 `gem-plants.pmtiles` 是
+> `install_packs.mjs --user-dir` **投放**的，不是下载来的。
+>
+> - 现查：`node scripts/verify_packs.mjs --remote`（会直接点名缺哪个资产）
+> - 修法：见 [`docs/PACKS_UPLOAD_RUNBOOK.md`](./docs/PACKS_UPLOAD_RUNBOOK.md)
+> - ✅ **上传后请删掉本条**（含 `PROJECT_HANDOFF.md` §8 的对应条目）——
+>   它记录的是一个**待修状态**，修好之后留着就是过期信息。
 
 **三项全离线**：底图与电网切片来自安装目录（本地 `asset` 协议）、电厂数据来自 SQLite 种子库
 （首启播种到 `%APPDATA%\com.pstar119.globalpowergis\global_power_gis.db`）、自然语言查询走本机 Ollama。
