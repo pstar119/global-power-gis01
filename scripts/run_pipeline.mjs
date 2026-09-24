@@ -57,8 +57,23 @@ const DEFAULT_STAGES = ["fetch", "prepare", "build"];
  */
 const CATEGORY_INFO = {
   power: { label: "电力", metaFile: (n) => `${n}_power_meta.json`, grid: "region" },
-  rail: { label: "铁路干线", metaFile: (n) => `${n}_rail_meta.json`, grid: "region" },
-  pipeline: { label: "油气管道", metaFile: (n) => `${n}_pipeline_meta.json`, grid: "coarse" },
+  /**
+   * 阶段56-A2/B：**补抓通道**（换流站 + `frequency`）—— 与 `power` 一样按区域网格切块。
+   *
+   * ‼️ 为什么它必须进这张表：项目 B 的邻国包要与 A2 之后的国内包**同构**
+   *    （换流站点层 / 海底电缆 / 直交流分档）。而 `frequency` 只能靠这一类补抓拿到
+   *    （`power` 那一轮抓不到它：A1 的产物里没有这个键）。
+   *    ⇒ 邻国区域的正确命令是：`--regions kp-kr --category power,converters`
+   *      （只跑 `--category power` 会得到**没有直流分档**的包，而且不报错）。
+   *
+   * ⚠️ 断点/产物按类别完全隔离（`<name>_converters_progress.json` / `_dc_tags.json`），
+   *    所以补抓这一类**不会**碰 power 的既有产物。
+   */
+  converters: { label: "换流站 + 直流标签", metaFile: (n) => `${n}_converters_meta.json`, grid: "region" },
+  // 阶段56-A1 把铁路与油气管道整体撤销（用户决定只做电力）——
+  // 这里的两条随之删除。‼️ 它们此前是**死配置**：`fetch_osm_power.py` 早已不接受
+  // `--category rail|pipeline`，而本表还留着它们、帮助文本也照旧宣传 ⇒
+  // 谁按帮助敲一次 `--category rail` 都会在抓取阶段拿到一个与根因无关的报错。
 };
 /** `coarse` 策略的目标块边长（度）。9° -> 约 80 deg²/块，实测外推单块 < 90 秒 */
 const COARSE_CHUNK_DEG = 9;
@@ -95,6 +110,15 @@ function parseArgs(argv) {
      */
     maxFeaturesPerTile: 20000,
     capBelowZoom: 8,
+    /**
+     * 阶段56-B：转发给 `fetch_osm_power.py` 的 `--endpoint`。
+     *
+     * ‼️ 为什么驱动必须能转发它：抓取脚本的默认端点表里 `maps.mail.ru` 排第一，
+     *    而本机对它要么 TLS 校验失败、要么回 504 —— 每块都要先白等一轮退避
+     *    （实测 30 块的批次白等 ~30 分钟，131 块的更久）。
+     *    实测可用的是 `overpass-api.de`，所以跑批量时应当显式指定。
+     */
+    endpoint: null,
     dryRun: false,
     force: false,
   };
@@ -117,6 +141,7 @@ function parseArgs(argv) {
     } else if (a === "--scan-factor") cfg.scanFactor = Number(next());
     else if (a === "--pack-dir") cfg.packDir = next();    else if (a === "--max-features-per-tile") cfg.maxFeaturesPerTile = Number(next());
     else if (a === "--cap-below-zoom") cfg.capBelowZoom = Number(next());    else if (a === "--report") cfg.reportPath = next();
+    else if (a === "--endpoint") cfg.endpoint = next();
     else if (a === "--dry-run") cfg.dryRun = true;
     else if (a === "--force") cfg.force = true;
     else if (a === "-h" || a === "--help") {
@@ -126,10 +151,10 @@ function parseArgs(argv) {
           "",
           "  --regions a,b   只跑指定批次（默认全部，按密度递减顺序）",
           "  --category <list>  抓取类别，逗号分隔。默认 power",
-          "                     power    电力设施（线路/变电站/电厂）",
-          "                     rail     铁路干线（railway=rail 且无 service，不含地铁轻轨）",
-          "                     pipeline 油气管道（man_made=pipeline 且 substance=gas|oil）",
-          "                     ‼️ 各类别产物/断点/meta 完全隔离，可单独重跑某一类而不碰其他类",
+          "                     power       电力设施（线路/变电站/电厂）",
+          "                     converters  换流站 + frequency（直流判定所需的补抓通道）",
+          "                     ‼️ 两类产物/断点/meta 完全隔离，可单独重跑某一类而不碰其他类",
+          "                     ⚠️ 要得到**带直流分档**的包，必须写 --category power,converters",
           "  --stage s1,s2   要执行的阶段：fetch,prepare,build,scan（默认 fetch,prepare,build）",
           "                  不加 scan：实测它只快 ~1.5x 却换不到数据，直接抓更划算",
           "  --target-cell   目标块尺寸 lonxlat（默认对齐华东实测 1.1875x1.9375）",
@@ -138,6 +163,9 @@ function parseArgs(argv) {
           "  --max-features-per-tile <n>  低级别单瓦片要素封顶（默认 20000；0 = 关闭）",
           "  --cap-below-zoom <n>  只对低于该级别的瓦片封顶（默认 8）",
           "  --report        报表 JSON 路径（默认 data/packs/pipeline_report.json）",
+          "  --endpoint <url> 转发给抓取脚本的 Overpass 端点（可逗号分隔多个）",
+          "                   ⚠️ 默认表里第一个端点（maps.mail.ru）在本机不可用，批量抓取请显式指定",
+          "                   例如 --endpoint https://overpass-api.de/api/interpreter",
           "  --dry-run       只打印命令，不执行",
           "  --force         即使抓取有失败块也继续切片（默认拒绝，避免出带空洞的包）",
           "",
@@ -410,6 +438,8 @@ async function processRegion(region, cfg, report) {
           "--grid", `${g.cols}x${g.rows}`,
           "--name", name,
           "--category", cat,
+          // 阶段56-B：`--endpoint` 未指定时不传（保持抓取脚本自己的默认端点表）
+          ...(cfg.endpoint ? ["--endpoint", cfg.endpoint] : []),
         ],
         logFile,
       );
@@ -563,6 +593,7 @@ async function main() {
           const g = gridForCategory(r, cat, cfg.target);
           console.log(
             `  ${PY} -u scripts/fetch_osm_power.py --bbox ${bboxStr} --grid ${g.cols}x${g.rows} --name ${r.key} --category ${cat}` +
+              (cfg.endpoint ? ` --endpoint ${cfg.endpoint}` : "") +
               `   # ${CATEGORY_INFO[cat].label}，${g.cols * g.rows} 块`,
           );
         }

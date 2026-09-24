@@ -272,3 +272,59 @@ const regionPacks = useMemo(() => packs.filter((p) => p.kind !== "gem"), [packs]
 **无。** 本设计内所有取舍均已在 2026-09-24 的对话中由用户拍板（§2 决策表）。
 余下需要"实测后才写数字"的位置（底图包体积、字形增量、实际抓取时长）已在文中显式标注为**实测项**，
 它们不改变设计形状，只影响文档中的数字。
+
+---
+
+## 10. 实施前复核（2026-09-25，项目 A 完成之后）
+
+> 按 §9 上方"口径变更通告"的要求，在 A（含 A2 直流分档）完成后把本文档逐条对回代码。
+> 结论：**形状不变**，但有 **3 处必须修订**（其中 2 处是 A1/A2 之后新出现的）。
+
+### 10.1 仍然成立（已核实到代码/实测）
+
+| 项 | 核实结果 |
+|---|---|
+| §3.1 批次表与 bbox | ✅ 已写入 `pipeline_regions.mjs`；`gridFor()` 按国内实测块尺寸自动算出的网格与表中 **6×5 / 27×6 / 15×12 / 34×11 / 55×7 逐一一致** |
+| §3.3 切片参数 | ✅ `run_pipeline.mjs` 默认 `maxFeaturesPerTile 20000` + `capBelowZoom 8`，与国内区域包同参 |
+| §3.3 清单不手改 | ✅ `gen_packs_manifest.mjs` 读 `REGIONS` 自动纳入（⚠️ 但见 10.2 第 3 条：**别在包还没生成时先重算清单**） |
+| §4.1 底图命令 | ✅ `fetch_basemap.mjs` 确实支持 `--bbox/--global-maxzoom/--region-minzoom/--region-maxzoom/--out`，且默认源就是 `https://build.protomaps.com/20260912.pmtiles` |
+| §5 运行时的三处必改 | ✅ 三处反模式都还在（`packs.ts` 的 `PackKind` 两态、`WelcomeWizard.tsx` 的 `p.kind !== "gem"`、`MapPage.tsx` 选举的 `!isThematicOverlay(p)`），改法照本文档执行即可 |
+| §5.4 不需要改的 | ✅ 依旧成立（Rust/asset 白名单/下载链路/安装包体积都与品类无关） |
+| §7.1 验收脚本 | ✅ 全部现成；**另加** A2 的两条既有断言（见 10.2 第 2 条） |
+| 上传 10 个新包 | ✅ 已就绪：`scripts/upload_packs.mjs` **读清单驱动**，新包自动纳入，无需改脚本 |
+
+### 10.2 必须修订的三处
+
+**① 口径（已由通告处理）** —— §2 决策表第 2 条的"电力 + 铁路 + 管道"作废，全部按**纯电力**。
+
+**② ‼️ 邻国包必须跑 `--category converters`（本文档写它时还没有 A2）**
+
+- A2 之后，"邻国包与国内同构"的含义**多了一层**：不只属性扩容，还要有
+  **换流站点层 / 海底电缆 / `is_dc` 直交流分档**。
+- 而 `frequency`（直流判定唯一的硬信号）**不在 `power` 那一轮的产物里**，只能靠
+  `--category converters` 补抓（A2 新增的类别，产物 `<name>_dc_tags.json`）。
+- ⇒ 正确命令：`node scripts/run_pipeline.mjs --regions <key> --category power,converters`
+  （只写 `--category power` 会得到**没有直流分档**的包，**而且不报错**）。
+- 已同步修掉两处**A1 遗留死代码**：`run_pipeline.mjs` 的 `CATEGORY_INFO` 里
+  `rail` / `pipeline` 两条（`fetch_osm_power.py` 早已不接受这两个类别，帮助文本却还在宣传）
+  已删除，并新增 `converters` 条目 —— 后者正是项目 B 需要的那个类别。
+- **工期要跟着加**：converters 按区域网格切块（kp-kr 30 / mn 162 / sea-mainland 180 /
+  ca 374 / ru-far 385，共 **1,131 块**）。单块结果集极小、实测约 10–20 秒/块 ⇒
+  约 **+3–6 小时**（原表 15.8 小时是只算 `power` 的）。
+- **验收要跟着加**（两条 A2 的既有断言同样适用于邻国包）：
+  `verify_pack.mjs` 的「**z<8 的线路要素带 `is_dc`**」（否则低缩放直流配色静默失效）
+  与 `verify_power_only.mjs` 的 `frequency` 必查项（它按同区域 `dc_tags` 是否存在自动启用）。
+
+**③ ⚠️ 别在邻国包生成之前重算清单**
+
+- `REGIONS` 一旦加了 5 条（本次已加），`gen_packs_manifest.mjs` 就会为它们生成条目；
+  而包文件还不存在时，条目会是 `bytes/sha256/downloadUrl = null`（脚本会沿用旧清单的指纹，
+  但新区域没有旧条目）⇒ **已发布的中国用户会看到 5 个"点不动的未下载区域"**。
+- ⇒ 顺序必须是：**先抓取+切片出包 → 再重算清单 → 再上传**（与 §8 交付顺序一致）。
+
+### 10.3 修订后的交付顺序（其余照 §8）
+
+1. `kp-kr`：`--category power,converters` → prepare → build（**已启动**）→ 底图包 → 清单 → 向导 → 地图；
+2. `mn` → `sea-mainland` → `ca` → `ru-far`；
+3. 字形多族与运行时三处改动随第 1 步一起落地；
+4. 全部完成后：重算清单 → `upload_packs.mjs` 上传 10 个新包 → 跑 §7.1 全部验收 + README/PROJECT_HANDOFF 同步。
