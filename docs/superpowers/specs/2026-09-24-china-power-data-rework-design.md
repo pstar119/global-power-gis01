@@ -336,7 +336,11 @@ converter:  osm_id, name, operator, vclass, voltage_kv
 | 2 | 7 个 `osm-*.pmtiles` 重传 + `gem-plants.pmtiles` 首传 | ✅ 已完成（`node scripts/upload_packs.mjs`，2026-09-24，共 162 MB；每包 `.stage`→校验→删旧→改名，无缺失窗口） |
 | 3 | `verify_packs.mjs --remote` 复核 | ✅ **远端段 8/8 全绿**（GEM 从"不存在"变为一致；修复前基线为 29 项问题）。⚠️ 该命令同时查**本机用户目录**，本机 7 个旧包仍报不符 ⇒ 退出码非 0，属预期（正是 G8 的场景） |
 | 4 | §5.4 / G8 **包指纹失效策略** | ✅ 已实现（见 9.1） |
-| 5 | 重打安装包 + `check_release_redlines.mjs --with-exe` | 🔄 进行中（核心区 7.12 MB） |
+| 5 | 重打安装包 + `check_release_redlines.mjs --with-exe` | ✅ 已完成：`Global Power GIS_0.2.0_x64-setup.exe` = **48,128,414 B / 45.90 MiB**（红线 50 MB）；`--with-exe` 自检通过 |
+
+> 阶段56-A3 收尾时的**意外观察**：核心区归档从 7.02 → **7.12 MB（+0.10）**，而安装包却从
+> 46.12 → **45.90 MiB（−0.22）**。⇒ 再次印证 PROJECT_HANDOFF 里那条"体积归因"教训：
+> **不能用单个资源的增量去推安装包增量**（NSIS 走 LZMA，压缩率与内容重复度强相关）。
 
 ### 9.1 G8 的实现（零 Rust 改动）
 
