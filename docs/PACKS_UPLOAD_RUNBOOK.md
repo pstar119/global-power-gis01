@@ -39,9 +39,31 @@ node scripts/verify_packs.mjs --remote
 
 ---
 
-## 2. 上传（三条路，任选一条）
+## 2. 上传（四条路，任选一条）
 
-### 路线 A：`gh` CLI（推荐，可复现）
+### 路线 A（**推荐**）：`node scripts/upload_packs.mjs` —— 自带「先传后删」与自校验
+
+```powershell
+# 先看计划（只发 GET，不写任何东西）
+node scripts/upload_packs.mjs --dry-run
+
+# 真上传（8 个包：7 区域 + GEM），会问一次确认；脚本化时加 --yes
+node scripts/upload_packs.mjs
+```
+
+为什么它是首选（都是踩过/推演出来的坑，不是风格偏好）：
+
+- **替换资产必须「先删后传」**（GitHub 不允许同名覆盖）⇒ 直接删旧再传新，中间任何失败
+  都会让用户拿到 **404**，比"留着旧版"糟得多。本脚本改成
+  **上传为 `<name>.stage` → 校验远端 `size` + `digest`(sha256) → 删旧 → PATCH 改回正式名**，
+  全程**不存在**资产缺失的窗口；中途失败时正式名资产保持原样，可原样重跑。
+- **上传前先拿本地文件的 sha256 与清单比对**，不一致就拒发 —— 挡住"改完数据忘了重算清单"
+  （用户侧表现为 CHECKSUM_MISMATCH，极难排查）。
+- 传完自动复核远端 `size` + `digest`，不拿"网页上出现了文件名"当证据。
+- token 来源：`$env:GITHUB_TOKEN`，没有就回退 `git credential fill`（本机凭据管理器里那条
+  带 `repo` 权限的 classic OAuth 已验证可用）。**脚本从不打印 token。**
+
+### 路线 A'：`gh` CLI（想手工传单个文件时）
 
 ```powershell
 # 一次性：安装 + 登录（浏览器授权）
@@ -52,6 +74,9 @@ gh auth login
 gh release upload v1.0-packs "data/packs/gem-plants.pmtiles" `
   --repo pstar119/global-power-gis01
 ```
+
+> ⚠️ `--clobber` 同样是"先删后传" —— 33 MB 的包传到一半断了，资产就**没了**。
+> 批量替换请走路线 A。
 
 ### 路线 B：网页（不想装 CLI 时）
 
@@ -64,7 +89,7 @@ gh release upload v1.0-packs "data/packs/gem-plants.pmtiles" `
 >
 > ⚠️ 走网页时**不要**在 Edit 里顺手删掉别的资产 —— 该 Release 还托管着 7 个区域包。
 
-### 路线 C：REST API（有 PAT 时，脚本化）
+### 路线 C：REST API 裸命令（有 PAT 时，脚本化）
 
 ```powershell
 # 需要 upload 权限的 token（classic PAT 勾 repo，或 fine-grained 勾 Contents: Read and write）
@@ -81,6 +106,21 @@ Invoke-RestMethod -Method Post -Uri $url `
   -Headers @{ Authorization = "Bearer $env:GITHUB_TOKEN"; "User-Agent" = "gpgis"; "Content-Type" = "application/octet-stream" } `
   -InFile "data/packs/gem-plants.pmtiles"
 ```
+
+> ⚠️ 裸命令只能**新增**；要**替换**同名资产必须先 `DELETE .../releases/assets/<id>`，
+> 于是又落回"先删后传"的窗口问题 —— 替换场景请走路线 A。
+
+### 阶段56-A3 的实测记录（2026-09-24）
+
+用路线 A 一次性完成 **7 个区域包替换 + GEM 首传**（共 162 MB）：
+
+- 每个资产：`.stage` 上传 → 远端 `size` 与 `digest` 与清单 sha256 逐位吻合 → 删旧 → 改名；
+- 传后复核：**8/8 全部 ✅**，无 `.stage` 残留；
+- `node scripts/verify_packs.mjs --remote`：**远端段 8/8 全绿**（GEM 从"不存在"变为一致）；
+- ⚠️ 该命令的**退出码仍可能非 0**，因为它同时校验**本机用户目录**里的旧包 ——
+  实测本机 `%APPDATA%\...\packs\` 里 7 个区域包仍是上一版（这正是设计 §5.4 / G8 要标
+  「需更新」的场景）。本机要与远端一致，用应用内的「设置 → 数据包管理 → 更新」，
+  或 `node scripts/install_packs.mjs`（本地投放脚本）。
 
 ---
 

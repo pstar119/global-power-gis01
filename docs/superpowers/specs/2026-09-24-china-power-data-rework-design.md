@@ -333,10 +333,10 @@ converter:  osm_id, name, operator, vclass, voltage_kv
 | 步 | 内容 | 状态 |
 |---|---|---|
 | 1 | `node scripts/gen_packs_manifest.mjs` 重算清单 | ✅ 已重算（8 个包的新 `features`/`bytes`/`sha256`/`sizeMb`；区域包的 `features` 来自 `run_pipeline.mjs --stage prepare,build` 刷新的报表，即**合并后**要素数） |
-| 2 | 7 个 `osm-*.pmtiles` 重传 + `gem-plants.pmtiles` 首传 | ⏭️ 待做（`gh` CLI 未安装、无 token；见下） |
-| 3 | `verify_packs.mjs --remote` 复核 | ⏭️ 上传后必做（**当前基线**：29 项问题 —— 7 个包的远端指纹全是旧版、GEM 资产 404） |
+| 2 | 7 个 `osm-*.pmtiles` 重传 + `gem-plants.pmtiles` 首传 | ✅ 已完成（`node scripts/upload_packs.mjs`，2026-09-24，共 162 MB；每包 `.stage`→校验→删旧→改名，无缺失窗口） |
+| 3 | `verify_packs.mjs --remote` 复核 | ✅ **远端段 8/8 全绿**（GEM 从"不存在"变为一致；修复前基线为 29 项问题）。⚠️ 该命令同时查**本机用户目录**，本机 7 个旧包仍报不符 ⇒ 退出码非 0，属预期（正是 G8 的场景） |
 | 4 | §5.4 / G8 **包指纹失效策略** | ✅ 已实现（见 9.1） |
-| 5 | 重打安装包 + `check_release_redlines.mjs --with-exe` | ⏭️ 待做 |
+| 5 | 重打安装包 + `check_release_redlines.mjs --with-exe` | 🔄 进行中（核心区 7.12 MB） |
 
 ### 9.1 G8 的实现（零 Rust 改动）
 

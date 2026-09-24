@@ -110,11 +110,15 @@
 | 3 | `is_dc` 三步判定 + `converter`/`cable` 图层 + 前端 | ✅ | **`is_dc=true` 线路 1,082 条**；8 个归档逐个断言「z<8 带 is_dc」**100%** |
 | 4 | 重建 7 包 + 核心区并逐个跑门禁 | ✅ | 7 包 **154.96 MB**、核心区 **7.12 MB**；`verify_power_only` ×2 + `verify_pack` **8/8 全绿** |
 | 5 | 清单重算 / 包指纹失效策略（G8） | ✅ | 清单已按 A2 产物重算；G8 用 `pack_status` 的 `bytes` 比对清单 ⇒ 过期包显示**「需更新」**而非「已下载」（零 Rust 改动） |
-| 6 | 7 包重传 + GEM 首传 + 重打安装包 | ⏭️ | 本机无 `gh`、无 token（`git push` 走凭据管理器）；命令与复核步骤见 `docs/PACKS_UPLOAD_RUNBOOK.md` |
+| 6 | 7 包重传 + GEM 首传 | ✅ | 2026-09-24 用 `node scripts/upload_packs.mjs` 一次传完（162 MB）：远端 8/8 与清单 `size`+`digest` 逐位吻合；`verify_packs.mjs --remote` **远端段全绿**（GEM 从 404 变为一致） |
+| 7 | 重打安装包 | 🔄 | `tauri build` 进行中（核心区 7.12 MB）；完成后跑 `check_release_redlines.mjs --with-exe` |
 
 > ⚠️ **未复测项**：图层面板 1280×800 默认态溢出 —— 本次无浏览器/CDP 通道，
 > 只做了结构压缩（把"展开分级"箭头并进「输电线路」行，省 ~22px 抵消新增两个开关）。
 > 复测方法与阶段54 相同（面板 `clientHeight == scrollHeight`）。
+> ⚠️ 另外：G8 的「需更新」在**本机**可观察到（`%APPDATA%\...\packs\` 里 7 个区域包仍是上一版，
+> `verify_packs.mjs --remote` 的本地段会报 14 项不符）—— 但那条 UI 路径需要带 Tauri 桥的运行实例，
+> 本次只做到了"数值预期"（7 个需更新 + 1 个已下载），没在界面上点过。
 
 **阶段 51：UI/UX 最终打磨与产品化定型**（✅ 已完成）
 
@@ -511,17 +515,18 @@
 
 1. **A3：电网数据发布**（阶段56-A3，🔴 紧随 A2）。
    数据、前端、清单、指纹策略都已完成并验证，**只剩"把产物推出去"这一步**：
-   - ✅ 已做：`node scripts/gen_packs_manifest.mjs` 重算清单（8 个包的新 `features`/`bytes`/`sha256`）；
+   - ✅ 已做：清单重算（8 个包的新 `features`/`bytes`/`sha256`）；
+     **7 包重传 + GEM 首传已完成**（`node scripts/upload_packs.mjs`，162 MB，
+     每包"先传 `.stage`→校验 digest→删旧→改名"，全程无资产缺失窗口）；
+     `verify_packs.mjs --remote` 远端段 8/8 全绿；
      包指纹失效策略（G8，见设计 §9.1）—— 过期包在设置页显示「需更新」+ 本机/清单字节数凭据，
      一键更新复用既有原子替换下载。
-   - ⏭️ 待做：7 个 `osm-*.pmtiles` **重传** + `gem-plants.pmtiles` **首传**到 Release
-     （`docs/PACKS_UPLOAD_RUNBOOK.md`，三条路：`gh` CLI / 网页 / REST）；
-     上传后跑 `node scripts/verify_packs.mjs --remote` 复核（**当前基线 29 项问题**：
-     远端 7 个包全是旧版指纹、GEM 资产 404）；
-     然后重打安装包（核心区 7.12 MB）并跑 `check_release_redlines.mjs --with-exe`。
-   - ⚠️ 本机现状：**`gh` 未安装、无 `GITHUB_TOKEN`/`GH_TOKEN`**；`git push` 走的是凭据管理器
-     里已存的 GitHub 凭据（所以 REST 路线需要单独准备一个有 `Contents: write` 的 token）。
-   - ⚠️ 上传量约 **162 MB**，且是**对外发布**、不可撤回。
+   - 🔄 进行中：重打安装包（`tauri build`）并跑 `check_release_redlines.mjs --with-exe`。
+   - ⏭️ 之后可选：把本机 `%APPDATA%` 里 7 个旧包更新掉
+     （应用内「设置 → 数据包管理 → 更新」，或 `node scripts/install_packs.mjs`）——
+     不更新也不影响功能，但地图上看到的仍是上一版数据（且现在会被标成「需更新」）。
+   - ⚠️ 本机现状：`gh` 未安装、无 `GITHUB_TOKEN`；上传脚本走的是凭据管理器里那条带 `repo`
+     权限的 classic OAuth（`git credential fill`），**从不打印 token**。
 
 
 2. **上传 `gem-plants.pmtiles`**（🔴 **当前唯一的功能性断点**）。
