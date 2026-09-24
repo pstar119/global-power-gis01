@@ -198,8 +198,9 @@
 | 1 | 发布前体检：把文档声称的每一项逐条复现（不抄文档） | ✅ 见下表 |
 | 2 | 新增 `scripts/verify_packs.mjs` —— **本地 + 远端资产**一致性校验 | ✅ 一次调用即可发现「包没上传」 |
 | 3 | 新增 `docs/PACKS_UPLOAD_RUNBOOK.md` —— 上传与复核手册（三条路） | ✅ |
-| 4 | 清掉 `bundle\nsis\` 里阶段50 遗留的 `0.1.0` 安装包 | ✅ 该目录现只剩当前版本 |
-| 5 | 🔴 **上传 `gem-plants.pmtiles` 到 `v1.0-packs`** | ⏳ **待执行**（需 GitHub 凭据，见 §8 第 1 条） |
+| 4 | 清掉 `bundle\nsis\` 里阶段50 遗留的 `0.1.0` 安装包，并**重打 0.2.0** | ✅ 该目录现只剩当前版本；安装包已含 `lang="zh-CN"` |
+| 5 | 修正「安装包红线自检」的**作用域**（原做法在 exe 里搜前端字符串，**永远搜不到**） | ✅ 新增 `scripts/check_release_redlines.mjs`（扫 dist + 对照串） |
+| 6 | 🔴 **上传 `gem-plants.pmtiles` 到 `v1.0-packs`** | ⏳ **待执行**（需 GitHub 凭据，见 §8 第 1 条） |
 
 体检实测（阶段55，可复现）：
 
@@ -245,8 +246,8 @@
 
 | 项 | 值 | 核实 |
 |---|---|---|
-| 安装包体积 | ⚠️ **易失，不写正文** —— 用 §10「产物（现查）」现查。阶段54 实测基线：`48,357,753 B = 46.12 MiB`，裸 exe `9,921,024 B = 9.46 MiB`，余量 3.88 MB | ✅ 阶段54 打包实测 |
-| 裸主程序 | **9,921,024 B = 9.46 MiB**（阶段50 为 9,713,664 B ⇒ 阶段52 的 dialog 插件 + 阶段54 的 `export.rs` 共 **+0.20 MiB**） | ✅ 本轮实测 |
+| 安装包体积 | ⚠️ **易失，不写正文** —— 用 §10「产物（现查）」现查。阶段55 重打包基线：`48,355,932 B = 46.12 MiB`，裸 exe `9,938,944 B = 9.48 MiB`，余量约 3.88 MiB | ✅ 阶段55 打包实测 |
+| 裸主程序 | **9,938,944 B = 9.48 MiB**（阶段50 为 9,713,664 B ⇒ dialog 插件 + `export.rs` + 阶段55 重打包，共 **+0.22 MiB**） | ✅ 阶段55 实测 |
 | ⚠️ 体积归因 | 裸 exe **+0.20 MiB**，但安装包 **−0.42 MiB**（46.54 → 46.12）。**两者方向相反是正常的** —— 资源段的 LZMA 压缩率与前端 bundle 大小都会影响最终结果，**不能拿裸 exe 增量去推安装包增量** | ✅ 本轮实测 |
 | 安装包内容 | **只有 3 项**：seed 库 + `basemap.pmtiles` + `osm_grid.pmtiles` | ✅ 本轮实测 `tauri.conf.json` 的 `bundle.resources` |
 | 数据包数量 | **8 个**（7 区域 + 1 GEM = **170.32 MiB**），全部按需下载 | ✅ 本轮实测清单求和 |
@@ -396,6 +397,7 @@
 | `src-tauri/capabilities/default.json` | 🆕 阶段54：删掉 `fs:write-all` / `dialog:allow-save` 后只剩 4 条权限 |
 | `public/packs_manifest.json` | 数据包清单（由脚本生成，**不要手改**） |
 | `scripts/verify_packs.mjs` | 🆕 阶段55：清单 vs **本地磁盘** vs **远端 Release 资产**（三方一致性；缺哪个包直接点名） |
+| `scripts/check_release_redlines.mjs` | 🆕 阶段55：发布前红线自检。**前端查 `dist/`、Rust 才查 exe**（Tauri 压缩内嵌资源，搜 exe 对前端无效） |
 | `docs/PACKS_UPLOAD_RUNBOOK.md` | 🆕 阶段55：数据包上传与复核手册（gh CLI / 网页 / REST 三条路） |
 | `scripts/` | 见 §9 命令表 |
 | `docs/screenshots/` | 阶段验收截图 |
@@ -622,6 +624,7 @@ python scripts/serve_packs.py         # 本地提供 Range 支持，用于验证
 node scripts/install_packs.mjs --user-dir   # 投放 8 个包到用户目录（**运行时第一顺位**）
 node scripts/install_packs.mjs --list       # 只列现状；默认目标是 dev 的 target/debug/packs
 node scripts/verify_packs.mjs --remote      # 清单 vs 本地 vs **远端资产**（发布前必跑；缺资产会点名）
+node scripts/check_release_redlines.mjs --with-exe   # 发布前红线自检（**前端查 dist**，Rust 才查 exe）
 python scripts/make_seed_db.py        # 重建 seed 库（从已迁移的 live DB 走 VACUUM INTO）
 python scripts/import_gem_plants.py   # 抓取 GEM 三类电源 → 电站级 GeoJSON
 ```
@@ -739,6 +742,7 @@ Get-Item src-tauri\target\release\global-power-gis.exe |
 | 6 | ~~`bundle\nsis\` 里同时留着旧的 `0.1.0` 安装包~~ | 🟡 **阶段55 已清理旧包，但成因未修**：NSIS 新包是**追加**而非替换，下次重打包后仍要人工确认一次。建议后续在打包脚本里加一步清旧包 |
 | 7 | 前端**零自动化测试** | `package.json` 无 test 脚本、无 vitest/jest 依赖、`src/` 下 0 个测试文件；Rust 侧有 10 个单测。UI 行为目前全靠人肉 + 截图验收 |
 | 8 | 安装包是**同版本号覆盖式重打** | 阶段55 重打了 `0.2.0`：文件名不变、内容变了。分发时无法靠文件名区分「阶段54 的 0.2.0」与「阶段55 的 0.2.0」。下次重打包建议升 patch 版本（`0.2.1`），三处版本号需同步 |
+| 9 | ~~「安装包红线自检」在 exe 里搜前端字符串~~ | ✅ **阶段55 已改** —— Tauri 在 release 里把前端资源 **Brotli 压缩**后嵌入，所以 bundle 里的字符串**在 exe 里永远搜不到**（污染了也「未命中」）⇒ 那条检查给的是**假绿灯**；同时 exe 里能搜到的 `lang="en"` 是 **Brotli 静态字典**的假阳性。现改为 `scripts/check_release_redlines.mjs`：**前端查 `dist/`，Rust 才查 exe**，且带对照串 |
 
 > 📌 第 5、6 条是**防 P0 类问题复发**的那两条：阶段54 的体检就是靠手工比对
 > 才发现「本机一个包都没有」与「安装包还停在 0.1.0」。自动化后，

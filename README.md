@@ -45,6 +45,7 @@
 | 当前提交、领先/落后 origin 几个提交 | `D:\Git\cmd\git.exe log --oneline -3`（见 `PROJECT_HANDOFF.md` §9） |
 | 本机装了哪些数据包 | `node scripts/install_packs.mjs --list` |
 | **数据包是否真的都在远端**（清单说得对 ≠ 用户下得到） | `node scripts/verify_packs.mjs --remote` |
+| 产物里有没有混进开发期地址 / 调试端口 | `node scripts/check_release_redlines.mjs --with-exe` |
 | 构建产物的版本与体积 | `Get-ChildItem src-tauri\target\release\bundle\nsis\*.exe \| Select-Object Name,Length,LastWriteTime` |
 | 工具链绝对路径 | 见 `PROJECT_HANDOFF.md` §9 的环境自检 |
 
@@ -92,26 +93,28 @@
 
 安装包：`src-tauri/target/release/bundle/nsis/Global Power GIS_0.2.0_x64-setup.exe`
 
-> 📌 **下列体积是 2026-09-18（阶段54）的实测值**，会随每次重建变化。
-> **核对当前产物请用命令，别照抄**（见 `PROJECT_HANDOFF.md` §10「产物（现查）」）：
+> 📌 **体积与 SHA256 属易失状态，本正文不再写死**（阶段55 定）。
+> 理由是阶段54/55 连着踩了两次：写下后一次重打包就过期，而过期数字之间还会「互相印证」。
+> 现查（复制即用）：
 >
 > ```powershell
 > Get-ChildItem src-tauri\target\release\bundle\nsis\*.exe |
 >   Select-Object Name, Length, LastWriteTime
+> (Get-FileHash "src-tauri\target\release\bundle\nsis\Global Power GIS_0.2.0_x64-setup.exe" -Algorithm SHA256).Hash
+> Get-Item src-tauri\target\release\global-power-gis.exe | Select-Object Length, LastWriteTime
 > ```
 
-- 体积 **48,357,753 B = 46.12 MiB**（NSIS，中文安装界面）
-- SHA256 `A1FB8E0F99A1B720EE5161E4F6F51B22E3C6B3943EC0DFC734849D886383130D`
-- 裸主程序 **9,921,024 B = 9.46 MiB**；其余为下面几份资源的 LZMA 压缩后体积
-- 预算红线 50 MB，当前余量 **3.88 MB**
+- 安装包为 NSIS、中文安装界面，`installMode: currentUser`
+- 裸主程序约 **9.5 MiB** 量级；其余为关键资源的 LZMA 压缩后体积
+- 🔴 **预算红线 50 MB** —— 这是**稳定值**，不是实测值，量体积时拿它当判据
 
-> 🔎 **对比阶段50（46.54 MiB）反而小了 0.42 MB**，尽管阶段52 新增了 dialog 插件。
-> 同时裸主程序**大了 0.20 MiB**（9.26 → 9.46 MiB，插件与 `export.rs` 的代码）。
-> ⇒ 两者方向相反是正常的：**别用裸 exe 的增量去推安装包的增量**，
-> 资源段的 LZMA 压缩率与前端 bundle 大小都会影响最终结果。要结论就重新打包量一次。
+> 🔎 **体积归因的历史教训（别用增量互推）**：阶段54 时裸主程序**大了 0.20 MiB**
+> （9.26 → 9.46 MiB，dialog 插件 + `export.rs`），而安装包反而**小了 0.42 MB**（46.54 → 46.12）。
+> ⇒ 两者方向相反是正常的：资源段的 LZMA 压缩率与前端 bundle 大小都会影响最终结果。
+> 要结论就重新打包量一次。
 >
-> ⚠️ `bundle\nsis\` 目录里**同时留着旧的 `0.1.0` 安装包**（阶段50 的产物）。
-> 它不带阶段52 的 CSV 导出修复，**分发时务必认版本号**。
+> ✅ 阶段55 重打包后：`bundle\nsis\` 里**只剩当前版本**一个包
+> （阶段50 遗留的 `0.1.0` 已删除）；但 NSIS 是**追加**而非替换，**下次重打包后仍要人工确认一次**。
 
 关键资源随包分发（可核：`src-tauri/target/release/nsis/x64/installer.nsi` 里的 `File /a` 指令）：
 
@@ -175,11 +178,33 @@
 设完**必须重启 Ollama**（托盘图标退出后重新打开）才生效。
 注意这不是本项目代码缺陷，也**不是 CSP 问题** —— 被 CSP 拦会报 `Refused to connect`。
 
-### 安装包红线自检（在裸 exe 二进制里逐字符串搜）
+### 安装包红线自检（**扫 dist**，不是只扫 exe）
 
-🔴 **别用 `Select-String -Encoding Byte`** —— PowerShell 5.1 的 `-Encoding` 不接受
-`Byte`，命令会**直接报错**，而报错时它一行都不输出，看起来就像「全部未命中」。
-**这是个会让人拿到假通过的坑**（阶段54 实测踩到）。可用的写法：
+```powershell
+node scripts/check_release_redlines.mjs --with-exe
+```
+
+🔴 **阶段55 更正了一条此前不可靠的做法**：原来只在**裸 exe 里搜字符串**，
+但那**证明不了前端有没有被污染** —— Tauri 在 release 构建里把前端资源
+**Brotli 压缩**后嵌入二进制，所以 bundle 里的任何字符串都**不会**以明文出现，
+**无论它有没有被污染**。实测（阶段55，同一份产物）：
+
+| 事实 | 证据 |
+|---|---|
+| 前端 bundle 里确有「localhost:11434」「最大」等字样 | `dist/assets/index-*.js` 里可搜到 |
+| 同一个 exe 里搜这些字样 | **全部未命中**（被压缩了） |
+| exe 里却能搜到 `lang="en"` | ⚠️ **假阳性**：来自 **Brotli 内置静态字典**（周围是 `that isLibraryhusbandin factaffairs…` 词表），**不是**我们的 `index.html` |
+
+⇒ 结论：**前端的东西在 `dist/` 里查，Rust 的东西才在 exe 里查**。
+`dist/` 是「会被嵌入二进制的那份内容」的唯一真源，而 `scripts/check_release_redlines.mjs`
+就是按这个作用域写的。
+
+它同时带**对照串**（这是让绿灯有意义的关键，阶段54 的教训）：
+`localhost:11434`（Ollama 默认地址）在 dist 里必须命中，
+`export_csv_file` / `tauri.localhost` 在 exe 里必须命中 —— 全都不命中说明「搜错了地方」。
+
+<details>
+<summary>历史记录：阶段54 那条 exe 搜索的原始实测（<b>仅对 Rust 侧字符串有效</b>）</summary>
 
 ```powershell
 $exe   = (Get-Item src-tauri\target\release\global-power-gis.exe).FullName
@@ -190,24 +215,13 @@ foreach ($k in @('127.0.0.1:8099','9222','remote-debugging','api_key=')) {
 }
 ```
 
-阶段54（2026-09-18）实测结果 —— 同时列出**应当命中**的项，避免「全都没命中」这种
-无意义的绿灯：
-
-| 关键字 | 应当 | 实测 |
-|---|---|---|
-| `127.0.0.1:8099` | 未命中 | ✅ 未命中（构建期无 `PACKS_BASE_URL` 污染） |
-| `9222` | 未命中 | ✅ 未命中 |
-| `remote-debugging` | 未命中 | ✅ 未命中 |
-| `api_key=` | 未命中 | ✅ 未命中 |
-| `export_csv_file` | **命中** | ✅ 命中（阶段54 新增的 Rust 命令确实进包） |
-| `tauri.localhost` | **命中** | ✅ 命中（生产版前端源，预期内） |
-
-> 📌 上一行那两个「应当命中」的项是**对照**：只搜「不该出现的东西」全都搜不到，
-> 也可能是因为搜错了地方。加一组「必须出现」的项，绿灯才有意义。
+> 🔴 **别再用 `Select-String -Encoding Byte`** —— PowerShell 5.1 的 `-Encoding` 不接受
+> `Byte`，命令会**直接报错**，而报错时它一行都不输出，看起来就像「全部未命中」。
+> 这是个会让人拿到假通过的坑（阶段54 实测踩到）。
 >
 > ⚠️ 另：`additionalBrowserArgs` 此前被记为「命中但无害」（Tauri 给 WebView2 传
-> `--disable-features=…` 的字段名，本项目未配置该项）。本轮未复测这一条 ——
-> 它不是泄漏项，留在这里只作历史记录。
+> `--disable-features=…` 的字段名，本项目未配置该项）。它不是泄漏项，留作历史记录。
+</details>
 
 打包注意：`target/release` 从零重建时，实时防护会偶发抢占新产物，报
 `link.exe` / `icu_properties_data` 的 `拒绝访问 (os error 5)`，**原样重试一次即过**（实测）。
