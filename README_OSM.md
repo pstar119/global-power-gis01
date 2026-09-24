@@ -1143,3 +1143,138 @@ Get-Content data\osm\huazhong_pipeline_meta.json -Raw | ConvertFrom-Json | Selec
 
 
 
+
+---
+
+## 十八、阶段56-A2：直流标签补抓 + 直交流分档 + 两个新图层（2026-09-24）
+
+> 设计文档：`docs/superpowers/specs/2026-09-24-china-power-data-rework-design.md`（§2.4 / §3 / §4.1 / §5）
+> 实施账本：`.superpowers/sdd/2026-09-24-china-power-a2/progress.md`
+
+### 一、为什么要补抓
+
+A1 的中间产物里**既没有 `power=converter`，也没有 `frequency`**（属性表里根本没这个键），
+而"直流/交流"只能靠这两样判定（设计 §2.4）。补抓**不重跑**那 238 个电力分块。
+
+### 二、补抓通道：`--category converters`（不是设计里写的 `--tags-only`）
+
+```powershell
+# 每个区域一条命令；块尺寸按 ≈5°×4° 取（实测该尺寸稳定，华东全域那种大 bbox 必 504）
+python -u scripts/fetch_osm_power.py --category converters --bbox 113.5,23.0,123.0,38.5 --grid 2x4 `
+  --name huadong --out-dir data/osm --endpoint https://overpass-api.de/api/interpreter
+```
+
+产物（与 power 的三类产物、断点**完全隔离**）：
+
+| 文件 | 内容 |
+|---|---|
+| `data/osm/<name>_power_converters.geojson` | `power=converter` 的点（node+way 都收，way 取包围盒中心） |
+| `data/osm/<name>_dc_tags.json` | `way_id → frequency` 映射（**原样字符串**）+ 覆盖率元数据 |
+| `data/osm/<name>_converters_progress.json` | 断点（可续抓；已完成的块重跑时直接跳过） |
+| `data/osm/<name>_converters_meta.json` | 本通道的统计（网格、块数、失败块、frequency 直方图） |
+
+**每块只发 1 条 union 查询**（省一半往返）：
+
+```
+[out:json][timeout:180];
+(node["power"="converter"](bbox);way["power"="converter"](bbox);
+ way["power"]["frequency"](bbox););
+out geom;
+```
+
+⚠️ `--category converters` 与设计里的 `--tags-only` 效果相同，但白捡了已有分块机制的全部能力
+（断点续抓、跨块 `osm_id` 去重、产物隔离、失败块响亮、`--status` 只读报进度）—— 见设计文档 §3.1 的实施修正。
+
+### 三、端点与限流的实测（都是踩出来的）
+
+| 端点 | 本机实测 | 结论 |
+|---|---|---|
+| `maps.mail.ru` | `CERTIFICATE_VERIFY_FAILED`（重试不会好） | ❌ 本次不可用（脚本新增"确定性错误跳过退避"） |
+| `overpass-api.de` | 偶发 429 / 504，重试多能成功 | ✅ 本次采用（`--endpoint` 单端点，失败 4 次即记失败块并继续） |
+| `overpass.private.coffee` | 单块 499 秒 | ❌ 太慢 |
+| `overpass.kumi.systems` | 读超时挂死 | ❌ |
+
+🔴 **并发 2 条抓取流必然撞 429**（实测两次），所以本次**串行**跑完 9 个作业。
+
+### 四、补抓实测（9 个作业，全部 `complete=true`、无失败块）
+
+| 区域 | 网格 | 换流站 | 带 `frequency` 的 way | 其中 `frequency=0` |
+|---|---|---|---|---|
+| 华东 huadong | 2x4 | 12 | 19,957 | 309 |
+| 华中 huazhong | 2x3 | 11 | 19,712 | 326 |
+| 华南 huanan | 4x3 | 6 | 17,495 | 228 |
+| 华北 huabei | 2x3 | 2 | 15,049 | 89 |
+| 东北 dongbei | 4x4 | 5 | 5,162 | 18 |
+| 西南 xinan | 7x4 | 16 | 12,898 | 535 |
+| 西北 xibei | 8x5 | 10 | 21,314 | 188 |
+| 长三角 yrd（给核心区用） | 1x1 | 4 | 2,099 | 105 |
+| 浙江 zhejiang（给核心区用） | 1x2 | 4 | 1,636 | 76 |
+| **合计** | — | **70** | **115,322** | **1,874** |
+
+> 首次跑完时西南有 2 块、西北有 3 块 504 失败（脚本已响亮报出 bbox 与缺口）；
+> **用同一条命令原样重跑**即补齐（已完成的块跳过，只重试失败块）—— 这是断点机制的价值所在。
+> 长三角小块实测 **4 个换流站 / 2,089 个 way 带 frequency**，与设计 §7 的探测结论一致。
+
+### 五、`is_dc` 的三步判定与实测结果
+
+按设计 §4.1（先到先得，逐条可查）：① `frequency === "0"` ⇒ 直流（最硬）；
+② 否则线路**端点**与某个换流站坐标**精确相等**（两侧都 round6）⇒ 直流；③ 否则按交流。
+
+‼️ 判定在**合并之前**逐段做：合并后的链路只剩首段 `osm_id` 与最多 5 个 `osm_ids`，
+那时再回查 `dc_tags` 就查不到后面的段了；跨段传播由 `merge-lines.mjs` 负责
+（`frequency` 优先取 `"0"`、`is_dc` 取逻辑或）。
+
+| 区域 | frequency=="0" 段 | 端点接换流站 | **判定直流（合并后线路）** | frequency 覆盖率（合并后线路） |
+|---|---|---|---|---|
+| 华东 | 298 | 0 | **200** | 14,311 / 63,994 = 22.4% |
+| 华中 | 317 | 4 | **207** | 14,249 / 40,166 = 35.5% |
+| 华南 | 221 | 4 | **156** | 12,610 / 31,604 = 39.9% |
+| 华北 | 87 | 0 | **68** | 10,747 / 44,153 = 24.3% |
+| 东北 | 17 | 8 | **18** | 3,414 / 19,659 = 17.4% |
+| 西南 | 508 | 8 | **310** | 8,859 / 47,416 = 18.7% |
+| 西北 | 172 | 1 | **123** | 15,275 / 45,628 = 33.5% |
+| 核心区 | 108 | 0 | **85** | 1,683 / 17,967 = 9.4% |
+| **合计（7 包）** | 1,620 | 25 | **1,082** | 79,465 / 292,620 = 27.2% |
+
+⚠️ **已知边界（写进图例，不假装没有）**：
+- 覆盖率只有 17–40% ⇒ **未识别的直流线路按交流显示**，面板/图例已写明，不暗示"全部识别"。
+- 多值写法（如 `frequency="0;50"`、`"50;0"`）**不计入直流** —— 设计第 1 步是**精确等于 `"0"`**。
+  华东有 18 个、西南 15 个、西北 8 个这样的 way，属已知取舍。
+- 端点拓扑判定只在 4 个区域有命中（共 25 条）：多数换流站在 OSM 里是 **way（面）**，
+  取包围盒中心后不会与线路端点重合 —— 这正是设计要保留"默认按交流"第三步的原因。
+
+### 六、数据侧与前端改动（逐处）
+
+| 文件 | 改动 |
+|---|---|
+| `fetch_osm_power.py` | 新类别 `converters`、`--endpoint`、确定性错误跳过退避、`dc_tags` 与 geojson 同步落盘 |
+| `prepare_osm_geojson.mjs` | `FILES`/`KEEP_PROPS` 新增 `converter`；线路新增 `frequency`/`is_dc`；读 `dc_tags` 贴回；输出直流口径统计 |
+| `lib/merge-lines.mjs` | `mergeProps` 传播 `frequency`（优先 `"0"`）与 `is_dc`（或）；都为空时**删键**而不是写 `null` |
+| `merge_osm_regions.mjs` | 核心区合并新增 `converters`（可缺，缺了只警告且不写空文件）与 `dc_tags`（并集，`complete` 取逻辑与） |
+| `build_pmtiles.mjs` | `keepProps` 收录 `frequency`/`is_dc`；**`collapseProps` 加入 `is_dc`**；`FTYPE_RANK` 收录 `converter` |
+| `verify_power_only.mjs` | 线路必查字段加 `is_dc`；`frequency` 是否必查取决于同区域 `dc_tags` 是否存在且非空 |
+| `verify_pack.mjs` | 新增「z<8 的线路要素带 is_dc」与 `converter` 专属属性断言 |
+| `MapPage.tsx` / `.module.css` | 直流档（虚线红）/ 海缆层（青绿）/ 换流站点层（亮黄）；三条 filter **互斥**；核心区与区域包两侧同步；弹窗、图例、面板三层结构 |
+
+### 七、重建与门禁实测（8 个归档，逐个跑）
+
+- 7 包：**154.96 MB**（162,486,471 字节）；核心区归档 `osm_grid.pmtiles`：**7.12 MB**（7,465,373 字节）
+- 门禁：每个归档都跑 `verify_power_only.mjs`（geojson / pmtiles 两次）+ `verify_pack.mjs`
+  ⇒ **全部 PASS，零失败**；其中新增的「z<8 的线路要素带 is_dc」实测 **每包 100%**
+  （华东 59,189/59,189、华中 45,675/45,675、华南 32,742/32,742、华北 53,032/53,032、
+  东北 26,077/26,077、西南 50,387/50,387、西北 61,310/61,310、核心区 20,487/20,487）。
+- 最大单瓦片 424.3 KB（华东 z4）< 500 KB 经验上限；无空属性值；解码 0 失败。
+- 前端：`tsc --noEmit` 0；`vite build` 0（1,478.24 kB / gzip 429.35 kB，A1 基线 1,473.66 / 428.01）；
+  `check_release_redlines.mjs` 通过。
+
+### 八、顺手纠正的两处记录
+
+1. **交接文档把"合并后 7 包 +29 MB"的主因写成 `osm_ids` 字符串 —— 实测是错的。**
+   华东同源分解：基础属性 21.09 / +`merged_count` 21.63 / +`osm_ids` 23.07 /
+   +`length_km` 24.82 / 三者全带 26.61 MB。大头是 **`length_km`（非整数 ⇒ MVT 存 double，8 字节/要素）**
+   与 `osm_ids`（每要素唯一、字符串表无法去重）；`osm_ids` 上限 20→5 只让 7 包降 0.31%。
+   几何合并本身是**减体积**的（21.09 vs A1 未合并的 21.71 MB）。
+2. **本 harness 的管道限制比交接文档写的更严**：不是"别用 `| Select-Object`"，
+   而是**本机程序的输出不能接进任何 PowerShell 管道**（`| Select-String`、`> 文件` 同样报
+   `Program 'x' failed to run: Access is denied`）；`node --test` 也会因 `spawn EPERM` 失败
+   （测试运行器用管道起子进程）⇒ 单测直接跑文件（`node scripts/lib/merge-lines.test.mjs`，`node:test` 在同进程内执行）。

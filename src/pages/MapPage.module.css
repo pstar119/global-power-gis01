@@ -483,6 +483,43 @@
   line-height: 1.4;
 }
 
+/* ---------- 阶段56-A2：把「展开分级」的箭头并进图层行 ---------- */
+
+/* 「输电线路」这一行 = 总开关（左）+ 展开箭头（右）。
+   ‼️ 两个 button 是**兄弟**关系，不能嵌套（HTML 不允许 button 里再放 button）。
+   ⚠️ 为什么并成一行：原来"总开关一行 + 分级标题一行"占两层高度，
+      而设计 §5.1 的树结构里箭头本来就属于「输电线路」这一行；
+      并进来还省下 ~22px，抵消新增两个图层开关对 1280×800 面板高度的影响。 */
+.layerRowSplit {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.rowChevron {
+  flex: 0 0 auto;
+  padding: 0.25rem 0.35rem;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background-color: transparent;
+  box-shadow: none;
+  color: var(--gpg-muted);
+  font: inherit;
+  font-size: 0.6rem;
+  line-height: 1.2;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+/* ⚠️ 同 .subHeader：App.css 的 `button:hover` 是 (0,1,1)，不显式覆盖会冒默认高亮边框 */
+.rowChevron:hover,
+.rowChevron:active {
+  border-color: transparent;
+  background-color: var(--gpg-hover);
+  box-shadow: none;
+  color: var(--gpg-text);
+}
+
 .layerBtn {
   display: flex;
   align-items: center;

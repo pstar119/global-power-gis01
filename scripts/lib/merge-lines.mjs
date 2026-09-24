@@ -65,6 +65,24 @@ function mergeProps(a, b) {
   for (const k of ["cables", "wires", "circuits", "vclass"]) {
     out[k] = (a[k] ?? null) ?? (b[k] ?? null);
   }
+  /**
+   * ‼️ 阶段56-A2：`frequency` / `is_dc` 必须一起传播，否则**合并会把直流信息吃掉**。
+   *
+   * 为什么不放进上面的"取第一个非空"：一条链路的 `frequency` 若前段是 "50"、后段是 "0"，
+   * 取第一个非空会得到 "50"（交流），而这条链路其实含直流段 —— 判定与显示会自相矛盾。
+   * 所以规则是：**只要有一段是 "0"（直流硬信号）就取 "0"**，否则取第一个非空值；
+   * `is_dc` 取**逻辑或**（任一段是直流 ⇒ 整条链路按直流渲染）。
+   * 两者的语义保持一致（`frequency==="0"` ⇒ `is_dc===true`）。
+   *
+   * ⚠️ 全都为空时**删掉这个键**，而不是写成 `frequency: null`：
+   *    否则每个合并要素都会在输出里多一个 `"frequency":null`（实测华东会有 1.1 万个），
+   *    既白占 GeoJSON 体积，又让 `build_pmtiles.mjs` 的「保留字段 frequency(N)」把
+   *    "真的有频率标签的要素数" 报成 "被合并过的要素数" —— 那是**读数撒谎**。
+   */
+  const freq = a.frequency === "0" || b.frequency === "0" ? "0" : ((a.frequency ?? null) ?? (b.frequency ?? null));
+  if (freq === null) delete out.frequency;
+  else out.frequency = freq;
+  out.is_dc = Boolean(a.is_dc) || Boolean(b.is_dc);
   return out;
 }
 

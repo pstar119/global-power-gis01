@@ -20,7 +20,14 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const RANK = { "735+": 0, "500-734": 1, "220-499": 2, "<220": 3, unknown: 4 };
-const FR = { plant: 0, substation: 1, line: 2 };
+/**
+ * 同档内的"点比线优先"表。
+ * ⚠️ 必须与 `build_pmtiles.mjs` 的 `FTYPE_RANK` **逐字一致**：
+ *    这份是**诊断**脚本（不是门禁），值不一致时它给出的"封顶是否严格按优先级"
+ *    结论就是错的 —— 而那种错误看起来完全正常（数字照常打印）。
+ *    阶段56-A2：补上 `converter`（与变电站同档）。
+ */
+const FR = { plant: 0, substation: 1, converter: 1, line: 2 };
 const CAP = 20000;
 
 function fmtHist(h) {

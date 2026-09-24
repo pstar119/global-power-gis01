@@ -13,12 +13,24 @@
  * 用法：node scripts/verify_power_only.mjs <file.pmtiles|file.geojson>
  * 退出码：0 = 通过；1 = 发现问题；2 = 用法错误。
  */
-import { readFileSync } from "node:fs";
-import { extname } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { basename, dirname, extname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { verifyArchive, tileX, tileY, zxyToTileId } from "./lib/pmtiles-writer.mjs";
 
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+
 const FORBIDDEN_FTYPES = ["railway", "pipeline"];
+/**
+ * 线路必须出现的字段。
+ *
+ * 阶段56-A2 新增两项：
+ *   · `is_dc` —— prepare 的三步判定结果，**每条线路都有**（true/false 都写），必须齐备；
+ *   · `frequency` —— 只在补抓跑过、且该区域确有频率标签时才会出现（实测全国覆盖 ~11%）。
+ *     ‼️ 所以它是否进入必查清单**取决于同区域的 `dc_tags` 产物是否存在且非空** ——
+ *     写死会让"没跑补抓"与"跑了但这条真没有"两种情况的症状混在一起（假失败）。
+ */
 const EXPECTED_LINE_PROPS = [
   "osm_id",
   "name",
@@ -30,7 +42,9 @@ const EXPECTED_LINE_PROPS = [
   "circuits",
   "cables",
   "wires",
+  "is_dc",
 ];
+const DC_DEPENDENT_PROPS = ["frequency"];
 
 const path = process.argv[2];
 if (!path) {
@@ -39,7 +53,23 @@ if (!path) {
 } else {
   const ext = extname(path).toLowerCase();
   const ftypes = new Map();
-  const propHits = new Map(EXPECTED_LINE_PROPS.map((k) => [k, 0]));
+  /**
+   * `frequency` 是否列入必查 —— 依据是**同区域的 dc_tags 产物存在且非空**（A2 的补抓跑过没有）。
+   * 名字从文件名推：`<name>_power.geojson` / `osm-<name>.pmtiles`；核心区归档 `osm_grid.pmtiles`
+   * 对应的名字是 `core`（它的 dc_tags 由 `merge_osm_regions.mjs` 合并产出）。
+   */
+  const stem = basename(path).replace(/\.(geojson|pmtiles)$/i, "");
+  const dcName = stem === "osm_grid" ? "core" : stem.replace(/^osm-/, "").replace(/_power$/, "");
+  const dcPath = resolve(ROOT, "data", "osm", `${dcName}_dc_tags.json`);
+  let dcSource = false;
+  try {
+    dcSource = existsSync(dcPath) && (JSON.parse(readFileSync(dcPath, "utf8")).count ?? 0) > 0;
+  } catch {
+    dcSource = false;
+  }
+  const propHits = new Map(
+    [...EXPECTED_LINE_PROPS, ...(dcSource ? DC_DEPENDENT_PROPS : [])].map((k) => [k, 0]),
+  );
   let lineTotal = 0;
   let pass = false;
   let extra = "";
@@ -53,12 +83,16 @@ if (!path) {
       if (t === "line") {
         lineTotal++;
         for (const k of EXPECTED_LINE_PROPS) if (p[k] !== undefined) propHits.set(k, propHits.get(k) + 1);
+        for (const k of DC_DEPENDENT_PROPS) if (p[k] !== undefined) propHits.set(k, propHits.get(k) + 1);
       }
     }
     const bad = [...ftypes.keys()].filter((k) => FORBIDDEN_FTYPES.includes(k));
     const missing = [...propHits.keys()].filter((k) => propHits.get(k) === 0);
     console.log(`forbidden ftypes: ${bad.length ? bad.join(", ") : "(none)"}`);
-    console.log(`prop coverage: lines=${lineTotal} missing=${missing.length ? missing.join(",") : "(none)"}`);
+    console.log(
+      `prop coverage: lines=${lineTotal} missing=${missing.length ? missing.join(",") : "(none)"}` +
+        `${dcSource ? "" : `（frequency 未列入必查：找不到 ${dcPath}）`}`,
+    );
     pass = bad.length === 0 && missing.length === 0;
   } else if (ext === ".pmtiles") {
     // 从归档 bbox 推 z6/z8 的若干 tileId 抽样；verifyArchive 内部用 MemorySource，Node 下可用

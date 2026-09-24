@@ -31,7 +31,7 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { mergeLines } from "./lib/merge-lines.mjs";
@@ -90,9 +90,17 @@ const cfg = parseArgs(process.argv.slice(2));
  *         加了只会让校验脚本报"属性缺失"的假失败（它属 A2 的补抓范围）。
  */
 const KEEP_PROPS = {
-  line: ["osm_id", "name", "ref", "operator", "vclass", "voltage_kv", "line_kind", "cables", "wires", "circuits", "merged_count", "length_km", "osm_ids"],
+  line: ["osm_id", "name", "ref", "operator", "vclass", "voltage_kv", "line_kind", "cables", "wires", "circuits", "merged_count", "length_km", "osm_ids", "frequency", "is_dc"],
   substation: ["osm_id", "name", "operator", "vclass", "voltage_kv", "substation_kind"],
   plant: ["osm_id", "name", "vclass", "voltage_kv", "plant_source", "plant_output"],
+  /**
+   * 阶段56-A2：换流站（`power=converter`，node 与 way 都收）。
+   *
+   * ⚠️ 只留这 5 个：它是**点要素**，属性表越短越好（整包只有几十个，但每个都要能点选）。
+   *    设计 §4.1 的字段表就是这 5 个 —— 别顺手把 `power` / `substation_kind` 之类塞进来，
+   *    那些是别的 ftype 的判别字段，混进来只会让 `cleanProps` 的白名单更难对齐。
+   */
+  converter: ["osm_id", "name", "operator", "vclass", "voltage_kv"],
 };
 
 /**
@@ -105,9 +113,32 @@ const FILES = [
   { ftype: "line", src: (n) => `${n}_power_lines.geojson`, power: true },
   { ftype: "substation", src: (n) => `${n}_power_substations.geojson`, power: true },
   { ftype: "plant", src: (n) => `${n}_power_plants.geojson`, power: true },
+  // 阶段56-A2：换流站来自**补抓通道**（`fetch_osm_power.py --category converters`）。
+  // ⚠️ 缺失时只警告不抛错：小区域确实可能一个换流站都没有（产物文件是空的，不是不存在），
+  //    而"文件不存在"说明补抓没跑过 —— 那种情况会在下面的直流判定统计里如实反映出来。
+  { ftype: "converter", src: (n) => `${n}_power_converters.geojson`, power: true },
 ];
 
+/**
+ * 阶段56-A2：直流标签（`way_id → frequency`）。
+ *
+ * 由 `fetch_osm_power.py --category converters` 产出（设计 §3.1 的补抓通道）。
+ * 文件缺失/损坏 ⇒ **frequency 全部为 null**，`is_dc` 退化为只靠"端点接换流站"拓扑判定
+ * （设计 §4.1 的第 2、3 步）。这属于**降级**，必须在日志里说出来，不能静默。
+ */
+function loadDcTags(inDir, name) {
+  const p = resolve(ROOT, inDir, `${name}_dc_tags.json`);
+  if (!existsSync(p)) return { map: new Map(), path: p, found: false, meta: null };
+  const data = JSON.parse(readFileSync(p, "utf8"));
+  const tags = data?.tags;
+  if (!tags || typeof tags !== "object") throw new Error(`${p} 里没有 tags 映射（不是补抓通道的产物）`);
+  return { map: new Map(Object.entries(tags)), path: p, found: true, meta: data };
+}
+
 const round6 = (n) => Math.round(n * 1e6) / 1e6;
+
+/** 端点键：与 merge-lines 的 round6 一致（6 位小数），保证"同一点"是**精确**比较 */
+const coordKey = (lon, lat) => `${round6(lon).toFixed(6)},${round6(lat).toFixed(6)}`;
 
 /** 坐标合法性：经纬度都要在范围内、且是有限数 */
 function coordsValid(geometry) {
@@ -184,6 +215,66 @@ function main() {
     console.log(`  ${ftype.padEnd(11)} 读入 ${String(fc.features.length).padStart(6)}  保留 ${String(kept).padStart(6)}  （源文件 ${size} MB）`);
   }
 
+  // ---- 阶段56-A2：直流标签贴回线路 + `is_dc` 三步判定（设计 §4.1）----
+  //
+  //   ① `frequency === "0"` ⇒ 直流（最硬信号）
+  //   ② 否则线路**端点**与某个 `converter` 的坐标**精确相等**（两侧都 round6）⇒ 直流
+  //   ③ 否则 `is_dc = false` —— **默认按交流，不猜**（frequency 覆盖率实测只有 ~11%，
+  //      缺标签绝不等于交流，所以第 3 步是必须保留的保守默认，不是偷懒）
+  //
+  // ‼️ 必须在**合并之前**逐段贴标签：合并后的链路只留首段 `osm_id` 与最多 5 个 `osm_ids`，
+  //    那时再按 osm_id 回查 dc_tags 就查不到后面的段了（信息已丢）。
+  //    跨段传播由 `lib/merge-lines.mjs` 的 mergeProps 负责（frequency 优先取 "0"、is_dc 取或）。
+  const dcTags = loadDcTags(cfg.inDir, cfg.name);
+  if (dcTags.found) {
+    console.log(
+      `\n直流标签 : ${basename(dcTags.path)}（${dcTags.map.size} 个 way 带 frequency，complete=${dcTags.meta?.complete}）`,
+    );
+    if (dcTags.meta?.complete === false) {
+      console.warn(
+        `⚠️ 补抓有 ${dcTags.meta?.failed_chunks?.length ?? "?"} 个分块失败 ⇒ 覆盖不完整：` +
+          `未覆盖区里的直流线路会**静默退化**成交流（frequency 查不到），判定不会报错。`,
+      );
+    }
+  } else {
+    console.warn(
+      `⚠️ 未找到 ${dcTags.path} ⇒ 本轮 frequency 全为 null，直流只能靠"端点接换流站"判定（第 2 步）。\n` +
+        `   补抓：python scripts/fetch_osm_power.py --category converters --bbox <区域bbox> --grid <NxM> --name ${cfg.name}`,
+    );
+  }
+
+  /** 换流站坐标集合（点要素，已 round6）—— 用于第 2 步的**精确**相等判定 */
+  const convKeys = new Set();
+  for (const f of features) {
+    if (f.properties.ftype !== "converter") continue;
+    const [lon, lat] = f.geometry.coordinates;
+    convKeys.add(coordKey(lon, lat));
+  }
+
+  const dcStat = { freqTagged: 0, byFrequency: 0, byTopology: 0, dcSegments: 0, converterHits: new Set() };
+  for (const f of features) {
+    if (f.properties.ftype !== "line") continue;
+    const p = f.properties;
+    const freq = dcTags.map.get(p.osm_id);
+    if (freq !== undefined) {
+      p.frequency = freq;
+      dcStat.freqTagged++;
+    }
+    const c = f.geometry.coordinates;
+    const k0 = coordKey(c[0][0], c[0][1]);
+    const k1 = coordKey(c[c.length - 1][0], c[c.length - 1][1]);
+    const touch = convKeys.has(k0) ? k0 : convKeys.has(k1) ? k1 : null;
+    const isZero = p.frequency === "0";
+    p.is_dc = isZero || touch !== null;
+    if (isZero) dcStat.byFrequency++;
+    else if (touch !== null) {
+      dcStat.byTopology++;
+      dcStat.converterHits.add(touch);
+    }
+    if (p.is_dc) dcStat.dcSegments++;
+  }
+  const lineSegTotal = features.filter((f) => f.properties.ftype === "line").length;
+
   // ---- 阶段56-A2：把「按杆塔切碎」的线路合并成完整线路 ----
   // ‼️ 只对 `ftype === "line"` 做：变电站/电厂是点，铁路/管道已撤销。
   //    规则与全部局限写在 `lib/merge-lines.mjs` 头部（**合并结果不作电气证据**）。
@@ -254,6 +345,31 @@ function main() {
   }
   if (dropped) console.log(`剔除非法几何 : ${dropped} 个`);
   if (droppedNoVclass) console.log(`补 vclass=unknown : ${droppedNoVclass} 个（源里缺 voltage 标签）`);
+
+  // ---- 阶段56-A2：直流判定的实测口径（照实输出，供验收比对设计 §6.2 第 4 条）----
+  const mergedLines = mergedFeatures.filter((f) => f.properties.ftype === "line");
+  const dcAfter = mergedLines.filter((f) => f.properties.is_dc === true).length;
+  const freqAfter = mergedLines.filter((f) => f.properties.frequency != null).length;
+  const freqPctSeg = lineSegTotal ? ((dcStat.freqTagged / lineSegTotal) * 100).toFixed(2) : "0";
+  console.log();
+  console.log("直流判定（设计 §4.1 的三步，先到先得） :");
+  console.log(
+    `  frequency=="0"    ${String(dcStat.byFrequency).padStart(6)} 段  ← 最硬信号`,
+  );
+  console.log(
+    `  端点接换流站      ${String(dcStat.byTopology).padStart(6)} 段  ← 拓扑推断（换流站 ${perType.converter ?? 0} 个，${dcStat.converterHits.size} 个与线路端点重合）`,
+  );
+  console.log(`  判定为直流        ${String(dcAfter).padStart(6)} 条线路（合并后；逐段判定 ${dcStat.dcSegments} 段）`);
+  console.log(
+    `  frequency 覆盖    ${String(dcStat.freqTagged).padStart(6)}/${lineSegTotal} 段（${freqPctSeg}%），` +
+      `合并后 ${freqAfter} 条线路带频率标签`,
+  );
+  if (perType.converter === 0) {
+    console.log(
+      `  ℹ️ 本区域没有换流站（0 个）—— 若补抓没跑过，` +
+        `两个信号都会是 0，读起来和"确实没有直流"一模一样，别把两者混为一谈`,
+    );
+  }
   console.log(`输出体积 : ${outMb.toFixed(2)} MB`);
 
   const meta = {
@@ -264,6 +380,24 @@ function main() {
     byVoltageClass: perClass,
     dropped,
     droppedNoVclass,
+    /**
+     * 阶段56-A2：直流口径的可核查记录。
+     * ‼️ `dc_tags_complete=false` 表示补抓有覆盖空洞 ⇒ 直流判定是**降级**的，
+     *    验收时不能拿 `is_dc_lines_after_merge` 当"全国直流线路数"。
+     */
+    dc: {
+      dc_tags_file: dcTags.found ? `${cfg.inDir}/${basename(dcTags.path)}` : null,
+      dc_tags_complete: dcTags.found ? (dcTags.meta?.complete ?? null) : null,
+      dc_tags_entries: dcTags.map.size,
+      line_segments: lineSegTotal,
+      frequency_tagged_segments: dcStat.freqTagged,
+      frequency_coverage_pct: lineSegTotal ? Number(((dcStat.freqTagged / lineSegTotal) * 100).toFixed(2)) : 0,
+      by_frequency_zero: dcStat.byFrequency,
+      by_converter_topology: dcStat.byTopology,
+      converters: perType.converter ?? 0,
+      converters_hit_by_line_endpoint: dcStat.converterHits.size,
+      is_dc_lines_after_merge: dcAfter,
+    },
     outputFile: `${cfg.outDir}/${cfg.outName}.geojson`,
     outputSizeMb: Number(outMb.toFixed(2)),
     attribution: "© OpenStreetMap contributors (ODbL)",

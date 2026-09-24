@@ -132,3 +132,36 @@ test("maxOsmIds 参数真的生效（曾被 decorate 里写死的 20 静默覆�
   const all = mergeLines(segs, { maxOsmIds: 20 }).features[0].properties;
   assert.equal(all.osm_ids.split(",").length, 8, "上限大于段数时全记");
 });
+
+test("合并会传播 frequency / is_dc：任一段直流则整条链路按直流（阶段56-A2）", () => {
+  const segs = [
+    line("way/1", [[0, 0], [0.01, 0]], { frequency: "50", is_dc: false }),
+    line("way/2", [[0.01, 0], [0.02, 0]], { frequency: "0", is_dc: true }),
+    line("way/3", [[0.02, 0], [0.03, 0]], { frequency: null, is_dc: false }),
+  ];
+  const { features } = mergeLines(segs);
+  assert.equal(features.length, 1);
+  const p = features[0].properties;
+  assert.equal(p.merged_count, 3);
+  assert.equal(p.is_dc, true, "任一段是直流 ⇒ 整条链路是直流");
+  assert.equal(p.frequency, "0", "frequency 优先取 \"0\"，不能取到前段的 \"50\"（否则与 is_dc 自相矛盾）");
+});
+
+test("合并后若全为交流，frequency 取第一个非空值且 is_dc=false", () => {
+  const segs = [
+    line("way/1", [[0, 0], [0.01, 0]], { frequency: null, is_dc: false }),
+    line("way/2", [[0.01, 0], [0.02, 0]], { frequency: "50", is_dc: false }),
+  ];
+  const { features } = mergeLines(segs);
+  assert.equal(features[0].properties.frequency, "50");
+  assert.equal(features[0].properties.is_dc, false);
+});
+
+test("都拿不到频率时**删键**而不是写 null（否则白占体积、还让构建报数撒谎）", () => {
+  const { features } = mergeLines([
+    line("way/1", [[0, 0], [0.01, 0]], { frequency: null }),
+    line("way/2", [[0.01, 0], [0.02, 0]], {}),
+  ]);
+  assert.equal("frequency" in features[0].properties, false);
+  assert.equal(features[0].properties.is_dc, false, "is_dc 仍然每条都有（前端分档靠它）");
+});

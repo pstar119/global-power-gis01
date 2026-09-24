@@ -18,6 +18,7 @@ import {
   Popup,
   ScaleControl,
   addProtocol,
+  type FilterSpecification,
   type GeoJSONSource,
   type LayerSpecification,
   type MapGeoJSONFeature,
@@ -50,8 +51,14 @@ import MapQueryBox from "../components/MapQueryBox";
 import StatsDashboard from "../components/StatsDashboard";
 import styles from "./MapPage.module.css";
 
-/** 图层清单：纯 UI 占位，不含任何真实数据 */
-const LAYERS = ["电厂", "变电站", "输电线路"] as const;
+/**
+ * 图层清单：面板第二层的开关列表（顺序 = 面板里的显示顺序）。
+ *
+ * 阶段56-A2：新增「换流站」与「海底电缆」两项（设计 §5.1）——
+ * 「换流站」既是直流识别的锚点，也是可点选的独立要素；
+ * 「海底电缆」是 `power=cable` 单独成层（不再混在电压档里按电压上色）。
+ */
+const LAYERS = ["电厂", "变电站", "换流站", "输电线路", "海底电缆"] as const;
 
 /**
  * GEM 层在图层面板上的开关名（阶段48-A 引入，50-C.2-A 改名）。
@@ -114,6 +121,37 @@ function normalizeLayerKeys(names: readonly string[]): readonly string[] {
 }
 
 /**
+ * 阶段56-A2：三个**新开关的键**（`visibleLayers` 里用的字符串），以及新图层的
+ * id / 配色 / 线宽 / filter。**整块都必须在 `LAYER_SWATCH` 之前**。
+ *
+ * ‼️ 为什么强调顺序：`LAYER_SWATCH` 拿这些常量当计算键与取值，
+ *    而 `const` 在模块求值阶段有暂时性死区。声明顺序反了，TypeScript 会报
+ *    `TS2448/TS2454`（这次真报了，才没漏到运行时）；
+ *    而**只当键用**的那种情况（本文件顶部 GEM_* 那组）TS 查不出来，
+ *    会在运行时抛 `Cannot access '…' before initialization`。
+ *
+ * ⚠️ 直流档的键**不是** vclass 取值：直流是跨电压等级的一个维度
+ *    （±800kV 与 ±500kV 都是直流），塞进 `OSM_LINE_TIERS` 会与「与 vclass 一一对应」错位。
+ */
+const DC_LAYER_KEY = "直流（HVDC）";
+const CABLE_LAYER_KEY = "海底电缆";
+const CONVERTER_LAYER_KEY = "换流站";
+
+const OSM_DC_LAYER_ID = "osm-line-dc";
+/** 直流配色/线宽：与 5 个交流档的任何一色都不撞（交流是品红/琥珀/蓝/灰） */
+const OSM_DC_COLOR = "#f43f5e";
+const OSM_DC_WIDTH = 2.4;
+
+const OSM_CABLE_LAYER_ID = "osm-line-cable";
+/** 海缆配色：青绿，与直流红、交流蓝都分得开 */
+const OSM_CABLE_COLOR = "#2dd4bf";
+const OSM_CABLE_WIDTH = 2;
+
+const OSM_CONVERTER_LAYER_ID = "osm-converters";
+/** 换流站配色：亮黄，与变电站青、电厂白描圈一眼可分 */
+const OSM_CONVERTER_COLOR = "#facc15";
+
+/**
  * 图层开关左侧色块的颜色 —— 让开关本身充当图例，不必再单独解释一遍。
  * 电厂用渐变表示「按燃料多色」，而不是给一个会误导人的单色。
  */
@@ -121,6 +159,9 @@ const LAYER_SWATCH: Record<string, string> = {
   电厂: "conic-gradient(#9aa0a6, #f5a524, #4daafc, #5ee39b, #b07cf5, #9aa0a6)",
   变电站: "#3fd0c9",
   输电线路: "#8b96a8",
+  // 阶段56-A2：色块与地图**同一份常量**，开关本身就是图例（与下面两处同样的约定）
+  [CONVERTER_LAYER_KEY]: OSM_CONVERTER_COLOR,
+  [CABLE_LAYER_KEY]: OSM_CABLE_COLOR,
   // 阶段48-A / 50-C.2-A：GEM 层是**实心彩色圆**，按 `plant_type` 三色
   //    （coal / oil-gas / bioenergy，见 addGemPlantLayers 的 `gemFuelColor`）。
   //    所以色块用 conic 三色饼：既表达了「三种燃料」，又是地图上填色的直接缩略。
@@ -369,6 +410,71 @@ const OSM_LINE_TIERS_BOTTOM_UP: readonly (typeof OSM_LINE_TIERS)[number][] = [
   ...OSM_LINE_TIERS,
 ].reverse();
 
+/* ============================================================================
+ * 阶段56-A2：直交流分档 与 两个新要素层（设计 §4.1 / §5.1）
+ * ============================================================================
+ * 数据侧（`prepare_osm_geojson.mjs`）按设计 §4.1 的三步判定给**每条线路**写了
+ * `is_dc` 布尔值：
+ *   ① `frequency === "0"` ⇒ 直流；② 端点与换流站坐标精确相等 ⇒ 直流；③ 否则按交流。
+ *
+ * 前端据此拆出：
+ *   · 「直流（HVDC）」—— 与 5 个交流档**并列**的第 6 档（不是交流档的子项）；
+ *   · 「海底电缆」—— `line_kind === "cable"`（OSM `power=cable`）；
+ *   · 「换流站」—— `ftype === "converter"` 的点层。
+ *
+ * ‼️ 三条 filter 必须**互斥**，否则同一条线会被画两遍（两遍颜色不同 = 看起来像两条）：
+ *    · 交流档：`is_dc != true` 且 `line_kind != "cable"`
+ *    · 直流档：`is_dc == true` 且 `line_kind != "cable"`
+ *    · 海缆层：`line_kind == "cable"`（不再分直交流 —— 电缆本来就是独立一层）
+ *    `is_dc` 缺席时按「不是直流」处理（低缩放的旧瓦片、或没跑过 A2 的数据）。
+ *
+ * ⚠️ 低缩放（z<8）瓦片只保留 `build_pmtiles.mjs` 的 `collapseProps` 字段，
+ *    所以 `is_dc` 已在那个白名单里 —— 否则低缩放下直流档会**静默空掉**。
+ *
+ * ⚠️ 图层 id / 配色 / 线宽这些**常量**声明在文件顶部（`LAYER_SWATCH` 要用它们，
+ *    而 `const` 有暂时性死区）；这里只放依赖它们的 filter 与判据函数。
+ */
+
+/** 交流电压档的 filter：line + 非电缆 + 非直流 + 该档电压 */
+function lineTierFilter(vclass: string): FilterSpecification {
+  return [
+    "all",
+    ["==", ["get", "ftype"], "line"],
+    ["!=", ["get", "line_kind"], "cable"],
+    ["!=", ["get", "is_dc"], true],
+    ["==", ["get", "vclass"], vclass],
+  ];
+}
+
+/** 直流档的 filter（与交流档、海缆层互斥） */
+function dcLineFilter(): FilterSpecification {
+  return [
+    "all",
+    ["==", ["get", "ftype"], "line"],
+    ["==", ["get", "is_dc"], true],
+    ["!=", ["get", "line_kind"], "cable"],
+  ];
+}
+
+/** 海底电缆层的 filter（`power=cable`，含海底与地下电缆） */
+function cableLineFilter(): FilterSpecification {
+  return [
+    "all",
+    ["==", ["get", "ftype"], "line"],
+    ["==", ["get", "line_kind"], "cable"],
+  ];
+}
+
+/**
+ * 「任一线路图层开着吗」—— 热区层与旧演示线层的可见性都跟它走。
+ *
+ * ‼️ 必须把直流档与海缆层一起算进去：只判 5 个交流档的话，
+ *    「只开直流」时热区会被关掉 ⇒ 看得见直流线却点不开弹窗（静默的幽灵交互）。
+ */
+function anyLineLayerOn(on: (key: string) => boolean): boolean {
+  return LINE_TIER_KEYS.some((k) => on(k)) || on(DC_LAYER_KEY) || on(CABLE_LAYER_KEY);
+}
+
 /**
  * 阶段40：视野统计的自适应节流参数。
  *
@@ -514,6 +620,10 @@ function packLayerId(base: string, key: string): string {
 function packLayerIds(key: string) {
   return {
     lines: OSM_LINE_TIERS.map((t) => packLayerId(t.id, key)),
+    // 阶段56-A2：直流档 / 海缆层 / 换流站点层（每个包各一份，与核心区同规格）
+    dc: packLayerId(OSM_DC_LAYER_ID, key),
+    cable: packLayerId(OSM_CABLE_LAYER_ID, key),
+    converter: packLayerId(OSM_CONVERTER_LAYER_ID, key),
     substations: packLayerId(OSM_SUBSTATION_LAYER_ID, key),
     plants: packLayerId(OSM_PLANT_LAYER_ID, key),
     hit: packLayerId(OSM_LINES_HIT_LAYER_ID, key),
@@ -552,6 +662,16 @@ const TIER_LABEL: Record<string, string> = {
 
 /** 全部分级的键（含 unknown） */
 const LINE_TIER_KEYS: readonly string[] = OSM_LINE_TIERS.map((t) => t.vclass);
+
+/**
+ * 阶段56-A2：「输电线路」总开关管到哪些键。
+ *
+ * 设计 §5.1 把直流列为**输电线路下的第 6 个并列档位** ⇒ 总开关必须一并全开/全关它，
+ * 否则会出现「按了输电线路总开关、直流档却留着上个状态」的不一致。
+ * ⚠️ 「海底电缆」**不在**这里：它是与输电线路并列的独立一层（设计 §5.1 的树结构），
+ * 有自己的开关，不归总开关管。
+ */
+const LINE_MASTER_KEYS: readonly string[] = [...LINE_TIER_KEYS, DC_LAYER_KEY];
 
 /**
  * 默认开启的分级。
@@ -641,6 +761,26 @@ type LineProperties = {
   /** OSM 的 power=line / cable / minor_line 等 */
   line_kind?: string;
   osm_id?: string;
+  /**
+   * 阶段56-A2：合并与属性扩容的字段（设计 §4.1 / §5.2）。
+   * ⚠️ 全部只在 **z≥8** 的瓦片里存在（低缩放只保留 ftype/vclass/is_dc）——
+   *    低缩放点开的弹窗显示 `--` 是**数据契约**，不是渲染 bug。
+   */
+  /** 该链路总长（km，Haversine 累加） */
+  length_km?: number;
+  /** 合并了多少段 OSM way（1 = 未合并） */
+  merged_count?: number;
+  /** 组成该链路的 OSM way id 逗号串（**上限 5 个**，只是抽样线索） */
+  osm_ids?: string;
+  cables?: string;
+  wires?: string;
+  circuits?: string;
+  operator?: string;
+  ref?: string;
+  /** OSM `frequency` 标签（"0" = 直流；缺键 ≠ 交流） */
+  frequency?: string;
+  /** prepare 按设计 §4.1 三步判定出的直交流结论 */
+  is_dc?: boolean;
 };
 
 /** 线路类型 → 中文。OSM 里 power=line 是架空线、power=cable 是地下电缆。 */
@@ -835,12 +975,59 @@ function buildLinePopup(
   // 有精确值就「735 kV（735kV 以上）」，只有档位就显示档位，都没有才是「未知」
   const voltageText = kv ? `${kv} kV${tier ? `（${tier}）` : ""}` : (tier ?? "未知");
 
+  /**
+   * 阶段56-A2：直交流。`is_dc === true` 是 prepare 按设计 §4.1 判定的结论；
+   * `undefined`（低缩放瓦片）时不显示这一行，而不是猜一个 —— 见下面 rows 的构造。
+   */
+  const dcKnown = props.is_dc !== undefined;
+  const isDc = props.is_dc === true;
+
   const rows: PopupRow[] = [
-    { label: "电压等级", value: voltageText, swatch: LINE_COLOR },
-    { label: "线路类型", value: formatLineKind(props.line_kind) },
+    { label: "电压等级", value: voltageText, swatch: isDc ? OSM_DC_COLOR : LINE_COLOR },
+    {
+      label: "线路类型",
+      value: props.line_kind === "cable" ? "海底/地下电缆" : formatLineKind(props.line_kind),
+      ...(props.line_kind === "cable" ? { swatch: OSM_CABLE_COLOR } : {}),
+    },
+  ];
+
+  // ---- 阶段56-A2（设计 §5.2）：长度 / 合并段数 / 回路 / 导线 / 电缆 / 运营商 / 编号 / 频率 ----
+  // ⚠️ 一律「有值才显示」：字段在低缩放瓦片里根本不存在，硬显示会变成一屏 "--"。
+  if (dcKnown) {
+    const freq = props.frequency;
+    // `frequency === "0"` 是直流的最硬信号；其余有频率标签的按交流显示具体赫兹
+    const detail = freq && freq !== "0" ? `（${freq} Hz）` : "";
+    rows.push({
+      label: "电流类型",
+      value: isDc ? `直流 HVDC${detail}` : `交流 AC${detail}`,
+      swatch: isDc ? OSM_DC_COLOR : undefined,
+    });
+  } else if (props.frequency) {
+    rows.push({ label: "频率", value: `${props.frequency} Hz` });
+  }
+  if (props.length_km != null) {
+    rows.push({ label: "长度", value: `${props.length_km} km` });
+  }
+  if (props.merged_count != null) {
+    // ‼️ 「合并段数」与「osm_ids 个数」不是一回事：osm_ids 上限 5，只是抽样线索。
+    //    弹窗里必须说清楚，否则用户会以为这条线只由 5 段 OSM way 拼成。
+    const ids = props.osm_ids ? props.osm_ids.split(",").filter(Boolean) : [];
+    const more = ids.length && props.merged_count > ids.length ? `（OSM 段 id 仅记前 ${ids.length} 个）` : "";
+    rows.push({
+      label: "合并段数",
+      value: props.merged_count > 1 ? `${props.merged_count} 段${more}` : "1 段（未合并）",
+    });
+  }
+  if (props.circuits) rows.push({ label: "回路数", value: props.circuits });
+  if (props.wires) rows.push({ label: "导线", value: props.wires });
+  if (props.cables) rows.push({ label: "电缆", value: props.cables });
+  if (props.operator) rows.push({ label: "运营商", value: props.operator });
+  if (props.ref) rows.push({ label: "线路编号", value: props.ref });
+
+  rows.push(
     { label: "起点", value: start ? formatLngLat(start) : "未提供" },
     { label: "终点", value: end ? formatLngLat(end) : "未提供" },
-  ];
+  );
 
   // 标题兜底（用户拍板）：有 name 用 name；没 name 但有电压 → 「未命名线路」；
   // 两者都没有 → 「输电线路（电压未知）」
@@ -983,7 +1170,7 @@ function formatGw(mw: number): string {
  *    判别一律用自建的 `ftype`。
  */
 type OsmPointProperties = {
-  /** 自建判别字段：line / substation / plant */
+  /** 自建判别字段：line / substation / plant / converter */
   ftype?: string;
   name?: string;
   vclass?: string;
@@ -991,6 +1178,13 @@ type OsmPointProperties = {
   substation_kind?: string;
   plant_source?: string;
   osm_id?: string;
+  /**
+   * 阶段56-A2：属性扩容（设计 §5.2）
+   *   · `operator`      —— 变电站与换流站都有；
+   *   · `plant_output`  —— 电厂出力（OSM `plant:output:electricity`，形如 "600 MW"）
+   */
+  operator?: string;
+  plant_output?: string;
 };
 
 /**
@@ -1064,6 +1258,8 @@ const SUBSTATION_KIND_LABEL: Record<string, string> = {
  */
 function buildOsmPointPopup(props: OsmPointProperties): HTMLElement {
   const isSubstation = props.ftype === "substation";
+  // 阶段56-A2：换流站也是点要素，但与变电站/电厂的字段表不同（设计 §4.1）
+  const isConverter = props.ftype === "converter";
   const rows: PopupRow[] = [];
 
   // 有精确值就「220 kV（220-499kV）」，只有档位就显示档位，都没有才是「未知」
@@ -1073,7 +1269,7 @@ function buildOsmPointPopup(props: OsmPointProperties): HTMLElement {
   rows.push({
     label: "电压等级",
     value: voltageText,
-    swatch: isSubstation ? SUBSTATION_COLOR : undefined,
+    swatch: isSubstation ? SUBSTATION_COLOR : isConverter ? OSM_CONVERTER_COLOR : undefined,
   });
 
   if (isSubstation) {
@@ -1081,9 +1277,19 @@ function buildOsmPointPopup(props: OsmPointProperties): HTMLElement {
     if (kind) {
       rows.push({ label: "变电站类型", value: SUBSTATION_KIND_LABEL[kind] ?? kind });
     }
+  } else if (isConverter) {
+    // 换流站没有 plant/substation 的子类型字段（设计 §4.1：osm_id/name/operator/vclass/voltage_kv）
   } else {
     const src = osmPlantSourceLabel(props.plant_source);
     if (src) rows.push({ label: "能源来源", value: src.text, swatch: src.swatch });
+    // 阶段56-A2（设计 §5.2）：电厂新增出力。OSM 的 `plant:output:electricity` 是**自由文本**
+    // （"600 MW" / "1200 MW;900 MW"），所以原样显示，不做数值解析（解析错误比不显示更糟）。
+    if (props.plant_output) rows.push({ label: "出力", value: props.plant_output });
+  }
+
+  // 阶段56-A2（设计 §5.2）：变电站与换流站显示运营商
+  if ((isSubstation || isConverter) && props.operator) {
+    rows.push({ label: "运营商", value: props.operator });
   }
 
   // ‼️ `osm_id` 只在 z>=8 的瓦片里保留（低缩放为压体积被裁掉）。
@@ -1094,7 +1300,7 @@ function buildOsmPointPopup(props: OsmPointProperties): HTMLElement {
 
   return buildPopupFrame(
     props.name ?? "",
-    isSubstation ? "未命名变电站" : "未命名电厂",
+    isSubstation ? "未命名变电站" : isConverter ? "未命名换流站" : "未命名电厂",
     rows,
     meta,
   );
@@ -1146,8 +1352,11 @@ function showOsmPointOrLine(
   const osmPointLayers = [
     OSM_PLANT_LAYER_ID,
     OSM_SUBSTATION_LAYER_ID,
+    // 阶段56-A2：换流站也是可点要素（弹窗走 buildOsmPointPopup 的 converter 分支）
+    OSM_CONVERTER_LAYER_ID,
     ...packIds.map((i) => i.plants),
     ...packIds.map((i) => i.substations),
+    ...packIds.map((i) => i.converter),
   ].filter((id) => !!map.getLayer(id));
   const osmLineLayers = [OSM_LINES_HIT_LAYER_ID, ...packIds.map((i) => i.hit)].filter((id) =>
     !!map.getLayer(id),
@@ -2232,11 +2441,9 @@ function addOsmGridLayers(
       source: OSM_SOURCE,
       ...layerRef,
       // ftype 判别字段不能少：同一个 source 里装着点、线两类几何
-      filter: [
-        "all",
-        ["==", ["get", "ftype"], "line"],
-        ["==", ["get", "vclass"], tier.vclass],
-      ],
+      // 阶段56-A2：交流档还要排除「海缆」与「直流」两类 —— 它们各有自己的图层，
+      // 不排除就会被画两遍（两种颜色叠在一起，看起来像两条不同的线）。
+      filter: lineTierFilter(tier.vclass),
       layout: {
         "line-cap": "round",
         "line-join": "round",
@@ -2262,6 +2469,59 @@ function addOsmGridLayers(
     });
   }
 
+  // ---- 阶段56-A2：直流（HVDC）档 ----
+  // 画在 5 个交流档**之上**：直流线路数量少（全国百来条量级）但信息量大，
+  // 被低压灰线盖住就失去意义。线型用虚线，进一步与交流区分（不只靠颜色）。
+  map.addLayer({
+    id: OSM_DC_LAYER_ID,
+    type: "line",
+    source: OSM_SOURCE,
+    ...layerRef,
+    filter: dcLineFilter(),
+    layout: { "line-cap": "butt", "line-join": "round" },
+    paint: {
+      "line-color": OSM_DC_COLOR,
+      "line-opacity": 0.95,
+      "line-width": [
+        "interpolate",
+        ["linear"],
+        ["zoom"],
+        4,
+        OSM_DC_WIDTH * 0.35,
+        8,
+        OSM_DC_WIDTH * 0.6,
+        11,
+        OSM_DC_WIDTH,
+      ],
+      "line-dasharray": [2, 1.2],
+    },
+  });
+
+  // ---- 阶段56-A2：海底电缆层（OSM `power=cable`）----
+  map.addLayer({
+    id: OSM_CABLE_LAYER_ID,
+    type: "line",
+    source: OSM_SOURCE,
+    ...layerRef,
+    filter: cableLineFilter(),
+    layout: { "line-cap": "round", "line-join": "round" },
+    paint: {
+      "line-color": OSM_CABLE_COLOR,
+      "line-opacity": 0.9,
+      "line-width": [
+        "interpolate",
+        ["linear"],
+        ["zoom"],
+        4,
+        OSM_CABLE_WIDTH * 0.3,
+        8,
+        OSM_CABLE_WIDTH * 0.55,
+        11,
+        OSM_CABLE_WIDTH,
+      ],
+    },
+  });
+
   map.addLayer({
     id: OSM_SUBSTATION_LAYER_ID,
     type: "circle",
@@ -2274,6 +2534,24 @@ function addOsmGridLayers(
       "circle-stroke-color": "#06333a",
       "circle-stroke-width": 0.8,
       "circle-radius": ["interpolate", ["linear"], ["zoom"], 5, 2.5, 10, 5, 14, 8],
+    },
+  });
+
+  // ---- 阶段56-A2：换流站（直流线路的端点锚点）----
+  // 用「实心黄圆 + 深色描边」：与变电站（青）、电厂（白描空心）三者在任何底图上都分得开。
+  // 半径比变电站略大：全国只有百来个，稀一点也看得见。
+  map.addLayer({
+    id: OSM_CONVERTER_LAYER_ID,
+    type: "circle",
+    source: OSM_SOURCE,
+    ...layerRef,
+    filter: ["==", ["get", "ftype"], "converter"],
+    paint: {
+      "circle-color": OSM_CONVERTER_COLOR,
+      "circle-opacity": 0.95,
+      "circle-stroke-color": "#4a2c00",
+      "circle-stroke-width": 1,
+      "circle-radius": ["interpolate", ["linear"], ["zoom"], 4, 3, 10, 6, 14, 9],
     },
   });
 
@@ -2390,11 +2668,8 @@ function addPackLayers(
       type: "line",
       source: sourceId,
       ...layerRef,
-      filter: [
-        "all",
-        ["==", ["get", "ftype"], "line"],
-        ["==", ["get", "vclass"], tier.vclass],
-      ],
+      // 阶段56-A2：与核心区同一套 filter（交流档排除海缆与直流）
+      filter: lineTierFilter(tier.vclass),
       layout: {
         "line-cap": "round",
         "line-join": "round",
@@ -2418,6 +2693,56 @@ function addPackLayers(
     });
   }
 
+  // ---- 阶段56-A2：直流档 / 海缆层（与核心区同规格，id 带区域后缀）----
+  map.addLayer({
+    id: id(OSM_DC_LAYER_ID),
+    type: "line",
+    source: sourceId,
+    ...layerRef,
+    filter: dcLineFilter(),
+    layout: { "line-cap": "butt", "line-join": "round" },
+    paint: {
+      "line-color": OSM_DC_COLOR,
+      "line-opacity": 0.95,
+      "line-width": [
+        "interpolate",
+        ["linear"],
+        ["zoom"],
+        4,
+        OSM_DC_WIDTH * 0.35,
+        8,
+        OSM_DC_WIDTH * 0.6,
+        11,
+        OSM_DC_WIDTH,
+      ],
+      "line-dasharray": [2, 1.2],
+    },
+  });
+
+  map.addLayer({
+    id: id(OSM_CABLE_LAYER_ID),
+    type: "line",
+    source: sourceId,
+    ...layerRef,
+    filter: cableLineFilter(),
+    layout: { "line-cap": "round", "line-join": "round" },
+    paint: {
+      "line-color": OSM_CABLE_COLOR,
+      "line-opacity": 0.9,
+      "line-width": [
+        "interpolate",
+        ["linear"],
+        ["zoom"],
+        4,
+        OSM_CABLE_WIDTH * 0.3,
+        8,
+        OSM_CABLE_WIDTH * 0.55,
+        11,
+        OSM_CABLE_WIDTH,
+      ],
+    },
+  });
+
   map.addLayer({
     id: id(OSM_SUBSTATION_LAYER_ID),
     type: "circle",
@@ -2430,6 +2755,22 @@ function addPackLayers(
       "circle-stroke-color": "#06333a",
       "circle-stroke-width": 0.8,
       "circle-radius": ["interpolate", ["linear"], ["zoom"], 5, 2.5, 10, 5, 14, 8],
+    },
+  });
+
+  // 阶段56-A2：换流站点层（区域包也画 —— 直流线路的端点在包内，锚点就该在包内）
+  map.addLayer({
+    id: id(OSM_CONVERTER_LAYER_ID),
+    type: "circle",
+    source: sourceId,
+    ...layerRef,
+    filter: ["==", ["get", "ftype"], "converter"],
+    paint: {
+      "circle-color": OSM_CONVERTER_COLOR,
+      "circle-opacity": 0.95,
+      "circle-stroke-color": "#4a2c00",
+      "circle-stroke-width": 1,
+      "circle-radius": ["interpolate", ["linear"], ["zoom"], 4, 3, 10, 6, 14, 9],
     },
   });
 
@@ -2752,9 +3093,11 @@ function layersForContext(visible: readonly string[]): string[] {
   for (const name of LAYERS) {
     if (!visible.includes(name)) continue;
     if (name === "输电线路") {
+      // 阶段56-A2：直流档算作输电线路的第 6 档（设计 §5.1），一并写进 AI 上下文
       const tiers = OSM_LINE_TIERS.filter((t) => visible.includes(t.vclass)).map(
         (t) => TIER_LABEL[t.vclass] ?? t.vclass,
       );
+      if (visible.includes(DC_LAYER_KEY)) tiers.push(DC_LAYER_KEY);
       names.push(tiers.length ? `输电线路（${tiers.join("、")}）` : "输电线路");
       continue;
     }
@@ -3001,7 +3344,10 @@ function MapPage({
   //    恢复出来的可能是改名前的「GEM 煤炭数据」）。今天的初始值是常量、
   //    转换是恒等映射，但入口先摆好，加持久化时才不会漏。
   const [visibleLayers, setVisibleLayersRaw] = useState<readonly string[]>(() =>
-    normalizeLayerKeys([...LAYERS, ...DEFAULT_ON_TIERS]),
+    // 阶段56-A2：`LAYERS` 现在含「换流站」「海底电缆」（默认开），
+    // 另外显式加上**直流档** —— 它不在 DEFAULT_ON_TIERS 里（那是交流 5 档），
+    // 但直流是本阶段的重点新增内容，默认不可见会让人以为没做。
+    normalizeLayerKeys([...LAYERS, ...DEFAULT_ON_TIERS, DC_LAYER_KEY]),
   );
 
   /**
@@ -3196,8 +3542,11 @@ function MapPage({
    */
   const gemWantedRef = useRef(false);
 
-  /** 输电线路总开关的状态：任一电压档开启即为「开」 */
-  const anyTierOn = LINE_TIER_KEYS.some((k) => visibleLayers.includes(k));
+  /**
+   * 输电线路总开关的状态：任一档（含直流档）开启即为「开」。
+   * 阶段56-A2：直流档也算 —— 设计 §5.1 把它列为输电线路下的第 6 个并列档位。
+   */
+  const anyTierOn = LINE_MASTER_KEYS.some((k) => visibleLayers.includes(k));
 
   /**
    * visibleLayers 的 ref 镜像。
@@ -4084,9 +4433,9 @@ function MapPage({
    */
   const toggleAllTiers = () => {
     setVisibleLayers((prev) => {
-      const on = LINE_TIER_KEYS.some((k) => prev.includes(k));
-      const rest = prev.filter((n) => !LINE_TIER_KEYS.includes(n));
-      return on ? rest : [...rest, ...LINE_TIER_KEYS];
+      const on = LINE_MASTER_KEYS.some((k) => prev.includes(k));
+      const rest = prev.filter((n) => !LINE_MASTER_KEYS.includes(n));
+      return on ? rest : [...rest, ...LINE_MASTER_KEYS];
     });
   };
 
@@ -4357,7 +4706,11 @@ function MapPage({
         }
         m.setLayoutProperty(ids.substations, "visibility", on("变电站") ? "visible" : "none");
         m.setLayoutProperty(ids.plants, "visibility", on("电厂") ? "visible" : "none");
-        m.setLayoutProperty(ids.hit, "visibility", LINE_TIER_KEYS.some((k) => on(k)) ? "visible" : "none");
+        // 阶段56-A2：三个新图层也要设一次初始可见性
+        m.setLayoutProperty(ids.dc, "visibility", on(DC_LAYER_KEY) ? "visible" : "none");
+        m.setLayoutProperty(ids.cable, "visibility", on(CABLE_LAYER_KEY) ? "visible" : "none");
+        m.setLayoutProperty(ids.converter, "visibility", on(CONVERTER_LAYER_KEY) ? "visible" : "none");
+        m.setLayoutProperty(ids.hit, "visibility", anyLineLayerOn(on) ? "visible" : "none");
 
         // 光标反馈（与核心区那几个 hit 层一致）。
         // ‼️ 必须先存引用再注册：卸载时要用同一个 fn 去 `off`，匿名闭包摘不掉。
@@ -4369,7 +4722,8 @@ function MapPage({
         };
         // 阶段41：点图层现在也能点开弹窗，一并给指针提示
         // （只给 hit 层的话，鼠标移到变电站/电网上不会有“可点”的反应感）。
-        const cursorLayers = [ids.hit, ids.plants, ids.substations];
+        // 阶段56-A2：换流站也是可点要素，加进来。
+        const cursorLayers = [ids.hit, ids.plants, ids.substations, ids.converter];
         packCursorHandlers.set(key, { layers: cursorLayers, enter: onEnter, leave: onLeave });
         for (const lid of cursorLayers) {
           m.on("mouseenter", lid, onEnter);
@@ -4500,11 +4854,17 @@ function MapPage({
     for (const tier of OSM_LINE_TIERS) {
       apply([tier.id], on(tier.vclass));
     }
-    // 旧的 DB 演示线层（阶段28 已清空）与热区层跟随「任一档开启」
-    apply([LINES_LAYER_ID, LINES_HIT_LAYER_ID], LINE_TIER_KEYS.some((k) => on(k)));
-    // 阶段34：真实切片线路的点击热区也必须跟着电压档开关走 ——
+    // 阶段56-A2：直流档 / 海缆层 / 换流站三个新开关
+    apply([OSM_DC_LAYER_ID], on(DC_LAYER_KEY));
+    apply([OSM_CABLE_LAYER_ID], on(CABLE_LAYER_KEY));
+    apply([OSM_CONVERTER_LAYER_ID], on(CONVERTER_LAYER_KEY));
+    // 旧的 DB 演示线层（阶段28 已清空）与热区层跟随「任一**线**图层开启」
+    // （阶段56-A2：判据从「任一交流档」扩到 `anyLineLayerOn`，含直流与海缆 ——
+    //   只开直流时热区若被关掉，就会出现"看得见、点不开"）
+    apply([LINES_LAYER_ID, LINES_HIT_LAYER_ID], anyLineLayerOn(on));
+    // 阶段34：真实切片线路的点击热区也必须跟着走 ——
     // 全部关掉时若热区还在，点空白处会弹出「看不见的线路」信息。
-    apply([OSM_LINES_HIT_LAYER_ID], LINE_TIER_KEYS.some((k) => on(k)));
+    apply([OSM_LINES_HIT_LAYER_ID], anyLineLayerOn(on));
 
     // 阶段39：区域包的图层跟随**同一套**开关。
     // 这里按当前 activePacks 重新算一遍 —— 刚挂上的包也会被设成正确状态，
@@ -4513,9 +4873,12 @@ function MapPage({
       for (const tier of OSM_LINE_TIERS) {
         apply([packLayerId(tier.id, key)], on(tier.vclass));
       }
+      apply([packLayerId(OSM_DC_LAYER_ID, key)], on(DC_LAYER_KEY));
+      apply([packLayerId(OSM_CABLE_LAYER_ID, key)], on(CABLE_LAYER_KEY));
+      apply([packLayerId(OSM_CONVERTER_LAYER_ID, key)], on(CONVERTER_LAYER_KEY));
       apply([packLayerId(OSM_SUBSTATION_LAYER_ID, key)], on("变电站"));
       apply([packLayerId(OSM_PLANT_LAYER_ID, key)], on("电厂"));
-      apply([packLayerId(OSM_LINES_HIT_LAYER_ID, key)], LINE_TIER_KEYS.some((k) => on(k)));
+      apply([packLayerId(OSM_LINES_HIT_LAYER_ID, key)], anyLineLayerOn(on));
     }
 
     // 聚合数字是 HTML Marker，上面的 setLayoutProperty 管不到它
@@ -4583,13 +4946,18 @@ function MapPage({
 
       // 只查**当前开启**的电压档：关掉的档不应出现在统计里。
       // 阶段39：区域包的图层也要算进去 —— 否则在四川看了一屏线、面板却写「线路段 0 段」。
+      // 阶段56-A2：直流档与海缆层也是"线路段"的一部分（设计 §5.3：5 档 + 直流 1 档），
+      //    漏掉它们会让面板读数比实际看到的线少一截，而**不报错**。
       // ⚠️ 必须过滤掉不存在的图层：`queryRenderedFeatures` 传一个不存在的 layer id 会报错。
       const packKeys = activePacksRef.current;
-      const lineLayers = [
+      const lineLayerIds = [
         ...OSM_LINE_TIERS.filter((t) => on(t.vclass)).map((t) => t.id),
-        ...packKeys.flatMap((k) =>
-          OSM_LINE_TIERS.filter((t) => on(t.vclass)).map((t) => packLayerId(t.id, k)),
-        ),
+        ...(on(DC_LAYER_KEY) ? [OSM_DC_LAYER_ID] : []),
+        ...(on(CABLE_LAYER_KEY) ? [OSM_CABLE_LAYER_ID] : []),
+      ];
+      const lineLayers = [
+        ...lineLayerIds,
+        ...packKeys.flatMap((k) => lineLayerIds.map((lid) => packLayerId(lid, k))),
       ].filter((lid) => !!map.getLayer(lid));
       const lines = lineLayers.length
         ? countUnique(map.queryRenderedFeatures({ layers: lineLayers }), exact)
@@ -4865,19 +5233,17 @@ function MapPage({
                     <>
                       <ul className={styles.layerList}>
                         {[...LAYERS, GEM_PLANT_LAYER_NAME].map((name) => {
-                          // 「输电线路」是总开关：状态 = 任一电压档开启；点击 = 全开 / 全关
-                          const isVisible =
-                            name === "输电线路" ? anyTierOn : visibleLayers.includes(name);
+                          // 「输电线路」是总开关：状态 = 任一档（含直流档）开启；点击 = 全开 / 全关
+                          const isLine = name === "输电线路";
+                          const isVisible = isLine ? anyTierOn : visibleLayers.includes(name);
 
                           return (
-                            <li key={name}>
+                            <li key={name} className={isLine ? styles.layerRowSplit : undefined}>
                               <button
                                 type="button"
                                 className={styles.layerBtn}
                                 aria-pressed={isVisible}
-                                onClick={() =>
-                                  name === "输电线路" ? toggleAllTiers() : toggleLayer(name)
-                                }
+                                onClick={() => (isLine ? toggleAllTiers() : toggleLayer(name))}
                               >
                                 <span
                                   className={styles.layerSwatch}
@@ -4886,32 +5252,40 @@ function MapPage({
                                 />
                                 {name}
                               </button>
+                              {/* 阶段56-A2：把「展开分级」的箭头并进这一行。
+                                  ‼️ 原来是"总开关一行 + 独立的分级标题一行"，两层各 ~30/22px。
+                                     设计 §5.1 要的树是「输电线路 → 6 个并列档位」，箭头属于这一行；
+                                     并进来还顺带**省下 ~22px**，抵消新增两个图层开关（换流站/海缆）
+                                     对 1280×800 面板高度的压力（阶段54 刚把溢出修到 0）。
+                                  ⚠️ 不用嵌套 button（HTML 不允许）：两个 button 是**兄弟**，
+                                     外层 li 用 flex 排一行。 */}
+                              {isLine && (
+                                <button
+                                  type="button"
+                                  className={styles.rowChevron}
+                                  aria-expanded={tierMenuOpen}
+                                  aria-controls="tier-sub-menu"
+                                  aria-label={tierMenuOpen ? "收起电压分级" : "展开电压分级"}
+                                  title="展开/收起电压分级"
+                                  onClick={() => setTierMenuOpen((v) => !v)}
+                                >
+                                  {tierMenuOpen ? "▼" : "▶"}
+                                </button>
+                              )}
                             </li>
                           );
                         })}
                       </ul>
 
-                      {/* 阶段30：输电线路按电压分级。
+                      {/* 阶段30：输电线路按电压分级（阶段56-A2 起含第 6 档直流）。
                           用原生 `<input type="checkbox">`：语义与无障碍最好，也不必为「选中态」自造样式。
                           色块取自与地图**同一份** `OSM_LINE_TIERS[].color`，所以开关本身就是图例，
                           永远不会和地图上的颜色脱节。
                           阶段54：本组改为**可折叠**（第三层，默认折叠），
                           把 1280×800 下这块 116px 的内容从默认路径上摘掉（溢出 65px → 0）。
+                          阶段56-A2：折叠开关并进了上面的「输电线路」行（见那里的注释）。
                           实测数据与代价见 `tierMenuOpen` 的注释。 */}
                       <div className={styles.tierGroup}>
-                        <button
-                          type="button"
-                          className={styles.subHeader}
-                          aria-expanded={tierMenuOpen}
-                          aria-controls="tier-sub-menu"
-                          onClick={() => setTierMenuOpen((v) => !v)}
-                        >
-                          <span>输电线路（按电压分级）</span>
-                          <span className={styles.chevron} aria-hidden="true">
-                            {tierMenuOpen ? "▼" : "▶"}
-                          </span>
-                        </button>
-
                         <ul
                           id="tier-sub-menu"
                           className={`${styles.tierList} ${styles.subList}`}
@@ -4935,6 +5309,26 @@ function MapPage({
                               </label>
                             </li>
                           ))}
+                          {/* 阶段56-A2：第 6 档「直流（HVDC）」—— 与 5 个交流档**并列**
+                              （设计 §5.1）。默认开启：直流数量少但信息量大，
+                              而且它就是本阶段新增的主要看点。
+                              色块与地图同一份 OSM_DC_COLOR，开关即图例。 */}
+                          <li key={DC_LAYER_KEY}>
+                            <label className={styles.tierItem}>
+                              <input
+                                type="checkbox"
+                                className={styles.tierCheck}
+                                checked={visibleLayers.includes(DC_LAYER_KEY)}
+                                onChange={() => toggleTier(DC_LAYER_KEY)}
+                              />
+                              <span
+                                className={styles.layerSwatch}
+                                style={{ background: OSM_DC_COLOR }}
+                                aria-hidden="true"
+                              />
+                              {DC_LAYER_KEY}
+                            </label>
+                          </li>
                         </ul>
                       </div>
 
@@ -5046,9 +5440,41 @@ function MapPage({
                 />
                 查询高亮
               </li>
+              {/* 阶段56-A2：换流站符号与直流线型 —— 这两项**不重复**上面的图层色块：
+                  图层开关里只有"换流站"一个色块（在这里补上语义说明），
+                  而虚线的线型在色块上表达不出来，必须单独列。 */}
+              <li className={styles.legendItem}>
+                <span
+                  className={styles.legendSwatch}
+                  style={{ backgroundColor: OSM_CONVERTER_COLOR }}
+                  aria-hidden="true"
+                />
+                换流站（直流线路的起止锚点）
+              </li>
+              <li className={styles.legendItem}>
+                <span
+                  className={styles.legendSwatch}
+                  style={{
+                    background: `repeating-linear-gradient(90deg, ${OSM_DC_COLOR} 0 6px, transparent 6px 10px)`,
+                  }}
+                  aria-hidden="true"
+                />
+                直流（HVDC）— 虚线
+              </li>
+              <li className={styles.legendItem}>
+                <span
+                  className={styles.legendSwatch}
+                  style={{ backgroundColor: OSM_CABLE_COLOR }}
+                  aria-hidden="true"
+                />
+                海底电缆（OSM power=cable，含地下电缆）
+              </li>
             </ul>
             <p className={styles.legendFoot}>
               变电站半径与线路宽度均随电压等级递增；变电站与线路为演示数据。
+              {" "}
+              直流/交流按 OSM 的 frequency 标签与换流站拓扑判定，frequency 覆盖有限（实测约 11%），
+              未识别的直流线路按交流显示。
             </p>
           </div>
         </section>

@@ -123,7 +123,17 @@ async function main() {
     line: new Set(),
     substation: new Set(),
     plant: new Set(),
+    // 阶段56-A2：换流站点层
+    converter: new Set(),
   };
+  /**
+   * 阶段56-A2：低级别瓦片里 `is_dc` 的存在性计数。
+   * ‼️ 设计 §5.1 的硬约束：z<8 的瓦片只保留 `collapseProps` 里的字段，
+   *    `is_dc` 若漏了低缩放白名单，前端的直流档在低缩放下会**静默全部按交流上色**
+   *    （不报错、不空白，只是颜色不对 —— 肉眼极难发现）。所以在这里钉死。
+   */
+  let lowZoomLineFeats = 0;
+  let lowZoomLineWithIsDc = 0;
   /** ‼️ 解码失败必须计数而不能静默跳过 —— 阶段42 的「假断言」就是静默跳过造成的 */
   let decodeFailed = 0;
   let decodeErrMsg = null;
@@ -204,6 +214,10 @@ async function main() {
           hist[k] = (hist[k] ?? 0) + 1;
           const t = p.ftype;
           if (keysByType[t]) for (const key of Object.keys(p)) keysByType[t].add(key);
+          if (z < LOWZOOM_CAP_FROM && t === "line") {
+            lowZoomLineFeats++;
+            if ("is_dc" in p) lowZoomLineWithIsDc++;
+          }
           // 空值消息检出（详见 emptyPropValues 的注释）
           for (const key of Object.keys(p)) {
             const v = p[key];
@@ -325,6 +339,8 @@ async function main() {
     line: ["line_kind"],
     substation: ["substation_kind"],
     plant: ["plant_source"],
+    // 阶段56-A2：换流站点层 —— 抽样到的瓦片里必须有它，且至少带 osm_id
+    converter: ["osm_id"],
   };
   /**
    * 阶段56-A1：扩容属性的**存在性**断言。
@@ -339,6 +355,17 @@ async function main() {
     line: ["cables", "circuits", "operator", "ref"],
     plant: ["plant_output"],
   };
+  /**
+   * 阶段56-A2：`is_dc` 必须在**每一条**低级别线路要素上（设计 §5.1）。
+   * 只在抽样到了低级别线路时才判定（抽样级别是 0,4,6,12 ⇒ 正常一定会有）。
+   */
+  if (lowZoomLineFeats > 0) {
+    checks.push({
+      断言: `z<${LOWZOOM_CAP_FROM} 的线路要素带 is_dc（漏了会让低缩放直流配色静默失效）`,
+      实测: `${lowZoomLineWithIsDc}/${lowZoomLineFeats} 个低级别线路要素带 is_dc`,
+      通过: lowZoomLineWithIsDc === lowZoomLineFeats,
+    });
+  }
   if (results.some((r) => r.z >= 8)) {
     const missing = [];
     for (const [ftype, keys] of Object.entries(expectProp)) {
