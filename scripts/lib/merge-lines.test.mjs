@@ -112,3 +112,23 @@ test("lengthKm 对已知距离给出合理值（赤道 0.01° ≈ 1.11 km）", (
   const d = lengthKm([[0, 0], [0.01, 0]]);
   assert.ok(Math.abs(d - 1.113) < 0.01, `实测 ${d}`);
 });
+
+test("osm_ids 逗号串默认截到 5 个（省的是唯一字符串表），但 merged_count 记全段数", () => {
+  const segs = [];
+  for (let i = 0; i < 8; i++) segs.push(line(`way/${i}`, [[i * 0.01, 0], [(i + 1) * 0.01, 0]]));
+  const { features } = mergeLines(segs);
+  assert.equal(features.length, 1);
+  assert.equal(features[0].properties.merged_count, 8, "段数不能被截断");
+  assert.equal(features[0].properties.osm_ids, "way/0,way/1,way/2,way/3,way/4", "默认上限 5");
+  assert.equal(features[0].properties.osm_id, "way/0", "首段 id 仍单列，不依赖 osm_ids");
+});
+
+test("maxOsmIds 参数真的生效（曾被 decorate 里写死的 20 静默覆盖）", () => {
+  const segs = [];
+  for (let i = 0; i < 8; i++) segs.push(line(`way/${i}`, [[i * 0.01, 0], [(i + 1) * 0.01, 0]]));
+  const two = mergeLines(segs, { maxOsmIds: 2 }).features[0].properties;
+  assert.equal(two.osm_ids, "way/0,way/1");
+  assert.equal(two.merged_count, 8);
+  const all = mergeLines(segs, { maxOsmIds: 20 }).features[0].properties;
+  assert.equal(all.osm_ids.split(",").length, 8, "上限大于段数时全记");
+});

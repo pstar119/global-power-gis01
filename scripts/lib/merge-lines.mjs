@@ -87,7 +87,24 @@ function makeUf(n) {
  * @returns {{features: typeof features, stats: {input: number, output: number, groups: number, maxChain: number, lengthBeforeKm: number, lengthAfterKm: number}}}
  */
 export function mergeLines(features, opts = {}) {
-  const maxOsmIds = opts.maxOsmIds ?? 20;  const segs = features.map((f, i) => {
+  /**
+   * 每个合并要素最多记几个 `osm_id`（默认 **5**）。
+   *
+   * 用途只有一个：弹窗里给出"这条线路由哪些 OSM way 组成"的抽样线索。
+   * 「合并了多少段」由 `merged_count` 表达，**不丢信息**；首段 `osm_id` 也照旧单列。
+   *
+   * ⚠️ 别指望它能显著压体积（2026-09-24 实测）：华东包三个新增字段合计 +5.5 MB，
+   *    其中 `length_km`（double 8 字节）≈ +2.65、`osm_ids` ≈ +1.98、`merged_count` ≈ +0.54；
+   *    而**合并率只有 12~17%，绝大多数要素 `merged_count=1`** ⇒ 20 → 5 只让 7 包从
+   *    152.08 降到 151.61 MB（−0.31%）。要真正压体积得改 `length_km` 的表示或不再落
+   *    `osm_ids`，那属于数据模型变更（设计 §4.1），不在本模块内自作主张。
+   *
+   * ⚠️ 这个参数**必须一路传到 `decorate()`**。早先版本它只被读进局部变量、
+   *    `decorate` 里却写死 `slice(0, 20)` —— 参数形同虚设，调它没有任何效果，
+   *    而且**不报错**（渲染、门禁都正常）。改这里务必同时改 `decorate`。
+   */
+  const maxOsmIds = opts.maxOsmIds ?? 5;
+  const segs = features.map((f, i) => {
     const coords = f.geometry.coordinates;
     return { i, f, coords, start: keyOf(coords[0]), end: keyOf(coords[coords.length - 1]) };
   });
@@ -208,13 +225,13 @@ export function mergeLines(features, opts = {}) {
     // 组内若有分支（理论上被度数=2 排除），把剩下的段按原样追加，避免丢数据
     for (const s of group) {
       if (seen.has(s.i)) continue;
-      out.push(decorate(s.f, [s.f.properties.osm_id], 1, s.coords));
+      out.push(decorate(s.f, [s.f.properties.osm_id], 1, s.coords, maxOsmIds));
       count = Math.max(count, 1);
       seen.add(s.i);
     }
 
     if (count > 0 && props !== null) {
-      out.push(decorate({ ...features[0], properties: props }, osmIds, count, coords));
+      out.push(decorate({ ...features[0], properties: props }, osmIds, count, coords, maxOsmIds));
       maxChain = Math.max(maxChain, count);
     }
   }
@@ -237,14 +254,18 @@ export function mergeLines(features, opts = {}) {
   };
 }
 
-function decorate(base, osmIds, count, coords) {
+/**
+ * @param {number} maxOsmIds 逗号串里最多记几个 id —— **由 `mergeLines` 传入**，
+ *   不要在这里写死常量（写死会让 `opts.maxOsmIds` 静默失效，见 `mergeLines` 的注释）。
+ */
+function decorate(base, osmIds, count, coords, maxOsmIds) {
   return {
     type: "Feature",
     properties: {
       ...base.properties,
       osm_id: osmIds[0] ?? base.properties.osm_id,
       // ⚠️ MVT **不支持数组属性**（vt-pbf 会写坏或报错），所以这里存成逗号串
-      osm_ids: osmIds.slice(0, 20).join(","),
+      osm_ids: osmIds.slice(0, maxOsmIds).join(","),
       merged_count: count,
       length_km: Math.round(lengthKm(coords) * 100) / 100,
     },
