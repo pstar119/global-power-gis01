@@ -39,7 +39,7 @@ node scripts/verify_packs.mjs --remote
 
 ---
 
-## 2. 上传（两条路，任选一条）
+## 2. 上传（三条路，任选一条）
 
 ### 路线 A：`gh` CLI（推荐，可复现）
 

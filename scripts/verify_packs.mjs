@@ -57,7 +57,6 @@ const assetNameOf = (pack) => basename(pack.file);
 
 const argv = process.argv.slice(2);
 const flag = (name) => argv.includes(name);
-const opt = (name) => (argv.includes(name) ? argv[argv.indexOf(name) + 1] : null);
 
 const REMOTE = flag("--remote");
 const QUIET = flag("--quiet");
