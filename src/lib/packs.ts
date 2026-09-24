@@ -26,7 +26,33 @@ export const MANIFEST_URL = "/packs_manifest.json";
  * ⚠️ 只在这里定义一次，MapPage 以 `import type` 复用 —— 之前两边各写一份
  *    `"osm" | "gem"`，已经在漂移（MapPage 那份没有 `core` / `release`）。
  */
-export type PackKind = "region" | "gem";
+export type PackKind = "region" | "gem" | "basemap";
+
+/**
+ * 阶段56-B：品类判定必须**语义化**，不能再用"非 gem 即区域包"这种反向推断。
+ *
+ * ‼️ 为什么必须有这三条：`PackKind` 从两态变三态之后，原来那句注释规则
+ *    （"运行时一律用 `=== \"gem\"` 判定，缺失自然落到 region 分支"）**不再安全**：
+ *    `basemap` 既不是 gem 也不是区域包，任何 `!isThematicOverlay(p)` 的写法
+ *    都会把它当成区域包 —— 而后果是**静默**的：它会被选进 `activePacks`、占掉装载名额、
+ *    并被当成 MVT 图层名 `grid` 去挂载（那里面根本没有 `grid` 层）。
+ */
+export function isRegionPack(p: Pick<PackEntry, "kind">): boolean {
+  // 缺省 = 区域包：旧清单（阶段39~56-A2）没有 kind 字段，必须继续当区域包
+  return p.kind === "region" || p.kind === undefined;
+}
+
+export function isBasemapPack(p: Pick<PackEntry, "kind">): boolean {
+  return p.kind === "basemap";
+}
+
+/**
+ * thematic / global overlay（当前只有 GEM）：全球单一图层、由开关控制、**不参与视口选举**。
+ * ⚠️ 语义已**收窄为 gem**（阶段56-B）—— 别再用它来排除"非区域包"。
+ */
+export function isThematicOverlay(p: Pick<PackEntry, "kind">): boolean {
+  return p.kind === "gem";
+}
 
 /** 单个区域数据包在清单里的描述 */
 export interface PackEntry {
@@ -45,11 +71,18 @@ export interface PackEntry {
   /**
    * 阶段50-B：数据包品类，决定由哪套生命周期代码挂载。
    *
-   * ⚠️ 可选：旧清单没有这个字段。运行时一律用 `=== "gem"` 判定，
-   *    缺失自然落到 region 分支 —— 千万不要用 `!== "region"` 之类
-   *    的写法，那会把缺省值误判成 thematic。
+   * ⚠️ 可选：旧清单没有这个字段。判定一律走 `isRegionPack` / `isBasemapPack` /
+   *    `isThematicOverlay` 三个函数，**不要**在调用点写 `!== "gem"` 之类的反向推断
+   *    （阶段56-B 加第三态时，那种写法会把底图包当成区域包，而且不报错）。
    */
   kind?: PackKind;
+  /**
+   * 阶段56-B：**底图包专用** —— 它给哪个区域包当底图。
+   *
+   * ‼️ 用字段而不是"从 key 前缀解析"：`basemap-kp-kr` 靠字符串猜归属，
+   *    在改名/换命名规则时会**静默失效**（底图不挂载，地图上什么都不缺，只是没底图）。
+   */
+  forRegion?: string;
 }
 
 export interface PacksManifest {

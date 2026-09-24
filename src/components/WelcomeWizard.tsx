@@ -25,7 +25,7 @@
 import { useMemo, useRef, useState } from "react";
 
 import type { PackDownloadsApi } from "../hooks/usePackDownloads";
-import { fileNameOf, mb, type PackEntry } from "../lib/packs";
+import { fileNameOf, isBasemapPack, isRegionPack, mb, type PackEntry } from "../lib/packs";
 import styles from "./WelcomeWizard.module.css";
 
 /** 默认勾选的区域（用户指定：华东、华中、华南等核心区域） */
@@ -83,8 +83,19 @@ function WelcomeWizard({ api, onFinish }: WelcomeWizardProps) {
    *       “选区域”对它没有意义
    *    ③ 它是可选的全局图层，在「设置 → 数据包管理」里有正经入口
    */
-  const regionPacks = useMemo(() => packs.filter((p) => p.kind !== "gem"), [packs]);
+  const regionPacks = useMemo(() => packs.filter(isRegionPack), [packs]);
   const thematicPacks = useMemo(() => packs.filter((p) => p.kind === "gem"), [packs]);
+  /**
+   * 阶段56-B：底图包（`kind: "basemap"`）—— **第三类**。
+   *
+   * ‼️ 这里以前写的是 `packs.filter((p) => p.kind !== "gem")`，那是 `packs.ts` 注释里
+   *    明确警告过的反模式：加了第三态之后，**底图包会被当成区域包**列进"选区域"里，
+   *    用户勾一个"朝鲜半岛 · 底图"却以为自己在选电网区域。
+   * ⇒ 改用 `isRegionPack`；底图包单独按 `forRegion` 与同区域电网包成组。
+   */
+  const basemapPacks = useMemo(() => packs.filter(isBasemapPack), [packs]);
+  /** 某区域对应的底图包（按 `forRegion` 精确匹配，不做 key 前缀解析） */
+  const basemapOf = (regionKey: string) => basemapPacks.find((b) => b.forRegion === regionKey);
 
   const installedSet = useMemo(() => {
     const s = new Set<string>();
@@ -120,6 +131,22 @@ function WelcomeWizard({ api, onFinish }: WelcomeWizardProps) {
     [thematicPacks, selected, installedSet],
   );
 
+  /**
+   * 阶段56-B：**底图包随所属区域一起下** —— 勾了"朝鲜半岛"就带上它的底图包。
+   *
+   * ‼️ 底图包**绝不进 `targets`**（和 thematic 同一个理由）：`finishBbox` 由区域包的
+   *    bbox 并集算出，底图包带上只是多下几十 MB，不该影响"选区域"的语义；
+   *    但它的 bbox 与同区域电网包**完全一致**，所以单独一个队列最清楚。
+   * ⚠️ 只有该区域被勾选、且底图包本机没有时才进队列。
+   */
+  const basemapTargets = useMemo(
+    () =>
+      basemapPacks.filter(
+        (b) => b.forRegion != null && selected.includes(b.forRegion) && !installedSet.has(b.key),
+      ),
+    [basemapPacks, selected, installedSet],
+  );
+
   /** 阶段51：区域包全选 / 取消全选 —— **只作用于区域包**，不碰 thematic。 */
   const allRegionsSelected =
     regionPacks.length > 0 && regionPacks.every((p) => selected.includes(p.key));
@@ -130,14 +157,16 @@ function WelcomeWizard({ api, onFinish }: WelcomeWizardProps) {
         : [...new Set([...prev, ...regionPacks.map((p) => p.key)])],
     );
 
-  const totalBytes = targets.reduce((sum, p) => sum + (p.bytes ?? 0), 0);
+  /** 已选区域的"电网 + 底图"总下载量（阶段56-B：底图也算进用户要付的流量） */
+  const totalBytes = [...targets, ...basemapTargets].reduce((sum, p) => sum + (p.bytes ?? 0), 0);
 
   /** 串行下载：对镜像更友好，也让「已完成 N/M」这个读数稳定可信。 */
   const start = async () => {
     stoppedRef.current = false;
     setStep("downloading");
     const done: string[] = [];
-    for (const pack of [...targets, ...thematicTargets]) {
+    // 顺序：区域电网包 → 同区域底图包 → 单独勾选的 thematic（GEM）
+    for (const pack of [...targets, ...basemapTargets, ...thematicTargets]) {
       if (stoppedRef.current) break;
       const ok = await download(pack);
       if (ok) done.push(pack.key);
@@ -212,7 +241,16 @@ function WelcomeWizard({ api, onFinish }: WelcomeWizardProps) {
               <span className={styles.prov}>{pack.provinces}</span>
             </span>
             <span className={styles.size}>
-              {outdated ? "需更新" : pack.sizeMb ? `${pack.sizeMb} MB` : "—"}
+              {outdated
+                ? "需更新"
+                : pack.sizeMb
+                  ? `${pack.sizeMb} MB`
+                  : "—"}
+              {/* 阶段56-B：把同区域的**底图包体积**也标出来（成组展示的"两份体积"口径）。
+                  没有对应底图包的区域（国内 7 个区域）这一行不出现，不会造成误导。 */}
+              {basemapOf(pack.key)?.sizeMb != null && (
+                <span className={styles.prov}> ＋底图 {basemapOf(pack.key)?.sizeMb} MB</span>
+              )}
             </span>
           </label>
         ) : (
