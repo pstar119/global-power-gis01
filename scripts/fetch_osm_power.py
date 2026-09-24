@@ -16,6 +16,16 @@
     data/osm/<name>_power_plants.geojson       power=plant                → Point
     data/osm/<name>_power_meta.json            统计信息（数量、电压分布、抓取耗时）
 
+阶段56-A2 新增**补抓通道**（`--category converters`，不重跑上面那 3 类）：
+    data/osm/<name>_power_converters.geojson   power=converter（node+way）→ Point
+    data/osm/<name>_dc_tags.json               way_id → frequency 映射（直流/交流的唯一硬信号）
+    data/osm/<name>_converters_meta.json       本通道的统计（块数、覆盖、失败块）
+
+⚠️ 为什么补抓要单独走一条通道：A1 的中间产物里**没有** frequency（属性表里根本没这个键），
+   而 `power=converter` 也不在原来的三类查询里 ⇒ 直流/交流无法从既有数据推出（设计 §2.4）。
+   重跑 238 块去补这两个**结果集极小**的类别是浪费；本通道按 bbox 分块、单独断点、
+   单独产物，与 power 的断点/产物**完全隔离**（改坏了也污染不到已有的三类数据）。
+
 ============================================================
 为什么走 Overpass 而不是 .osm.pbf + osmium
 ============================================================
@@ -116,11 +126,16 @@ CHUNK_WAIT = 2.0
 #    电力必须沿用历史的 lines/substations/plants 桶名 ——
 #    改了会与已在 data/osm/ 的 7 个区域产物、以及 *progress.json 断点文件对不上，
 #    后果是全部重抓或覆盖失败。
-POWER_KIND_TO_FTYPE = {"lines": "line", "substations": "substation", "plants": "plant"}
+POWER_KIND_TO_FTYPE = {"lines": "line", "substations": "substation", "plants": "plant", "converters": "converter"}
 CATEGORY_KINDS: dict[str, list[str]] = {
     "power": ["lines", "substations", "plants"],
+    # 阶段56-A2：补抓通道。只有一个"桶"，但一条 union 查询同时取两类东西：
+    #   · power=converter（node+way）→ 进 converters 桶（换流站点层）
+    #   · 带 frequency 标签的电力 way → 不进桶，收进 <name>_dc_tags.json 的映射
+    # 主循环按 `power` 标签把两者分开（见 `add_dc_tag`）。
+    "converters": ["converters"],
 }
-CATEGORY_LABEL = {"power": "电力设施"}
+CATEGORY_LABEL = {"power": "电力设施", "converters": "换流站 + 直流标签（补抓）"}
 
 
 def ftype_of(kind: str) -> str:
@@ -128,11 +143,28 @@ def ftype_of(kind: str) -> str:
 
 
 def geom_path(out_dir: str, name: str, category: str, kind: str) -> str:
-    """产物路径。电力保持 `<name>_power_<kind>.geojson`（历史产物不能改名）。
-    阶段56-A1：铁路/管道已撤销，本函数只剩电力一条路径。"""
-    if category == "power":
+    """产物路径。
+
+    · power      → `<name>_power_<kind>.geojson`（历史产物不能改名）
+    · converters → `<name>_power_converters.geojson`
+      ‼️ 虽然它是**独立类别**（补抓通道），文件名仍带 `_power_` 前缀：
+         换流站在归档里是电力要素的一员（设计 §4.1 的 ftype=converter），
+         叫 `<name>_converters.geojson` 会让人以为它是另一套数据源。
+         断点与 meta 才按类别隔离（见 `progress_path` / `meta_path`）。
+    """
+    if category in ("power", "converters"):
         return os.path.join(out_dir, f"{name}_power_{kind}.geojson")
     return os.path.join(out_dir, f"{name}_{category}.geojson")
+
+
+def dc_tags_path(out_dir: str, name: str) -> str:
+    """`way_id → frequency` 映射的产物路径。
+
+    为什么单独一个文件而不是塞进 GeoJSON 属性：MVT **不支持数组属性**，
+    而这些标签本来就不属于"要素"，它是**线路的属性补丁** ——
+    prepare 阶段按 way_id 合并回线路要素（设计 §3.2）。
+    """
+    return os.path.join(out_dir, f"{name}_dc_tags.json")
 
 
 def meta_path(out_dir: str, name: str, category: str = "power") -> str:
@@ -233,6 +265,32 @@ def voltage_class(kv: int | None) -> str:
 # ------------------------------------------------------------------
 # Overpass 抓取
 # ------------------------------------------------------------------
+def is_hopeless_error(exc: BaseException) -> bool:
+    """这次失败**重试也不会好**吗？（用于跳过退避，直接换端点）
+
+    🔴 2026-09-24 实测教训：本机对 `maps.mail.ru` 的 TLS 握手返回
+    `CERTIFICATE_VERIFY_FAILED: self-signed certificate in certificate chain`
+    （疑似链路上有中间设备），而**这个错误每次重试都一模一样** ——
+    原来的实现仍会老老实实退避 10+20+30 秒再放弃，等于每块白等 60 秒。
+    补抓 100+ 块就是 1 个多小时的纯浪费，而且日志里只有一行 WARNING，很容易被当成"网络慢"。
+
+    ⚠️ 判据要窄：只认**确定性**的 TLS/DNS 类错误。429/504/超时都不能算
+    （那些正是退避重试要解决的）。
+    """
+    text = f"{type(exc).__name__}: {exc}"
+    for marker in (
+        "CERTIFICATE_VERIFY_FAILED",
+        "SSLCertVerificationError",
+        "certificate verify failed",
+        "Name or service not known",
+        "getaddrinfo failed",
+        "nodename nor servname provided",
+    ):
+        if marker in text:
+            return True
+    return False
+
+
 def overpass_query(query: str, verbose: bool = True) -> dict[str, Any]:
     """执行一次 Overpass 查询。
 
@@ -279,6 +337,15 @@ def overpass_query(query: str, verbose: bool = True) -> dict[str, Any]:
                     if "429" in str(exc):
                         wait = max(wait, 30.0)
                     time.sleep(wait)
+                if is_hopeless_error(exc):
+                    # 重试不会好的错误（TLS/DNS）⇒ 立刻放弃这个端点，别白等退避
+                    if verbose:
+                        print(
+                            f"    ↪ {endpoint.split('/')[2]} 的错误重试也不会好（{type(exc).__name__}），"
+                            f"跳过退避直接换端点",
+                            file=sys.stderr,
+                        )
+                    break
         if verbose:
             print(f"    ↪ 换下一个端点（{endpoint.split('/')[2]} 放弃）", file=sys.stderr)
 
@@ -359,6 +426,19 @@ def build_feature(element: dict[str, Any], geom_type: str) -> dict[str, Any] | N
         props["frequency"] = tags.get("frequency") or None
         return {"type": "Feature", "properties": props, "geometry": {"type": "LineString", "coordinates": coords}}
 
+    if geom_type == "converter":
+        # ‼️ 本类别的查询是 **union**（换流站 + 带 frequency 的 way 一起取，省一半查询）。
+        #    所以这里必须**只认 power=converter**：其余元素（只有 frequency 的线路）
+        #    由主循环交给 `add_dc_tag` 收进映射表。少了这道判断，几千条线路会被
+        #    当成"换流站"写进点层 —— 而且不报错，只有数量对不上时才发现。
+        if tags.get("power") != "converter":
+            return None
+        center = element_center(element)
+        if center is None:
+            return None
+        props["power"] = tags.get("power")
+        return {"type": "Feature", "properties": props, "geometry": {"type": "Point", "coordinates": list(center)}}
+
     # point 类（变电站 / 电厂）
     center = element_center(element)
     if center is None:
@@ -426,6 +506,31 @@ def queries_for(
     #    ⚠️ 但它**不省 Overpass 的空间检索**，所以单块耗时未必显著下降，
     #       具体倍数以 scripts/measure_count_cost.py 的实测为准，不要凭想象断言。
     tail = "out count;" if count_only else "out geom;"
+
+    if category == "converters":
+        # 阶段56-A2 补抓通道：**一条 union 查询同时取两类**。
+        #
+        #   · `power=converter`（node + way）—— 换流站，直流识别的关键锚点；
+        #   · `way[power][frequency]`        —— 有频率标签的电力 way（`frequency=0` ⇒ 直流）。
+        #
+        # 🔴 为什么并成一条：两者的结果集都很小（探测：长三角 5°×4° 内换流站 4 个、
+        #    frequency 覆盖 11.19%），而 Overpass 的成本**主要是空间检索**而不是返回体 ——
+        #    拆成两条查询等于把同一片区域检索两遍（实测每块每多一条查询就多一次
+        #    完整往返 + 一次块内限流间隔）。合并后每块只有 1 次往返。
+        #
+        # ⚠️ 代价：union 里只要有一部分超时，整块都失败（两部分一起丢）。
+        #    所以分块必须比"抓全量电力"更粗……但也不能太粗：设计 §7 实测
+        #    **大 bbox 必然被 504/读超时打回**（华东全域失败，退到单块 ~5°×4° 才成功）。
+        #    分块尺寸由调用方按 ~5°×4° 给出（见 docs 的阶段记录）。
+        return {
+            "converters": (
+                f"{head}"
+                f"(node[\"power\"=\"converter\"]{f};"
+                f"way[\"power\"=\"converter\"]{f};"
+                f"way[\"power\"][\"frequency\"]{f};);"
+                f"{tail}"
+            ),
+        }
 
     return {
         "lines": (
@@ -685,6 +790,96 @@ def save_done_chunks(path: str, done: set[tuple[float, ...]]) -> None:
     )
 
 
+# ------------------------------------------------------------------
+# 阶段56-A2：直流标签（`way_id → frequency`）
+# ------------------------------------------------------------------
+def add_dc_tag(dc_tags: dict[str, str], element: dict[str, Any]) -> bool:
+    """从补抓查询的结果里挑出 `frequency` 标签，收进映射表。返回是否**新增**。
+
+    ⚠️ 只认 way：`frequency` 是线路的属性；node 上的 frequency（如果有）没有对应的线路要素，
+       收进来只会让覆盖率统计虚高。
+    ⚠️ 原样保留字符串（`"0"` / `"50"` / `"16.67"`）：判定 `frequency == "0"` 是**精确比较**，
+       这里做任何归一化（比如 `float()`）都会把 `"0"` 与 `"0.0"` 之类的写法悄悄分开，
+       而判定逻辑在 prepare 里（设计 §4.1 第 1 步）。
+    """
+    if element.get("type") != "way":
+        return False
+    tags = element.get("tags") or {}
+    if "frequency" not in tags or tags.get("frequency") is None:
+        return False
+    wid = f"way/{element.get('id')}"
+    if wid in dc_tags:
+        return False
+    dc_tags[wid] = str(tags["frequency"]).strip()
+    return True
+
+
+def load_dc_tags(path: str) -> dict[str, str]:
+    """读取已有的 `way_id → frequency` 映射（续抓时累加，而不是覆盖）。
+
+    🔴 文件存在但读不动 = 损坏 ⇒ **响亮失败**（与 `load_checkpoints` 同一原则）：
+       把损坏当成"没有旧数据"，下一次落盘就会把已有标签清空 —— 那正是阶段43 那类事故。
+    """
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(
+            f"直流标签回读失败：{path} 存在但无法解析（{exc}）。\n"
+            f"    先人工确认该文件；确实要重抓请加 --restart（它会重建断点与产物）。"
+        ) from exc
+    tags = data.get("tags")
+    if not isinstance(tags, dict):
+        raise RuntimeError(f"直流标签回读失败：{path} 里没有 tags 映射（不是本脚本的产物）")
+    return {str(k): str(v) for k, v in tags.items()}
+
+
+def write_dc_tags(
+    path: str,
+    tags: dict[str, str],
+    *,
+    name: str,
+    bbox: tuple[float, float, float, float],
+    grid: str,
+    done: int,
+    total: int,
+    failed_chunks: list[list[float]],
+    elapsed: float,
+) -> dict[str, Any]:
+    """落盘 `way_id → frequency` 映射，并返回写进去的统计（供 meta 复用）。
+
+    ‼️ `complete` / `failed_chunks` / `chunks_done` **必须写**：prepare 用这份映射判定 `is_dc`，
+       而「某块没抓」与「这块里没有频率标签」在数据上长得一模一样（都只表现为"键不存在"）。
+       缺了这两个字段，覆盖空洞就变成**静默的判定降级**（直流线路被当成交流，还不报错）。
+    """
+    hist: dict[str, int] = {}
+    for v in tags.values():
+        hist[v] = hist.get(v, 0) + 1
+    payload = {
+        "name": name,
+        "bbox": list(bbox),
+        "grid": grid,
+        "chunks_done": done,
+        "chunks_total": total,
+        "complete": not failed_chunks,
+        "failed_chunks": failed_chunks,
+        "elapsed_sec": round(elapsed, 1),
+        "count": len(tags),
+        "frequency_histogram": dict(sorted(hist.items(), key=lambda kv: (-kv[1], kv[0]))),
+        "note": (
+            "way_id -> OSM `frequency` 标签（原样字符串）。"
+            "**缺键 ≠ 交流**：缺键只表示「OSM 上没有这个标签」，覆盖率实测约 11%（设计 §7 U2），"
+            "所以直流判定必须保留「默认按交流」的第三步，并且只能在 `complete=true` 时才当作覆盖完整。"
+        ),
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "tags": tags,
+    }
+    write_json_atomic(path, payload, indent=None)
+    return {k: v for k, v in payload.items() if k != "tags"}
+
+
 def load_checkpoints(
     out_dir: str, name: str, buckets: dict, seen: dict, category: str = "power"
 ) -> int:
@@ -739,6 +934,21 @@ def print_status(
                 print(f"  {kind:12s} 读取失败：{exc}")
         else:
             print(f"  {kind:12s} （还没有文件）")
+    if category == "converters":
+        dpath = dc_tags_path(out_dir, name)
+        if os.path.exists(dpath):
+            try:
+                with open(dpath, encoding="utf-8") as fh:
+                    data = json.load(fh)
+                n = len(data.get("tags") or {})
+                print(
+                    f"  {'dc_tags':12s} {n:7d} 个 way 带 frequency  "
+                    f"({os.path.getsize(dpath) / 1024:.0f} KB，complete={data.get('complete')})"
+                )
+            except Exception as exc:  # noqa: BLE001
+                print(f"  {'dc_tags':12s} 读取失败：{exc}")
+        else:
+            print(f"  {'dc_tags':12s} （还没有文件）")
     missing = [b for b in chunks if tuple(round(v, 6) for v in b) not in done]
     if missing:
         print(f"\n还剩 {len(missing)} 块未抓。重新运行同一条命令即可**续抓**（不会重头再来）：")
@@ -761,7 +971,10 @@ def main() -> int:
         "--category",
         default="power",
         choices=sorted(CATEGORY_KINDS),
-        help="抓取类别：power 电力设施（线路 / 变电站 / 电厂）。阶段56-A1 起只剩这一类 —— 铁路与油气管道已整体撤销",
+        help=(
+            "抓取类别：power 电力设施（线路 / 变电站 / 电厂）；"
+            "converters 补抓通道（换流站 + 直流标签 frequency，不碰已有三类产物）"
+        ),
     )
     ap.add_argument("--grid", default="4x4", help="把 bbox 切成几块抓，格式 NxM（默认 4x4）")
     ap.add_argument(
@@ -779,7 +992,25 @@ def main() -> int:
     )
     ap.add_argument("--restart", action="store_true", help="忽略断点记录，从头重抓")
     ap.add_argument("--status", action="store_true", help="只读本地文件报告进度，不发任何网络请求")
+    ap.add_argument(
+        "--endpoint",
+        help=(
+            "覆盖 Overpass 端点（逗号或空格分隔，按顺序尝试）。"
+            "不传则用文件头实测过的那张表。"
+            "⚠️ 2026-09-24 实测：第一个端点 maps.mail.ru 在本机 TLS 校验失败（CERTIFICATE_VERIFY_FAILED），"
+            "补抓时建议显式指定可用端点，避免每块都先撞一次失败。"
+        ),
+    )
     args = ap.parse_args()
+
+    if args.endpoint:
+        # 用 global 改模块级列表：`overpass_query` 直接读它（端点没有做成参数，
+        # 因为脚本里所有调用点都只关心"能查到就行"）。
+        global OVERPASS_ENDPOINTS
+        OVERPASS_ENDPOINTS = [u.strip() for u in args.endpoint.replace(",", " ").split() if u.strip()]
+        if not OVERPASS_ENDPOINTS:
+            print("❌ --endpoint 不能是空值", file=sys.stderr)
+            return 2
 
     if args.bbox:
         try:
@@ -829,7 +1060,7 @@ def main() -> int:
         print("⚠️ 抽样模式会留下未覆盖的格子：产物不得当作完整覆盖使用。")
     else:
         print(f"分块   : {nx}x{ny} = {len(chunks)} 块")
-    print(f"端点   : {OVERPASS_ENDPOINTS[0]}")
+    print(f"端点   : {' → '.join(u.split('/')[2] for u in OVERPASS_ENDPOINTS)}")
     print(f"产物名 : {name}")
     print()
 
@@ -849,6 +1080,15 @@ def main() -> int:
     seen: dict[str, set[str]] = {k: set() for k in kinds}
     dup = 0
 
+    # ---- 阶段56-A2：换流站类别的第二个产物（frequency 映射）----
+    # ⚠️ `--restart` 时**必须一起清空**：只清断点不清标签的话，上一次抓到的标签会
+    #    与这一次的混在一起，而 `count`/`complete` 看起来仍然"正常"。
+    tags_path = dc_tags_path(args.out_dir, name)
+    dc_tags: dict[str, str] = {} if args.restart else load_dc_tags(tags_path)
+    preexisting_tags = 0 if args.restart else len(dc_tags)
+    if dc_tags:
+        print(f"直流标签：回读已有 {len(dc_tags)} 个 way 的 frequency\n")
+
     def checkpoint() -> None:
         """
         每块结束后就落盘一次。
@@ -866,6 +1106,20 @@ def main() -> int:
             #    阶段43 实测：就是它先把损坏文件覆盖成了空。
             guard_empty_overwrite(path, feats, preexisting.get(kind, 0))
             write_json_atomic(path, {"type": "FeatureCollection", "crs": crs, "features": feats})
+        # 直流标签与 geojson 一起落盘：它同样"丢了就白抓"，
+        # 而且**丢得比 geojson 更安静**（少了键只表现为"这条线没有频率信息"）。
+        if args.category == "converters":
+            write_dc_tags(
+                tags_path,
+                dc_tags,
+                name=name,
+                bbox=bbox,
+                grid=f"{nx}x{ny}",
+                done=len(done_chunks),
+                total=len(chunks),
+                failed_chunks=failed_chunks,
+                elapsed=time.time() - t0,
+            )
 
     t0 = time.time()
     failed_chunks: list[list[float]] = []
@@ -897,7 +1151,13 @@ def main() -> int:
                 payload = overpass_query(query)
                 elements = payload.get("elements", [])
                 added = 0
+                tag_added = 0
                 for el in elements:
+                    # ‼️ 补抓通道的查询是 **union**：先按 way_id 收 frequency 标签，
+                    #    再交给 build_feature —— 后者只认 power=converter 的那些
+                    #    （其余全返回 None，见其注释）。
+                    if args.category == "converters" and add_dc_tag(dc_tags, el):
+                        tag_added += 1
                     feat = build_feature(el, ftype_of(kind))
                     if not feat:
                         continue
@@ -911,7 +1171,8 @@ def main() -> int:
                     cls = feat["properties"].get("vclass")
                     if cls:
                         kv_hist[cls] = kv_hist.get(cls, 0) + 1
-                print(f"    {kind:12s} 返回 {len(elements):6d} 条，新增 {added:6d} 条")
+                extra = f"，frequency 标签 +{tag_added:5d}" if args.category == "converters" else ""
+                print(f"    {kind:12s} 返回 {len(elements):6d} 条，新增 {added:6d} 条{extra}")
                 # 块内也要歇 —— 连发是 429 的直接原因
                 time.sleep(QUERY_WAIT)
         except Exception as exc:  # noqa: BLE001
@@ -960,7 +1221,9 @@ def main() -> int:
     # 🔴 阶段43 事故的正面防护：断点说「全部抓完」但内存里一条都没有，
     #    这必定是回读出了问题（或旧产物被人为清空），绝不能把空结果写回去。
     #    宁可失败退出，也不能静默地把真数据覆盖成空文件。
-    if done_chunks and not any(buckets[k] for k in kinds):
+    # ⚠️ 阶段56-A2：`converters` 类别**允许 0 个换流站**（有些区域确实一个都没有），
+    #    所以对它放宽成"要素与直流标签**都**为空才报错" —— 否则一个正常结果会被判成事故。
+    if done_chunks and not any(buckets[k] for k in kinds) and not dc_tags:
         raise RuntimeError(
             f"断点记录显示已完成 {len(done_chunks)} 块，但回读到 0 个要素。\n"
             f"    拒绝写入 —— 否则会把已有产物覆盖成空文件（阶段43 真实发生过，损失 7.4 万条）。\n"
@@ -976,6 +1239,41 @@ def main() -> int:
         written[kind] = {"file": path, "features": len(feats), "size_mb": round(size_mb, 2)}
         print(f"  → {path}  ({len(feats)} 要素, {size_mb:.2f} MB)")
 
+    # ---- 阶段56-A2：换流站类别还要落 frequency 映射（第二个产物）----
+    dc_info: dict[str, Any] | None = None
+    if args.category == "converters":
+        # 与 geojson 同一道「禁止空覆盖」：标签被清空同样是不可逆的数据损失。
+        if not dc_tags and preexisting_tags > 0:
+            raise RuntimeError(
+                f"拒绝把非空直流标签覆盖成空：{tags_path}（原有 {preexisting_tags} 个 way）。\n"
+                f"    通常意味着回读或抓取出了问题；确定要重抓请加 --restart。"
+            )
+        dc_info = write_dc_tags(
+            tags_path,
+            dc_tags,
+            name=name,
+            bbox=bbox,
+            grid=f"{nx}x{ny}",
+            done=len(done_chunks),
+            total=len(chunks),
+            failed_chunks=failed_chunks,
+            elapsed=elapsed,
+        )
+        print(
+            f"  → {tags_path}  ({dc_info['count']} 个 way 带 frequency, "
+            f"{os.path.getsize(tags_path) / 1024:.0f} KB)"
+        )
+        hist = dc_info["frequency_histogram"]
+        dc_zero = hist.get("0", 0)
+        print(
+            f"frequency 直方图（前 5）: "
+            + (", ".join(f"{k}×{v}" for k, v in list(hist.items())[:5]) or "（没有标签）")
+        )
+        print(
+            f"  ⇒ 其中 frequency=0（设计 §4.1 的第 1 步硬信号）: {dc_zero} 条；"
+            f"覆盖率要等 prepare 阶段与线路总数比（本脚本只见标签）"
+        )
+
     meta = {
         "bbox": list(bbox),
         "preset": None if args.bbox else args.preset,
@@ -990,6 +1288,8 @@ def main() -> int:
         "attribution": "© OpenStreetMap contributors (ODbL)",
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
+    if dc_info is not None:
+        meta["dc_tags"] = dc_info
     meta_path_str = meta_path(args.out_dir, name, args.category)
     write_json_atomic(meta_path_str, meta, indent=2)
     print(f"  → {meta_path_str}")

@@ -94,9 +94,29 @@
 - 线路属性新增采集：`frequency`（`props["frequency"] = tags.get("frequency")`）。
 - 新增类别 `"converters"`：`node[power=converter]` + `way[power=converter]`
   ⇒ 产出 `<name>_power_converters.geojson`。
-- **补抓通道**（不重跑既有分块）：新增 `--tags-only` 模式，对给定 bbox 只查
-  `[power=converter]` 与 `[power=line][frequency]` 两类，产出
-  `<name>_power_converters.geojson` 与 `<name>_dc_tags.json`（`way_id → frequency` 映射）。
+- **补抓通道**（不重跑既有分块）：对给定 bbox 只查 `[power=converter]` 与
+  `[power=line][frequency]` 两类，产出 `<name>_power_converters.geojson` 与
+  `<name>_dc_tags.json`（`way_id → frequency` 映射）。
+
+> **实施修正（2026-09-24，A2 第 2 步）**：设计里写的 `--tags-only` 模式**没有**按名字实现，
+> 而是落成了**新类别** `python scripts/fetch_osm_power.py --category converters --bbox … --grid NxM --name <区域>`。
+> 两者的效果完全一样（都只查这两类、都产出上面两个文件），但类别这条路**白捡了**
+> 已有分块机制的全部能力：断点续抓（`<name>_converters_progress.json`）、跨块 `osm_id` 去重、
+> 产物与 power 三类**完全隔离**、失败块响亮落进 `failed_chunks`、以及 `--status` 只读报进度。
+> 这些正是"补抓可以分批交付、一块失败不阻塞其余"所依赖的东西。
+>
+> 同期实测（写进代码注释，供复现）：
+> - **每块 1 次查询**：换流站与 frequency 合成**一条 union 查询**
+>   （`(node[power=converter];way[power=converter];way[power][frequency];); out geom;`）——
+>   Overpass 的成本主要在空间检索，拆两条等于把同一片区域检索两遍。
+> - **块尺寸**：按 `--grid` 取到每块 ≈5°×4°（实测该尺寸在长三角成功；华东全域那种大 bbox 仍会 504）。
+> - **端点**：`maps.mail.ru` 在本机 TLS 校验失败（`CERTIFICATE_VERIFY_FAILED`，重试不会好）、
+>   `overpass.private.coffee` 单块 500 秒、`overpass.kumi.systems` 读超时 ⇒ 本次用
+>   `--endpoint https://overpass-api.de/api/interpreter`（单端点，失败 4 次就**记失败块并继续**，
+>   不会漂到慢端点）。api.de 会偶发 429/504，**并发 2 条流必然撞 429**（实测），所以串行跑。
+>   `fetch_osm_power.py` 为此新增了 `--endpoint` 参数与"确定性错误（TLS/DNS）跳过退避"的判据。
+> - **探测结论复核**：长三角小块（118–123°E / 29–33°N）实测 **4 个换流站**、
+>   **2,089 个 way 带 frequency（其中 `frequency=0` 105 条）** —— 与 §7 的探测（4 个 / 11.19% 覆盖）一致。
 
 ### 3.2 `scripts/prepare_osm_geojson.mjs`
 
