@@ -97,6 +97,11 @@ const DEFAULTS = {
     "cables",
     "wires",
     "circuits",
+    // 阶段56-A2：线路合并的产物（merged_count / length_km 是数值，osm_ids 是逗号串
+    // —— MVT 不支持数组属性，见 merge-lines.mjs 的 decorate）
+    "merged_count",
+    "length_km",
+    "osm_ids",
   ],
   /**
    * 低级别单瓦片**要素数上限**；0 = 不封顶（默认）。

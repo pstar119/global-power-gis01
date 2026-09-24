@@ -34,6 +34,8 @@ import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "no
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { mergeLines } from "./lib/merge-lines.mjs";
+
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 const DEFAULTS = {
@@ -88,7 +90,7 @@ const cfg = parseArgs(process.argv.slice(2));
  *         加了只会让校验脚本报"属性缺失"的假失败（它属 A2 的补抓范围）。
  */
 const KEEP_PROPS = {
-  line: ["osm_id", "name", "ref", "operator", "vclass", "voltage_kv", "line_kind", "cables", "wires", "circuits"],
+  line: ["osm_id", "name", "ref", "operator", "vclass", "voltage_kv", "line_kind", "cables", "wires", "circuits", "merged_count", "length_km", "osm_ids"],
   substation: ["osm_id", "name", "operator", "vclass", "voltage_kv", "substation_kind"],
   plant: ["osm_id", "name", "vclass", "voltage_kv", "plant_source", "plant_output"],
 };
@@ -182,7 +184,20 @@ function main() {
     console.log(`  ${ftype.padEnd(11)} 读入 ${String(fc.features.length).padStart(6)}  保留 ${String(kept).padStart(6)}  （源文件 ${size} MB）`);
   }
 
-  if (features.length === 0) {
+  // ---- 阶段56-A2：把「按杆塔切碎」的线路合并成完整线路 ----
+  // ‼️ 只对 `ftype === "line"` 做：变电站/电厂是点，铁路/管道已撤销。
+  //    规则与全部局限写在 `lib/merge-lines.mjs` 头部（**合并结果不作电气证据**）。
+  const lineFeats = features.filter((f) => f.properties.ftype === "line");
+  const otherFeats = features.filter((f) => f.properties.ftype !== "line");
+  let mergeStats = null;
+  let mergedFeatures = features;
+  if (lineFeats.length) {
+    const r = mergeLines(lineFeats);
+    mergeStats = r.stats;
+    mergedFeatures = [...otherFeats, ...r.features];
+  }
+
+  if (mergedFeatures.length === 0) {
     throw new Error(
       `没有任何要素可写。请先运行：python scripts/fetch_osm_power.py --bbox 121.0,31.0,121.6,31.5 --grid 2x2 --name ${cfg.name}`,
     );
@@ -193,14 +208,44 @@ function main() {
   const outPath = join(outDir, `${cfg.outName}.geojson`);
   writeFileSync(
     outPath,
-    JSON.stringify({ type: "FeatureCollection", features }),
+    JSON.stringify({ type: "FeatureCollection", features: mergedFeatures }),
   );
 
   const outMb = statSync(outPath).size / 1048576;
   console.log();
   console.log("=== 结果 ===");
-  console.log(`要素总数 : ${features.length}`);
-  for (const [k, v] of Object.entries(perType)) console.log(`  ${k.padEnd(11)} ${v}`);
+  console.log(`要素总数 : ${mergedFeatures.length}`);
+  if (mergeStats) {
+    const pct = mergeStats.input ? ((1 - mergeStats.output / mergeStats.input) * 100).toFixed(1) : "0";
+    const dLen =
+      mergeStats.lengthBeforeKm > 0
+        ? Math.abs(mergeStats.lengthAfterKm - mergeStats.lengthBeforeKm) / mergeStats.lengthBeforeKm
+        : 0;
+    console.log(
+      `线路合并 : ${mergeStats.input} → ${mergeStats.output} 条（减少 ${pct}%），` +
+        `最长链路 ${mergeStats.maxChain} 段，总长 ${mergeStats.lengthAfterKm.toFixed(0)} km（长度守恒差 ${(dLen * 100).toFixed(3)}%）`,
+    );
+    if (dLen >= 0.001) console.warn("⚠️ 合并前后长度差 ≥0.1%，超出验收口径，请检查合并规则");
+    if (mergeStats.brokenChains > 0 && dLen >= 0.001) {
+      console.warn(
+        `⚠️ 合并中有 ${mergeStats.brokenChains} 次"接不上而断开"，**且长度差 ≥0.1%** —— ` +
+          `这才是方向对齐出了问题（历史缺陷曾因此丢掉 9.5% 总长），请核对 lib/merge-lines.mjs 的起步定向`,
+      );
+    } else if (mergeStats.brokenChains > 0) {
+      // 长度守恒仍成立 ⇒ 这些断开是安全的：未消费的段由兜底循环原样单独输出，不丢长度。
+      console.log(
+        `ℹ️ 合并中有 ${mergeStats.brokenChains} 次主动断开（复杂拓扑，如环+支），` +
+          `已按原样单独输出，长度守恒未受影响`,
+      );
+    }
+  }
+  for (const [k, v] of Object.entries(perType)) {
+    if (k === "line" && mergeStats) {
+      console.log(`  ${k.padEnd(11)} ${mergeStats.output}（合并前 ${mergeStats.input}）`);
+    } else {
+      console.log(`  ${k.padEnd(11)} ${v}`);
+    }
+  }
   if (Object.keys(perClass).length) {
     console.log("电压分档（仅电力） :");
     for (const cls of ["735+", "500-734", "220-499", "<220", "unknown"]) {
