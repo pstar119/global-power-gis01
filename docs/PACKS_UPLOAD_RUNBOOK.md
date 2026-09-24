@@ -117,6 +117,9 @@ Invoke-RestMethod -Method Post -Uri $url `
 - 每个资产：`.stage` 上传 → 远端 `size` 与 `digest` 与清单 sha256 逐位吻合 → 删旧 → 改名；
 - 传后复核：**8/8 全部 ✅**，无 `.stage` 残留；
 - `node scripts/verify_packs.mjs --remote`：**远端段 8/8 全绿**（GEM 从"不存在"变为一致）；
+- **用户实际下载路径也复核过**（镜像 `gh-proxy.com`，8/8）：HEAD 200 且 `Content-Length` 等于清单
+  `bytes`；`Range: bytes=0-126` → **206 + 恰好 127 字节 + `PMTiles` 魔数**
+  ⇒ 断点续传在镜像上依旧可用（这是阶段46 结论在本次重传后的复验）。
 - ⚠️ 该命令的**退出码仍可能非 0**，因为它同时校验**本机用户目录**里的旧包 ——
   实测本机 `%APPDATA%\...\packs\` 里 7 个区域包仍是上一版（这正是设计 §5.4 / G8 要标
   「需更新」的场景）。本机要与远端一致，用应用内的「设置 → 数据包管理 → 更新」，

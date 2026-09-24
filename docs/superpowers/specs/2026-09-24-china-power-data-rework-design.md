@@ -335,6 +335,7 @@ converter:  osm_id, name, operator, vclass, voltage_kv
 | 1 | `node scripts/gen_packs_manifest.mjs` 重算清单 | ✅ 已重算（8 个包的新 `features`/`bytes`/`sha256`/`sizeMb`；区域包的 `features` 来自 `run_pipeline.mjs --stage prepare,build` 刷新的报表，即**合并后**要素数） |
 | 2 | 7 个 `osm-*.pmtiles` 重传 + `gem-plants.pmtiles` 首传 | ✅ 已完成（`node scripts/upload_packs.mjs`，2026-09-24，共 162 MB；每包 `.stage`→校验→删旧→改名，无缺失窗口） |
 | 3 | `verify_packs.mjs --remote` 复核 | ✅ **远端段 8/8 全绿**（GEM 从"不存在"变为一致；修复前基线为 29 项问题）。⚠️ 该命令同时查**本机用户目录**，本机 7 个旧包仍报不符 ⇒ 退出码非 0，属预期（正是 G8 的场景） |
+| 3b | **用户实际下载路径**（镜像 `gh-proxy.com`）复核 | ✅ 8/8：HEAD 200 且 `Content-Length` 等于清单 `bytes`；`Range: bytes=0-126` → **206 + 恰好 127 字节 + PMTiles 魔数** ⇒ **断点续传在镜像上仍然可用**（阶段46 的那条结论在本次重传后依旧成立） |
 | 4 | §5.4 / G8 **包指纹失效策略** | ✅ 已实现（见 9.1） |
 | 5 | 重打安装包 + `check_release_redlines.mjs --with-exe` | ✅ 已完成：`Global Power GIS_0.2.0_x64-setup.exe` = **48,128,414 B / 45.90 MiB**（红线 50 MB）；`--with-exe` 自检通过 |
 
