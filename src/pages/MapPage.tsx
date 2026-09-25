@@ -30,7 +30,7 @@ import { PMTiles, Protocol } from "pmtiles";
 import { FUEL_FALLBACK_COLOR, FUEL_LEGEND, fuelColor, fuelLabel } from "../lib/fuel";
 // 阶段50-B：只借类型，不引运行时。品类枚举的**唯一定义点**在 packs.ts，
 // 避免 MapPage 这份本地 PackEntry 与共享版再漂移出一套自己的字面量。
-import type { PackKind } from "../lib/packs";
+import { isBasemapPack, isRegionPack, type PackKind } from "../lib/packs";
 // 阶段27：离线中文字形的 `font-faces` 清单（由 scripts/fetch_glyphs.mjs 生成）
 import { BASEMAP_FONT_FACES, BASEMAP_FONT_FAMILY } from "../lib/basemapFonts.generated";
 import {
@@ -604,8 +604,15 @@ interface PacksManifest {
 const PACKS_MANIFEST_URL = "/packs_manifest.json";
 /** 低于该级别不加载区域包 */
 const PACK_MIN_ZOOM = 6;
-/** 同时激活的区域包上限 */
-const PACK_MAX_ACTIVE = 2;
+/**
+ * 同时激活的区域包上限。
+ *
+ * 阶段56-B：**2 → 3**（设计 §2 决策 6）。理由：加了邻国批次之后，边境带（如满洲里、
+ * 二连浩特、凭祥）会同时落在"中国某区域 + 一个邻国区域"里，上限 2 时会出现
+ * 「一侧有网、一侧空白」的观感断裂。代价是多一套 MVT source + 图层，
+ * 所以**不能再往上加** —— 3 是权衡后的值，不是随手取的。
+ */
+const PACK_MAX_ACTIVE = 3;
 
 /**
  * 区域图层 id：在原 id 后加 `--<region>` 后缀。
@@ -2242,7 +2249,8 @@ function ensureOsmGridArchive(): Promise<ArchiveHandle | null> {
  *    把它当成第 8 个区域（它其实不参与视口选举）。
  */
 function resolvePackResource(entry: PackEntry): Promise<ArchiveHandle | null> {
-  const kindLabel = isThematicOverlay(entry) ? "数据包" : "区域包";
+  // 阶段56-B：三态标签。把底图包叫"区域包"会让人以为它在抢选举名额（它不抢）。
+  const kindLabel = isBasemapPack(entry) ? "底图包" : isThematicOverlay(entry) ? "数据包" : "区域包";
   return ensurePmtilesArchive(entry.file, {
     label: `${entry.label}${kindLabel}`,
     missingHint: `把 ${entry.file} 放到 $RESOURCE/packs/`,
@@ -4624,7 +4632,11 @@ function MapPage({
         // ‼️ 这一步就是它“不抢名额”的全部实现 —— 只要它不进这个数组，
         //    就不可能占掉 `PACK_MAX_ACTIVE` 里的一个位置。
         //    （GEM 的挂载由下面那个独立生命周期 effect 接管）
-        .filter((p) => !isThematicOverlay(p))
+        // 🔴 阶段56-B：这里**必须**用 `isRegionPack`，不能用 `!isThematicOverlay(p)`。
+        //    加了第三类 `basemap` 之后，反向判据会把**底图包**当区域包选进来：
+        //    占掉装载名额、并以 `source-layer: "grid"` 去挂载一个根本没有 grid 层的归档
+        //    —— 全程静默（MapLibre 只是什么都不画）。
+        .filter(isRegionPack)
         .map((p) => ({ key: p.key, area: bboxOverlapArea(view, p.bbox) }))
         .filter((x) => x.area > 0)
         .sort((a, b) => b.area - a.area)

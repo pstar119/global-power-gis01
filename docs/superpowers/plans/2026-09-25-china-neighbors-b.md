@@ -258,6 +258,25 @@ Expected: 底图包**不再**出现在"选区域"列表里；底图按 `forRegio
 
 ## Task 6: 选举过滤 + 装载上限 + 底图叠加 source
 
+> ### 进展：**T6a 已完成（2026-09-25）**，T6b 待做
+>
+> **T6a（安全关键，已落地并验证）**：
+> - `MapPage.tsx` 的选举过滤 `.filter((p) => !isThematicOverlay(p))` → **`.filter(isRegionPack)`**
+>   （并导入 `packs.ts` 的判定函数）—— 这一步解除了「底图包被当区域包、占名额、
+>   以 `source-layer:"grid"` 静默错挂」的风险 ⇒ **T3 的前置条件已满足**；
+> - `PACK_MAX_ACTIVE` **2 → 3**（设计 §2 决策 6，附代价说明：不能再往上加）；
+> - `resolvePackResource` 的日志标签改三态（底图包/数据包/区域包）。
+> - 验收：`tsc --noEmit` 0；`vite build` 0（1,479.46 kB / gzip 430.31 kB）；
+>   静态复核旧反向判据已只剩注释。
+>
+> **T6b（待做）**：底图包叠加 source 的**生命周期**（与 GEM 同构）——
+> 当选中的区域包存在 `forRegion === 该 key` 的底图包且**已安装**时，
+> 以独立 source `basemap-overlay-<key>` 叠加，只挂 `earth/water/boundaries/places/roads`，
+> 用 `moveLayer` 精确插在「中国底图之上、电网图层之下」；卸载时连同图层一起摘。
+> 现有 `BASEMAP_SOURCE`（`"basemap"`）的 URL/图层/样式**一行不动**。
+> ⚠️ 没有 T6b 时：邻国区域能正常显示电网，但**看不到邻国底图**（不报错，只是底图是空的）。
+> 它不阻塞 T3/T9（清单与上传），阻塞的是 §7.1 第 4/5 条验收（边境连续性与地名无方块）。
+
 **Files:**
 - Modify: `src/pages/MapPage.tsx`（选举过滤、`PACK_MAX_ACTIVE`、新增 basemap 叠加生命周期）
 
