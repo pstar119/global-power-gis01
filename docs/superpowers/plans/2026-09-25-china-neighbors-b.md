@@ -164,6 +164,16 @@ Expected: `readback ok>0`（结构可读即可；内容层名用下面的脚本�
 
 ## Task 3: 清单新增 basemap 段
 
+> ### 🔴 顺序约束（2026-09-25 进度检查发现）：**T6 必须先于 T3 落地**
+>
+> 实测 `MapPage.tsx` 的选举过滤仍是 `.filter((p) => !isThematicOverlay(p))`（第 4627 行），
+> 而它用的是**本文件内的局部** `isThematicOverlay`（第 2617 行）。只要清单里出现
+> `kind: "basemap"` 的条目，它就会被当成**区域包**：被选进 `activePacks`、占掉装载名额
+> （当前上限仍是 2）、并以 `source-layer: "grid"` 去挂载一个**根本没有 grid 层**的归档
+> —— 全部**静默**，不报错。
+> ⇒ 在 T6（改用 `isRegionPack` 并导入 `packs.ts` 的判定）完成之前，**不要**把带 basemap 的清单推出去
+> （本地跑一次没问题，别上传、别打包）。T9 上传前必须确认 T6 已在。
+
 **Files:**
 - Modify: `scripts/gen_packs_manifest.mjs`（区域包段之后、GEM 段之前）
 
