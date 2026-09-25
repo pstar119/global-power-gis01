@@ -251,6 +251,47 @@ function main() {
    */
   const thematicPacks = [];
   /**
+   * ---- 阶段56-B：**底图包**（第三类 `kind: "basemap"`）----
+   *
+   * 与区域包**同 bbox、成对出现**，靠 `forRegion` 字段关联（**不做 key 前缀解析** ——
+   * `basemap-kp-kr` 这种字符串猜归属在改名/换命名规则时会**静默失效**：
+   * 底图不挂载，地图上什么都不缺，只是没底图）。
+   *
+   * ‼️ `features` 恒为 `null`：底图不是要素数据，**不要造假数字**。
+   * ‼️ 包不存在时**不写这条**并告警（与区域包同一约定），
+   *    否则会写出一条 `bytes: null` 的废条目 —— 前端拿不到校验和，下载必然失败且看不出原因。
+   * ⚠️ 顺序：`regionPacks` 之后、GEM 之前（消费方按这个顺序展示）。
+   */
+  const basemapPacks = [];
+  for (const r of REGIONS) {
+    const f = join(ROOT, "data", "packs", `basemap-${r.key}.pmtiles`);
+    if (!existsSync(f)) {
+      console.warn(`⚠️ 未找到 basemap-${r.key}.pmtiles —— 该区域的底图包不进清单（生成：见 README_OSM 的阶段56-B）`);
+      continue;
+    }
+    const buf = readFileSync(f);
+    basemapPacks.push({
+      key: `basemap-${r.key}`,
+      kind: "basemap",
+      forRegion: r.key,
+      label: `${r.label} · 底图`,
+      provinces: r.provinces,
+      file: `packs/basemap-${r.key}.pmtiles`,
+      bbox: r.bbox,
+      features: null,
+      sizeMb: Number((buf.length / 1024 / 1024).toFixed(2)),
+      sha256: createHash("sha256").update(buf).digest("hex"),
+      bytes: buf.length,
+      downloadUrl: `${BASE_URL}/basemap-${r.key}.pmtiles`,
+    });
+  }
+  if (basemapPacks.length) {
+    console.log(`\n底图包（kind=basemap，按 forRegion 与区域包成对）：${basemapPacks.length} 个`);
+    for (const b of basemapPacks) {
+      console.log(`  ${b.key.padEnd(22)} forRegion=${b.forRegion.padEnd(14)} ${b.sizeMb} MB`);
+    }
+  }
+  /**
    * 阶段50-B.1：GEM 是 **downloadable thematic pack**，**不进安装包**。
    * 所以它的正式产物与区域包**同目录**：`data/packs/gem-plants.pmtiles`。
    *
@@ -290,7 +331,7 @@ function main() {
   }
 
   /** 两类包合并写入清单。顺序：区域包在前（已有的消费方按这个顺序展示）。 */
-  const packs = [...regionPacks, ...thematicPacks];
+  const packs = [...regionPacks, ...basemapPacks, ...thematicPacks];
 
   const payload = {
     generatedAt: new Date().toISOString(),

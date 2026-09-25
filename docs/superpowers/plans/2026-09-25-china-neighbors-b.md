@@ -164,6 +164,18 @@ Expected: `readback ok>0`（结构可读即可；内容层名用下面的脚本�
 
 ## Task 3: 清单新增 basemap 段
 
+> ### 进展：**脚本段已完成（2026-09-25）**；清单重算**推迟到 T9 上传前**
+>
+> `gen_packs_manifest.mjs` 已加 basemap 扫描段（`kind:"basemap"` + `forRegion` + `features:null`，
+> 包缺失时告警而不写废条目），并插入 `[...regionPacks, ...basemapPacks, ...thematicPacks]`。
+> 本地实跑验证：清单 **8 → 18 条**（region:12 + basemap:5 + gem:1；5 条 `forRegion` 指纹非空）。
+>
+> 🔴 **但这份新清单没有提交**：它给 5 个邻国电网包/底图包写了 `downloadUrl`，
+> 而那些资产**还没上传**（T9）⇒ 提交它等于让 master 的构建带上必然 404 的下载入口。
+> ⇒ 处置：`git checkout -- public/packs_manifest.json` 还原成 8 条那份，**T9 上传完成后再重算并提交**
+> （顺序：出包 ✅ → 上传 → 重算清单 → 提交）。与顶部「T6 先于 T3」同一条道理：
+> **清单必须只引用真实存在的远端资产**。
+
 > ### 🔴 顺序约束（2026-09-25 进度检查发现）：**T6 必须先于 T3 落地**
 >
 > 实测 `MapPage.tsx` 的选举过滤仍是 `.filter((p) => !isThematicOverlay(p))`（第 4627 行），
