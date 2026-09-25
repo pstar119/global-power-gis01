@@ -298,12 +298,25 @@ Expected: 现有 `BASEMAP_SOURCE`（`"basemap"`）的 URL/图层/样式**一行�
 
 ## Task 8: 其余 4 区域（挂机）
 
-对 `mn` / `sea-mainland` / `ca` / `ru-far` 各跑一次（顺序不变，按密度×成本递增）：
+> ### ✅ 已定：**稀疏区改粗网格**（2026-09-25，用户拍板 B 方案）
+>
+> 决策依据是 kp-kr 的实测锚点：**60 块 ≈ 1.45 h ⇒ 87 秒/块（含 504 重试开销）**。
+> 若照设计表原网格，其余 4 区是 1,101×2 = **2,202 块 ≈ 53 h（2.2 天）**；
+> 改粗后 = **230 块 ≈ 5–8 h**，而**数据完全相同**（同 bbox、同查询，只是切块更粗）。
+> 依据：A2 的补抓就是按 ≈5°×4° 在全国（含华东密集区）跑完的，没有超时；
+> 而这些区域是 OSM 稀疏区（设计自己记了 MN 约 990 条 line），小块纯属把时间花在空查询上。
+>
+> 落地方式：**写进批次定义**（`pipeline_regions.mjs` 每个稀疏批次带 `target: {lon:5, lat:4}`，
+> `gridFor()` 优先用它），而不是每次手传 `--target-cell` —— 这样断点键、清单 `chunks`、文档表三处同源。
+> 实测网格：mn **6x3**、sea-mainland **3x6**、ca **8x5**、ru-far **13x3**（单元 ≈5°×4°）。
+> ⚠️ kp-kr 保持原细网格（已跑完；韩国密度高，细网格有理由）。
+
+对 `mn` / `sea-mainland` / `ca` / `ru-far` 各跑一次（一条命令跑完 4 个区域，串行）：
 
 ```powershell
-node scripts/run_pipeline.mjs --regions mn --category power,converters --endpoint https://overpass-api.de/api/interpreter
+node scripts/run_pipeline.mjs --regions mn,sea-mainland,ca,ru-far --category power,converters --endpoint https://overpass-api.de/api/interpreter
 ```
-每批完成后立刻跑 Step 4 的三个门禁（同 T1 Step 4），失败块原样重跑补齐；每批一个 commit。
+每批完成后立刻跑门禁（同 T1 Step 4），失败块原样重跑补齐（kp-kr 的经验：通常 2–3 轮清空）。
 
 ---
 

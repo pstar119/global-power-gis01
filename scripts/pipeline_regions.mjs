@@ -80,6 +80,8 @@ export const REGIONS = [
     label: "蒙古",
     provinces: "蒙古",
     bbox: [87.7, 41.5, 119.9, 52.2],
+    // 稀疏区：改用 ≈5°×4° 的粗块（见 gridFor 的说明；块数 162 → 18，数据不变）
+    target: { lon: 5, lat: 4 },
     note: "OSM 电力覆盖稀疏（实测 power=line 约 990 条）—— 稀疏是数据现状，不是缺陷",
   },
   {
@@ -87,6 +89,8 @@ export const REGIONS = [
     label: "中南半岛",
     provinces: "缅 / 老 / 越 / 泰 / 柬",
     bbox: [92.2, 5.6, 109.6, 28.6],
+    // 稀疏区（除越南/泰国局部）：粗块 180 → 18
+    target: { lon: 5, lat: 4 },
     note: "与中国云南/广西的 bbox 有重叠（设计 §3.2 已知偏差），由区域选举与装载上限承载",
   },
   {
@@ -94,6 +98,8 @@ export const REGIONS = [
     label: "中亚五国",
     provinces: "哈 / 吉 / 塔 / 乌 / 土",
     bbox: [46.5, 35.1, 87.4, 55.5],
+    // 稀疏区：粗块 374 → 40
+    target: { lon: 5, lat: 4 },
     note: "矩形会夹带伊朗东北、阿富汗北部、巴基斯坦北部与新疆西部（设计 §3.2）",
   },
   {
@@ -101,15 +107,25 @@ export const REGIONS = [
     label: "俄相邻带",
     provinces: "俄罗斯（49°N 以南的相邻带）",
     bbox: [80.0, 49.0, 145.0, 62.0],
+    // 最稀疏：粗块 385 → 39
+    target: { lon: 5, lat: 4 },
     note: "只做相邻纬度带（全俄是它的 2.5 倍成本，明确不做）；贝加尔湖以西按设计缺失",
   },
 ];
 
-/** 按目标块尺寸把一个批次切成 NxM（四舍五入到整数网格） */
+/** 按目标块尺寸把一个批次切成 NxM（四舍五入到整数网格）
+ *
+ * ‼️ 阶段56-B：批次可以自带 `target`（见下面 4 个稀疏邻国批次），**优先于**调用方传的默认值。
+ *    理由：默认块尺寸（1.1875°×1.9375°）是对齐**华东密集区**标定的；
+ *    蒙古/中亚/西伯利亚这种 OSM 稀疏区的要素数少一到两个数量级，
+ *    用小块的唯一效果是把时间花在往返上（实测单块耗时由服务端负载主导，与要素数几乎无关）。
+ *    放进批次定义而不是靠 `--target-cell` 手传，是为了让断点键、清单 `chunks`、文档表三处同源。
+ */
 export function gridFor(region, target = CELL_MEASURED) {
+  const t = region.target ?? target;
   const [w, s, e, n] = region.bbox;
-  const cols = Math.max(1, Math.round((e - w) / target.lon));
-  const rows = Math.max(1, Math.round((n - s) / target.lat));
+  const cols = Math.max(1, Math.round((e - w) / t.lon));
+  const rows = Math.max(1, Math.round((n - s) / t.lat));
   return { cols, rows };
 }
 
