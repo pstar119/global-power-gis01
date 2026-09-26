@@ -1,8 +1,18 @@
 # 数据包上传手册（`v1.0-packs` Release）
 
 > 用途：把 `data/packs/*.pmtiles` 传到 GitHub Release `v1.0-packs`，让**新装用户**能下载。
-> 最后更新：阶段55（2026-09-18）
-> 现状：🔴 **`gem-plants.pmtiles` 从未上传**，其余 7 个区域包在。
+> 最后更新：阶段56-B（2026-09-25）
+> **现状：✅ 18 个资产全部在，与清单一致**（`verify_packs.mjs --remote` 退出码 0）。
+>
+> | 品类 | 个数 | 体积 |
+> |---|---:|---:|
+> | 区域包 `kind:"region"` | 12（国内 7 + 邻国 5） | 241.16 MB |
+> | 底图包 `kind:"basemap"` | 5（邻国，`forRegion` 关联） | 80.52 MB |
+> | thematic `kind:"gem"` | 1（GEM Plants） | 7.07 MB |
+> | **合计** | **18** | **328.75 MB** |
+>
+> ⚠️ 阶段55 记的「`gem-plants.pmtiles` 从未上传」**已失效**（阶段56-A3 已补传）；
+> 下面 §0/§1 保留的是当时的诊断记录，作为"这类坑长什么样"的例子仍然有效。
 
 ---
 
@@ -34,8 +44,10 @@ osm-huazhong.pmtiles osm-xibei.pmtiles   osm-xinan.pmtiles
 node scripts/verify_packs.mjs --remote
 ```
 
-- 期望（修好后）：8 个包**全部** ✅，退出码 0；
-- 修复前：`🔴 远端缺少资产 gem-plants.pmtiles`，退出码 1。
+- 期望（当前）：**18 个包全部** ✅，退出码 0；
+- 阶段55 修复前：`🔴 远端缺少资产 gem-plants.pmtiles`，退出码 1。
+- ⚠️ 脚本还会报「本机 `%APPDATA%\...\packs\` 装了 N/18」—— **那是正常的**
+  （数据包按需下载）；判据是**远端那 18 行**，不是本机装了几个。
 
 ---
 

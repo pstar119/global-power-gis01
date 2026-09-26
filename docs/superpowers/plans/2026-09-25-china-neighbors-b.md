@@ -60,31 +60,30 @@
 | T8 | 其余 4 区域抓取+切片 | `osm-{mn,sea-mainland,ca,ru-far}.pmtiles` + 4 底图包 | 每包门禁 PASS | ✅ 已完成（5 包 `verify_pack` 8 项全绿） |
 | T9 | 清单重算 + 上传 10 包 | Release 上 18 个资产一致 | `verify_packs.mjs --remote` → **退出码 0** | ✅ 已完成 |
 | T10 | 重打安装包 + 红线 | `Global Power GIS_0.2.0_x64-setup.exe` | `check_release_redlines.mjs --with-exe` 通过、≤50 MB | ✅ 已完成（46.09 MB） |
-| T11 | §7.1 七条验收 | 验收记录 | 含边境连续性抽样、地名无方块、中国侧零回归 | 1 h |
-| T12 | 文档同步 | README / README_OSM / PROJECT_HANDOFF | 口径、包数、体积、批次表一致 | 0.5 h |
+| T11 | §7.1 七条验收 | 验收记录 | 含边境连续性抽样、地名无方块、中国侧零回归 | 🟡 4/7 已闭合（①②③⑦）；④⑤ 待运行时 |
+| T12 | 文档同步 | README / README_OSM / PROJECT_HANDOFF | 口径、包数、体积、批次表一致 | ✅ 已完成 |
 
 > ### 📍 进度快照（2026-09-25 收尾）
 >
-> **代码与出包侧：T0–T10 全部完成。** 只剩 **T11 验收**与 **T12 文档同步**。
+> **代码 / 出包 / 文档侧：T0–T10 与 T12 全部完成；T11 七条里 4 条已用证据闭合，2 条待运行时。**
 >
 > | 已核实的事实 | 证据 |
 > |---|---|
 > | 5 个邻国电网包 + 5 个底图包都在 | `data/packs/`，体积见 T8 表 |
-> | 每个包过门禁 | `verify_pack.mjs` 5 个包 × 8 项断言全绿 |
-> | **远端齐备** | `verify_packs.mjs --remote` **退出码 0**（18 个资产与清单一致） |
+> | 每个包过门禁 | `verify_pack.mjs` 5 包 × 8 项断言全绿；`verify_power_only.mjs` **12 区域 × 2 产物 = 24 次全 PASS** |
+> | **远端齐备** | `verify_packs.mjs --remote` **退出码 0**（18 个资产与清单一致，328.75 MB） |
 > | 构建与红线 | `tsc`/`vite build` 0；`check_release_redlines.mjs --with-exe` 通过 |
 > | **安装包 ≤ 50 MB** | **46.09 MB**（手工量 NSIS 产物；红线脚本不含体积判据） |
-> | 字形 | 2 族 / 95 个子集 / **2.28 MB**（净增约 0.2 MB） |
+> | 字形 | 2 族 / 95 个子集 / **2.28 MB**（净增约 0.2 MB）；覆盖 1922/1959 个码位 |
+> | 文档一致 | README / README_OSM / PROJECT_HANDOFF / PACKS_UPLOAD_RUNBOOK / .gitignore 已同步 |
 >
-> **下一步（T11/T12）**：
-> 1. T11 设计 §7.1 七条验收 —— 其中 **④ 边境连续性**与 **⑤ 地名无方块** 需要**真跑一次应用**
->    （本轮所有证据都停在「静态 + 构建 + 归档实解」这一级，还没有运行时验证）；
->    ① 的完整口径还要补跑 `verify_power_only.mjs`（geojson + pmtiles 两份）。
-> 2. T12 文档同步 —— 已知过时点：`README_OSM.md`（7 区域 / 123.15 MiB → 12 区域）、
->    `PROJECT_HANDOFF.md`（154.96 MB 七包 → 十二包；「投放 8 个包」→ 18）、
->    `docs/PACKS_UPLOAD_RUNBOOK.md`（顶部"GEM 从未上传"的现状描述已失效）、
->    `README.md` 第 503 行附近「清单尚未重算」的说明。
->    它们都是**明确过时的事实性句子**，不是编辑取舍。
+> **唯一没做的一类事：运行时验证。** 需要真跑一次应用的两个验收项：
+> - **④ 边境连续性**：满洲里（中俄）、二连浩特（中蒙）、凭祥（中越）两侧 50 km 内电网与底图都在；
+> - **⑤ 地名无方块**：平壤 / 首尔 / 乌兰巴托 / 东京 / 曼谷 / 河内六处。
+>
+> 这两项检验的正是本阶段新写的运行时路径（T6b 底图叠加 source 的插位与生命周期、
+> T7 的多族 fontstack 回退），也顺带能验证 ⑥ 的"中国侧零回归"
+> （`PACK_MAX_ACTIVE` 2→3 是唯一影响选举的改动）。
 
 ---
 
@@ -552,7 +551,48 @@ node scripts/run_pipeline.mjs --regions mn,sea-mainland,ca,ru-far --category pow
 
 - [x] T10 `npm run tauri build` → `check_release_redlines.mjs --with-exe` → 记录体积（≤50 MB）
 - [ ] T11 设计 §7.1 七条：①每包门禁 ②远端全绿 ③构建红线 ④**边境连续性抽样**（满洲里/二连浩特/凭祥，两侧 50 km 内电网与底图都存在）⑤**地名无方块**（平壤/首尔/乌兰巴托/东京/曼谷/河内）⑥中国侧零回归（长三角/华北 + 安装包 ≤50 MB）⑦`--bbox` 非国界的偏差已写进 README 与向导文案
-- [ ] T12 同步 README / README_OSM / PROJECT_HANDOFF / 设计文档（把"实测项"换成实测值）
+- [x] T12 同步 README / README_OSM / PROJECT_HANDOFF / 设计文档（把"实测项"换成实测值）
+
+---
+
+## T11 验收记录（设计 §7.1 逐条）
+
+> 结论：**七条里 4 条已用可核查证据闭合**（①②③⑦ + ⑥的体积半条），
+> **2 条（④边境连续性、⑤地名无方块）属运行时行为，必须先真跑一次应用** ——
+> 截至本轮，项目 B 的全部证据都停在「静态检查 + 构建 + 归档实解」这一级，**尚无运行时验证**。
+
+| # | 条目 | 状态 | 证据 |
+|---|---|---|---|
+| ① | 每批次独立验收 | ✅ | `verify_pack.mjs` × 5 邻国包（8 项断言全绿，见 T8）；`verify_power_only.mjs` × **12 区域 × 2 产物 = 24 次全 PASS**（下表） |
+| ② | 远端资产齐备 | ✅ | `verify_packs.mjs --remote` **退出码 0**；18 个资产 = 区域包 12 + 底图包 5 + GEM 1 = **328.75 MB** |
+| ③ | 红线与构建 | ✅ | `npm run typecheck` 0；`npm run build` 0（1,485.29 kB / gzip 432.05 kB）；`check_release_redlines.mjs --with-exe` 通过 |
+| ④ | **边境连续性抽样** | ⏳ **待运行时** | 需要真跑应用看满洲里（中俄）/ 二连浩特（中蒙）/ 凭祥（中越）两侧 50 km 内**电网与底图都存在** |
+| ⑤ | **地名无方块** | ⏳ **待运行时** | 需要真跑应用看平壤 / 首尔 / 乌兰巴托 / 东京 / 曼谷 / 河内六处。已备好实测前提：55 个新增码位由 `Noto Sans` 覆盖、37 个码位任何族都没有（走 `name:en` 兜底） |
+| ⑥ | 中国侧零回归 | 🟡 **半条** | 安装包 **46.09 MB ≤ 50 MB** ✅、`tsc`/`vite build` 0 ✅、核心区归档与国内 7 包指纹未变 ✅（未重跑国内切片）；「长三角/华北图层与选举行为与阶段54 一致」**需运行时确认**（`PACK_MAX_ACTIVE` 2→3 是本阶段唯一影响选举的改动，且核心区优先逻辑未动） |
+| ⑦ | 文档一致 | ✅ | README（当前阶段段落改阶段56-B、包数与 `PACK_MAX_ACTIVE` 数字）、README_OSM（新增 §十九 阶段56-B 全文 + 作废旧口径）、PROJECT_HANDOFF（数字表 + A3 状态 + 新增项目B条目）、`PACKS_UPLOAD_RUNBOOK`（顶部现状与 18/18 期望）、`.gitignore`（字体体积与多族说明） |
+
+### ① 的 24 次门禁明细（`node scripts/verify_power_only.mjs <文件>`，全部 PASS）
+
+| 区域 | geojson 线路数 / 属性缺失 | 归档 readback |
+|---|---|---|
+| `huadong` | 63,994 / `(none)` | ok=10（含 `grid` 层）z0-12 |
+| `huazhong` | 40,166 / `(none)` | ok=23 z0-12 |
+| `huanan` | 31,604 / `(none)` | ok=21 z0-12 |
+| `huabei` | 44,153 / `(none)` | ok=22 z0-12 |
+| `dongbei` | 19,659 / `(none)` | ok=26 z0-12 |
+| `xinan` | 47,416 / `(none)` | ok=27 z0-12 |
+| `xibei` | 45,628 / `(none)` | ok=25 z0-12 |
+| `kp-kr` | 8,032 / `(none)` | ok=18 z0-12 |
+| `mn` | 13,774 / `(none)` | ok=24 z0-12 |
+| `sea-mainland` | 31,036 / `(none)` | ok=18 z0-12 |
+| `ca` | 41,287 / `(none)` | ok=25 z0-12 |
+| `ru-far` | 13,087 / `(none)` | ok=22 z0-12 |
+
+- geojson 侧判据：**必备属性一个都不能缺**（`missing=(none)` 才算 PASS）——24 次里 12 次全绿。
+- 归档侧判据：**结构可读 + 含 `grid` 层**（脚本自己打印 `readback ok=N missing=M`；
+  `missing` 是抽样到但**没有 grid 层**的瓦片数 —— 该判据由**是否有瓦片可读**决定，
+  所以 `ok` 只要 > 0 即 PASS；实测每包 `ok` 都是 10~27）。
+
 
 ---
 

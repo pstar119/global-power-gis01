@@ -1006,8 +1006,9 @@ dev 日志出现 `⚠️ 视野统计超过 50ms 护栏`。我没有假设是自
 > 抓取类别、prepare 合并表、切片白名单、前端图层/面板/图例全部删除，
 > 8 个归档（7 区域包 + 核心区）已按纯电力口径重建。
 >
-> **当前真值**：核心区 `osm_grid.pmtiles` **25,611 要素 / 5.79 MiB**；
-> 7 个区域包合计 **430,969 要素 / 123.15 MiB**（详见上方阶段38 表格的复核说明）。
+> **当前真值**（阶段56-B，2026-09-25）：核心区 `osm_grid.pmtiles` **43,014 要素 / 7.12 MB**；
+> **12 个区域包合计 543,523 要素 / 241.16 MB**（其中国内 7 包 381,545 要素 / 154.96 MB、
+> 邻国 5 包 161,978 要素 / 86.20 MB —— 详见 §十九）。
 > 下面保留的是**历史记录**，其中的"全要素"体积与铁路/管道条数**不再成立**。
 
 | 产物 | 要素 | 体积 | 最大单瓦片 |
@@ -1278,3 +1279,145 @@ out geom;
    而是**本机程序的输出不能接进任何 PowerShell 管道**（`| Select-String`、`> 文件` 同样报
    `Program 'x' failed to run: Access is denied`）；`node --test` 也会因 `spawn EPERM` 失败
    （测试运行器用管道起子进程）⇒ 单测直接跑文件（`node scripts/lib/merge-lines.test.mjs`，`node:test` 在同进程内执行）。
+
+---
+
+## 十九、阶段56-B：相邻带邻国（5 国电网包 + 5 底图包 + 多文种字形）（2026-09-25）
+
+**目标**：把「中国 + 相邻带邻国」的电力数据面做出来并发布。设计见
+`docs/superpowers/specs/2026-09-24-china-neighbors-design.md`，实施计划见
+`docs/superpowers/plans/2026-09-25-china-neighbors-b.md`。
+
+### 一、口径（三条都是硬约束）
+
+- **纯电力**：邻国包必须 `--category power,converters`。只跑 `power` 会得到**没有直流分档**的包
+  **且不报错**。
+- **切片参数与国内一致**：`--max-features-per-tile 20000 --cap-below-zoom 8`；`--out` 必须显式
+  （`build_pmtiles.mjs` 默认写 `osm_grid.pmtiles`，会**静默覆盖核心区归档**）。
+- **抓取端点**：`--endpoint https://overpass-api.de/api/interpreter`（默认表第一个 `maps.mail.ru` 本机不可用）。
+
+### 二、5 个邻国电网包（实测）
+
+| 区域 | bbox | 网格 | 要素 | 体积 | 最大单瓦片 |
+|---|---|---:|---:|---:|---:|
+| `kp-kr` 朝鲜半岛 | 124.3,33.1,131,43.1 | 6x5 | 15,863 | 4.51 MB | 174.7 KB |
+| `mn` 蒙古 | 87.7,41.5,119.9,52.2 | 6x3 | 17,308 | 11.41 MB | 110.7 KB |
+| `sea-mainland` 中南半岛 | 92.2,5.6,109.6,28.6 | 3x6 | 42,837 | 18.24 MB | 274.7 KB |
+| `ca` 中亚五国 | 46.5,35.1,87.4,55.5 | 8x5 | 64,467 | 35.98 MB | 370.0 KB |
+| `ru-far` 俄相邻带 | 80,49,145,62 | 13x3 | 21,503 | 16.06 MB | 179.3 KB |
+
+⇒ 5 包合计 **161,978 要素 / 86.20 MB**（12 个区域包合计 **241.16 MB**，见 §十九·六）。
+
+**门禁（每个包都跑 `verify_pack.mjs`，8 项断言全绿）**，要点：
+- **`z<8` 的线路要素带 `is_dc` = 100%**（kp-kr 7,542/7,542、mn 20,320/20,320、
+  sea-mainland 35,337/35,337、ca 58,091/58,091、ru-far 20,452/20,452）
+  ⇒ 低缩放直流配色不会静默失效
+- 无解码失败、无 `undefined/null` 属性值；z≥8 各 ftype 专属属性与扩容属性都命中
+- `ru-far` 的换流站「未抽样到」是因为该区 `power=converter` 要素为 **0**，不是缺陷
+
+**稀疏区改粗网格（B 方案，用户拍板）**：依据 kp-kr 的实测锚点（60 块 ≈ 1.45 h ⇒ 87 秒/块），
+照设计原网格其余 4 区要 2,202 块 ≈ 53 h；改成 ≈5°×4° 的粗网格后是 **230 块 ≈ 5–8 h**，
+**数据完全相同**（同 bbox、同查询，只是切块更粗）。落地方式写进 `pipeline_regions.mjs`
+的 `target: {lon:5, lat:4}`，让断点键、清单 `chunks`、文档表三处同源。
+
+### 三、5 个邻国底图包（第三类数据包 `kind: "basemap"`）
+
+现有底图只覆盖 `[98,18,128,46]`，邻国放大后没有底图；把底图扩到相邻带会让安装包破 50 MB 红线
+⇒ 底图包走**与电网包同一套按需下载通道**，运行时以**独立叠加 source** 挂载（不动现有底图）。
+
+| 底图包 | bbox（与同区域电网包完全一致） | 体积 |
+|---|---|---:|
+| `basemap-kp-kr` | 124.3,33.1,131,43.1 | 10.45 MB |
+| `basemap-mn` | 87.7,41.5,119.9,52.2 | 9.48 MB |
+| `basemap-sea-mainland` | 92.2,5.6,109.6,28.6 | 15.50 MB |
+| `basemap-ca` | 46.5,35.1,87.4,55.5 | 24.13 MB |
+| `basemap-ru-far` | 80,49,145,62 | 20.97 MB |
+
+⇒ 5 包合计 **80.52 MB**。
+
+- 生成：`node scripts/fetch_basemap.mjs --bbox <region.bbox> --global-maxzoom 4 --region-minzoom 5 --region-maxzoom 8 --out data/packs/basemap-<key>.pmtiles`
+- 🔴 **源归档 `20260912.pmtiles` 已下线（HTTP 404）**：实测改用 `latest.protomaps.com/v4.pmtiles`。
+  后果：国内底图（`20260912` 切的）与邻国底图（`latest/v4` 切的）**不同源**，
+  设计里"与现有底图同源 ⇒ 风格一致"这句**不再成立**，边境叠加处可能有色调/标注差异
+  （按风险表"已知并接受"）。**5 份邻国底图彼此一致**（同一个回退源）。
+- 归档实测（以 `basemap-kp-kr` 为例，把归档解开逐层打印）：`z0-8`；
+  `z0` 全球瓦片图层 = `boundaries/earth/landcover/water`（**没有 `places`**）；
+  `z4+` 起 = `boundaries/earth/landcover/landuse/places/roads/water`。
+- **清单不手改**：`gen_packs_manifest.mjs` 扫 `data/packs/basemap-*.pmtiles` 自动产出
+  `kind:"basemap"` + **`forRegion` 字段**（归属用字段，**不做 key 前缀解析** ——
+  字符串猜归属在改名时会**静默失效**：底图不挂载，地图上什么都不缺，只是没底图）。
+  包不存在时**告警而不写废条目**（写 `bytes: null` 的条目会让用户下载必然失败且看不出原因）。
+
+### 四、运行时（前端三处改动）
+
+1. **品类判定语义化**（`src/lib/packs.ts`）：`PackKind = "region" | "gem" | "basemap"` +
+   `isRegionPack` / `isBasemapPack` / `isThematicOverlay` 三个显式函数。
+   ‼️ **不要**写 `!== "gem"` 之类的反向推断：加了第三态之后，反向判据会把底图包当区域包
+   （占装载名额、并以 `source-layer:"grid"` 去挂一个没有 grid 层的归档），**全程静默**。
+2. **选举上限 2 → 3**（`PACK_MAX_ACTIVE`）：边境带（满洲里、二连浩特、凭祥）会同时落在
+   "中国某区域 + 一个邻国区域"里，上限 2 会出现「一侧有网、一侧空白」的观感断裂。
+   代价是多一套 MVT source + 图层，**不能再往上加**。`PACK_MIN_ZOOM` 保持 6。
+3. **底图叠加 source 的生命周期**（`MapPage.tsx`，与 GEM 同构）：
+   选中的区域包有 `forRegion === 该 key` 且**已安装**的底图包时，建独立 source
+   `basemap-overlay-<key>`（`bounds` 取清单条目的 `bbox`），只挂
+   `earth/water/roads/boundaries/places`，用 `moveLayer` 精确插位，卸载时连图层带 source 一起摘。
+   现有 `BASEMAP_SOURCE`（`"basemap"`）的 URL/图层/样式**一行不动**。
+   - **插位是两种**：填充/线插在第一个**无后缀**的电网图层之前（= 中国底图之上、电网之下）；
+     `places` 是符号层（`text-allow-overlap:false` 自带碰撞检测），插在现有地名
+     `basemap-place-labels` **之前**，否则边境会出现同一座城市两个标签。
+     两者都取不到时（底图归档缺失，样式里只有 `background`）追加到最顶 ——
+     `moveLayer` 对不存在的 `beforeId` 是**静默失败**，没有兜底就会「包下载成功却看不到底图」。
+   - 叠加层是另一套图层 id（`basemap-overlay-<key>--<原图层id>`），所以主题切换要跟着重刷
+     （`applyBasemapTheme` → `applyBasemapPaint(map, theme, overlayKeys)`），
+     否则浅色主题下会「中国那半浅色、邻国那半深色」。
+
+### 五、多文种字形（`scripts/fetch_glyphs.mjs`）
+
+**实测决定加哪几族**（`scripts/scan_place_codepoints.mjs` + `scripts/glyph_coverage.mjs`，
+扫**6 份**底图归档的 `places` 取并集 = **1959 个码位**）：
+
+| 族 | 单独覆盖 | 新增覆盖 |
+|---|---:|---:|
+| `Noto Sans SC` | 1913 | 1913 |
+| `Noto Sans KR` | 1299 | **0** |
+| `Noto Sans JP` | 1560 | **1**（U+59F6） |
+| `Noto Sans Thai` | 98 | **0** |
+| `Noto Sans` | 178 | **9**（哈萨克/蒙古语西里尔） |
+
+⇒ **裁定：只加 `Noto Sans`（西里尔），不加 KR / JP / Thai。**
+实测**谚文 0 个码位、假名 0 个、泰文 0 个** —— 设计 §6.2 第 2 条写的"先加 KR / JP / Thai 三族"
+是**基于假设**（以为会出现这些文字），扫描结果推翻了它；加了净收益 0~1 个码位、
+代价 +1~3 MB 进安装包。日韩地名在这份数据里走 `name:en` 兜底（拉丁字母）。
+
+- 实测体积：**95 个文件 / 2.28 MB**（SC 2237.2 KB + Noto Sans 101.0 KB）——
+  阶段27 的基线是「1 份归档 / 86 个子集 / 2.1 MB」，扩到 6 份归档的并集后只多约 **0.2 MB**。
+- 加完两族仍**有 37 个码位无任何子集覆盖**（阿拉伯文 18、老挝文 9、缅甸文 5、3–4 个罕见汉字、
+  越南语扩展区若干）⇒ 那些地名靠 `name:en` 兜底，**这是数据现状，不是缺陷**。
+- ‼️ **不需要产出或注入任何 CSS 文件**：`FontFaceManager.setFontFaces()`
+  （`node_modules/maplibre-gl/src/render/font_face_manager.ts`）把每个 face **直接
+  `new FontFace(...)`** 交给 `document.fonts`，**自己另起内部族名**（`maplibre-gl-font-face-<n>`）
+  —— 它**不读 CSS、也不用 CSS 里的字体族名**。所以：`font-faces` 的**键**才是 `text-font`
+  里的名字；多族 = 多键；族间回退靠 `text-font` 的**数组顺序**（`BASEMAP_TEXT_FONT`）。
+- 脚本会自动**清理不再命中的孤儿子集**：`.woff2` 被 gitignore 忽略，孤儿会静默进安装包
+  （实测清掉 1 个）。
+
+### 六、发布（清单 → 上传 → 门禁 → 安装包）
+
+顺序**不能反**：先出包 → 再 `gen_packs_manifest.mjs` → 再上传；清单必须**只引用真实存在的远端资产**。
+
+```powershell
+node scripts/gen_packs_manifest.mjs                      # 清单 18 条
+node scripts/upload_packs.mjs --dry-run                  # 先看计划：8 跳过 + 10 新增
+node scripts/upload_packs.mjs --yes                      # 真上传（脚本化必须加 --yes）
+node scripts/verify_packs.mjs --remote                   # 门禁：期望退出码 0
+```
+
+- 实测：**清单 18 条**（区域包 12 + 底图包 5 + GEM 1）；远端 **18 个资产合计 328.75 MB**
+  （区域包 241.16 MB + 底图包 80.52 MB + GEM 7.07 MB），`verify_packs.mjs --remote` **退出码 0**。
+- ⚠️ `upload_packs.mjs` 默认**交互式**问一次 `yes`；后台/脚本跑不加 `--yes` 会以
+  `Detected unsettled top-level await` 退出（exit 1），**看起来像失败**。
+- ⚠️ `verify_packs.mjs --remote` 同时会报「本机 `%APPDATA%\...\packs\` 装了 N/18」——
+  那是**正常的**（数据包按需下载）；门禁判据是**远端那 18 行**，不是本机装了几个。
+- **安装包**：`Global Power GIS_0.2.0_x64-setup.exe` **46.09 MB ≤ 50 MB 红线**；
+  `check_release_redlines.mjs --with-exe` 通过。
+  ‼️ **该红线脚本不检查安装包体积**（只查 dist 与 exe 的禁用/对照串），50 MB 必须**另外手工量**。
