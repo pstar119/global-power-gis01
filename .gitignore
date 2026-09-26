@@ -34,7 +34,9 @@ dist-ssr
 #    这个真实意图。
 /src-tauri/resources/maps/**/*.pmtiles
 
-# 阶段27：离线中文字形（由 scripts/fetch_glyphs.mjs 按需裁出的 woff2 子集，约 2.1 MB）。
+# 阶段27 / 阶段56-B：离线底图字形（由 scripts/fetch_glyphs.mjs 按需裁出的 woff2 子集）。
+# 阶段56-B 起是**多族**（Noto Sans SC Offline + Noto Sans Offline，兜西里尔），
+# 实测 95 个文件 = **2.28 MB**（扫 6 份底图归档的并集 1959 个码位）。
 # 同上：派生且可用脚本重建，不进仓库。
 # 注意这里只忽略字体二进制；src/lib/basemapFonts.generated.ts 清单是进 Git 的，
 # 这样缺字体时应用仍能编译，MapLibre 只会告警并回退到系统字体。

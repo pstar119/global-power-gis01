@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-09-24T17:55:42.676Z",
+  "generatedAt": "2026-09-26T04:59:56.340Z",
   "generatedBy": "scripts/gen_packs_manifest.mjs",
   "note": "区域数据包元信息清单。pack 是否已安装需在运行时用 127 字节 Range 探测判定，本文件只描述「有哪些包、覆盖哪里」。",
   "release": {
@@ -157,6 +157,201 @@
       "downloadUrl": "https://gh-proxy.com/https://github.com/pstar119/global-power-gis01/releases/download/v1.0-packs/osm-xibei.pmtiles",
       "sha256": "7c9584731ccac3cfba8625fb7dbf0604cf6e52ba7365f48f976ef462a73173fc",
       "bytes": 32752352
+    },
+    {
+      "key": "kp-kr",
+      "kind": "region",
+      "label": "朝鲜半岛",
+      "provinces": "朝鲜 / 韩国",
+      "bbox": [
+        124.3,
+        33.1,
+        131,
+        43.1
+      ],
+      "file": "packs/osm-kp-kr.pmtiles",
+      "chunks": 30,
+      "features": 15863,
+      "sizeMb": 4.51,
+      "maxTileKb": 190.4,
+      "downloadUrl": "https://gh-proxy.com/https://github.com/pstar119/global-power-gis01/releases/download/v1.0-packs/osm-kp-kr.pmtiles",
+      "sha256": "6b7597e9631605f3b1fdef42126c8b7a811bc2b8a3cbc004dbfc953c89c5af58",
+      "bytes": 4725002
+    },
+    {
+      "key": "mn",
+      "kind": "region",
+      "label": "蒙古",
+      "provinces": "蒙古",
+      "bbox": [
+        87.7,
+        41.5,
+        119.9,
+        52.2
+      ],
+      "file": "packs/osm-mn.pmtiles",
+      "chunks": 18,
+      "features": 17308,
+      "sizeMb": 11.41,
+      "maxTileKb": 163.3,
+      "downloadUrl": "https://gh-proxy.com/https://github.com/pstar119/global-power-gis01/releases/download/v1.0-packs/osm-mn.pmtiles",
+      "sha256": "100fe16095d37b4cbfde6ce78dda8784c158273a4b97c8e6d4f7b074af043a39",
+      "bytes": 11964585
+    },
+    {
+      "key": "sea-mainland",
+      "kind": "region",
+      "label": "中南半岛",
+      "provinces": "缅 / 老 / 越 / 泰 / 柬",
+      "bbox": [
+        92.2,
+        5.6,
+        109.6,
+        28.6
+      ],
+      "file": "packs/osm-sea-mainland.pmtiles",
+      "chunks": 18,
+      "features": 42837,
+      "sizeMb": 18.24,
+      "maxTileKb": 380.2,
+      "downloadUrl": "https://gh-proxy.com/https://github.com/pstar119/global-power-gis01/releases/download/v1.0-packs/osm-sea-mainland.pmtiles",
+      "sha256": "801095b241bcfb4d8d11dd1116d18cad229842292d27cd59486d5fe6870b916a",
+      "bytes": 19127885
+    },
+    {
+      "key": "ca",
+      "kind": "region",
+      "label": "中亚五国",
+      "provinces": "哈 / 吉 / 塔 / 乌 / 土",
+      "bbox": [
+        46.5,
+        35.1,
+        87.4,
+        55.5
+      ],
+      "file": "packs/osm-ca.pmtiles",
+      "chunks": 40,
+      "features": 64467,
+      "sizeMb": 35.98,
+      "maxTileKb": 384.6,
+      "downloadUrl": "https://gh-proxy.com/https://github.com/pstar119/global-power-gis01/releases/download/v1.0-packs/osm-ca.pmtiles",
+      "sha256": "588a59f53e4f0b10bcf7e69f1d349ede69ccde099f03122834d4046b8b39d7f4",
+      "bytes": 37730229
+    },
+    {
+      "key": "ru-far",
+      "kind": "region",
+      "label": "俄相邻带",
+      "provinces": "俄罗斯（49°N 以南的相邻带）",
+      "bbox": [
+        80,
+        49,
+        145,
+        62
+      ],
+      "file": "packs/osm-ru-far.pmtiles",
+      "chunks": 39,
+      "features": 21503,
+      "sizeMb": 16.06,
+      "maxTileKb": 204.5,
+      "downloadUrl": "https://gh-proxy.com/https://github.com/pstar119/global-power-gis01/releases/download/v1.0-packs/osm-ru-far.pmtiles",
+      "sha256": "5ed8fd385154e52bb9af139b15f2878257736d2241af41d0aef5adf35206f0b8",
+      "bytes": 16836672
+    },
+    {
+      "key": "basemap-kp-kr",
+      "kind": "basemap",
+      "forRegion": "kp-kr",
+      "label": "朝鲜半岛 · 底图",
+      "provinces": "朝鲜 / 韩国",
+      "file": "packs/basemap-kp-kr.pmtiles",
+      "bbox": [
+        124.3,
+        33.1,
+        131,
+        43.1
+      ],
+      "features": null,
+      "sizeMb": 10.45,
+      "sha256": "73214e67eedbfbfb267c6b9e41cc52c79ac876e51de941226aaf0d0636639d6e",
+      "bytes": 10952932,
+      "downloadUrl": "https://gh-proxy.com/https://github.com/pstar119/global-power-gis01/releases/download/v1.0-packs/basemap-kp-kr.pmtiles"
+    },
+    {
+      "key": "basemap-mn",
+      "kind": "basemap",
+      "forRegion": "mn",
+      "label": "蒙古 · 底图",
+      "provinces": "蒙古",
+      "file": "packs/basemap-mn.pmtiles",
+      "bbox": [
+        87.7,
+        41.5,
+        119.9,
+        52.2
+      ],
+      "features": null,
+      "sizeMb": 9.48,
+      "sha256": "af8381141ba665da0c0abc6de1b1bce96d2fc939c9e25b5f64808cf7c3c028e6",
+      "bytes": 9936462,
+      "downloadUrl": "https://gh-proxy.com/https://github.com/pstar119/global-power-gis01/releases/download/v1.0-packs/basemap-mn.pmtiles"
+    },
+    {
+      "key": "basemap-sea-mainland",
+      "kind": "basemap",
+      "forRegion": "sea-mainland",
+      "label": "中南半岛 · 底图",
+      "provinces": "缅 / 老 / 越 / 泰 / 柬",
+      "file": "packs/basemap-sea-mainland.pmtiles",
+      "bbox": [
+        92.2,
+        5.6,
+        109.6,
+        28.6
+      ],
+      "features": null,
+      "sizeMb": 15.5,
+      "sha256": "3e65826f5337e75036dec9f7e3bfca60a4533b09b8d9e607c8d5a29330bc00e2",
+      "bytes": 16255957,
+      "downloadUrl": "https://gh-proxy.com/https://github.com/pstar119/global-power-gis01/releases/download/v1.0-packs/basemap-sea-mainland.pmtiles"
+    },
+    {
+      "key": "basemap-ca",
+      "kind": "basemap",
+      "forRegion": "ca",
+      "label": "中亚五国 · 底图",
+      "provinces": "哈 / 吉 / 塔 / 乌 / 土",
+      "file": "packs/basemap-ca.pmtiles",
+      "bbox": [
+        46.5,
+        35.1,
+        87.4,
+        55.5
+      ],
+      "features": null,
+      "sizeMb": 24.13,
+      "sha256": "33494beab9b3a351e9b82172cf098837bca7b6f54eb5f614dce4e31356ca0939",
+      "bytes": 25300764,
+      "downloadUrl": "https://gh-proxy.com/https://github.com/pstar119/global-power-gis01/releases/download/v1.0-packs/basemap-ca.pmtiles"
+    },
+    {
+      "key": "basemap-ru-far",
+      "kind": "basemap",
+      "forRegion": "ru-far",
+      "label": "俄相邻带 · 底图",
+      "provinces": "俄罗斯（49°N 以南的相邻带）",
+      "file": "packs/basemap-ru-far.pmtiles",
+      "bbox": [
+        80,
+        49,
+        145,
+        62
+      ],
+      "features": null,
+      "sizeMb": 20.97,
+      "sha256": "dd96187f03b008e86ff96078b7e31bb176ab39eae394a2508b1e7850829a6e77",
+      "bytes": 21987521,
+      "downloadUrl": "https://gh-proxy.com/https://github.com/pstar119/global-power-gis01/releases/download/v1.0-packs/basemap-ru-far.pmtiles"
     },
     {
       "key": "gem",

@@ -28,11 +28,19 @@ import {
 import "maplibre-gl/dist/maplibre-gl.css";
 import { PMTiles, Protocol } from "pmtiles";
 import { FUEL_FALLBACK_COLOR, FUEL_LEGEND, fuelColor, fuelLabel } from "../lib/fuel";
-// 阶段50-B：只借类型，不引运行时。品类枚举的**唯一定义点**在 packs.ts，
-// 避免 MapPage 这份本地 PackEntry 与共享版再漂移出一套自己的字面量。
-import { isBasemapPack, isRegionPack, type PackKind } from "../lib/packs";
+// 阶段50-B / 56-B：只借类型与判定函数，不引运行时。品类枚举的**唯一定义点**在
+// packs.ts（含三个显式判定函数），避免 MapPage 这份本地 PackEntry 再漂移出一套自己的字面量。
+import {
+  isBasemapPack,
+  isRegionPack,
+  isThematicOverlay,
+  type PackKind,
+} from "../lib/packs";
 // 阶段27：离线中文字形的 `font-faces` 清单（由 scripts/fetch_glyphs.mjs 生成）
-import { BASEMAP_FONT_FACES, BASEMAP_FONT_FAMILY } from "../lib/basemapFonts.generated";
+import {
+  BASEMAP_FONT_FACES,
+  BASEMAP_TEXT_FONT,
+} from "../lib/basemapFonts.generated";
 import {
   MAX_HIGHLIGHT_POINTS,
   buildBoundsSql,
@@ -583,18 +591,30 @@ interface PackEntry {
   features?: number | null;
   sizeMb?: number | null;
   /**
-   * 阶段50-B：数据包品类 —— **按生命周期分**，不是按内容分。
+   * 阶段50-B / 56-B：数据包品类 —— **按生命周期分**，不是按内容分。
    *
-   * · `"region"` / 缺省 —— 区域包：按视口选举、最多 2 个、随视野增删（MVT 图层名 `grid`）
+   * · `"region"` / 缺省 —— 区域包：按视口选举、最多 `PACK_MAX_ACTIVE` 个、随视野增删（MVT 图层名 `grid`）
    * · `"gem"`             —— thematic / global overlay：全球单一图层，
    *                          由图层开关控制，**不参与视口选举**（MVT 图层名 `gem`）
+   * · `"basemap"`         —— 邻国底图包：**不参与选举、也没有自己的图层通道**，
+   *                          只在同区域的电网包被选中时作为叠加 source 挂上（见 `addBasemapOverlayLayers`）
    *
    * ⚠️ 类型是**可选的**（不是需求里写的必填）：旧清单没有这个字段，
    *    而它又是从 `res.json()` 强转过来的 —— 标成必填不会阻止任何东西，
    *    只会让“缺省”这个真实存在的情况在类型上不可表达。
-   *    运行时一律用 `=== "gem"` 判定，缺失自然落到 region 分支。
+   * 🔴 判定一律走 `packs.ts` 的三个显式函数（`isRegionPack` / `isBasemapPack` /
+   *    `isThematicOverlay`），**不要**写 `!== "gem"` 之类的反向推断 ——
+   *    加了第三态之后，反向判据会把底图包当成区域包，而且不报错（阶段56-B）。
    */
   kind?: PackKind;
+  /**
+   * 阶段56-B：**底图包专用** —— 它给哪个区域包当底图。
+   *
+   * ‼️ 用字段而不是从 `key` 前缀解析（设计 §4.2）：`basemap-kp-kr` 靠字符串猜归属，
+   *    在改名/换命名规则时会**静默失效**（底图不挂载，地图上什么都不缺，只是没底图）。
+   * ⚠️ 与 `packs.ts` 的 `PackEntry` 是**同一份形状的两个镜像**（这里只声明 MapPage 用得到的字段）。
+   */
+  forRegion?: string;
 }
 interface PacksManifest {
   core: { label: string; resource: string; bbox: [number, number, number, number] };
@@ -1835,8 +1855,16 @@ const BASEMAP_LABEL_TEXT = {
  *
  * ⚠️ 图层可能还没建好（地图尚未 load、或底图归档缺失时只有 background）——
  *    逐个 `getLayer` 判空跳过，不报错。
+ *
+ * 阶段56-B：新增 `overlayKeys` 参数 —— 邻国底图包的叠加图层是**另一套 id**
+ * （`basemap-overlay-<key>--<原id>`），颜色必须跟着主题一起换，否则浅色主题下
+ * 邻国那一半地图会是深色的。传空集合即等于旧行为（只改现有底图）。
  */
-function applyBasemapTheme(map: MapLibreMap, theme: Theme): void {
+function applyBasemapPaint(
+  map: MapLibreMap,
+  theme: Theme,
+  overlayKeys: Iterable<string> = [],
+): void {
   const p = theme === "light" ? BASEMAP_PAINT_LIGHT : BASEMAP_PAINT;
   const t = BASEMAP_LABEL_TEXT[theme];
   /**
@@ -1876,6 +1904,39 @@ function applyBasemapTheme(map: MapLibreMap, theme: Theme): void {
     ]);
     // 描边用主题背景色：浅色底图上没有 halo 的文字在某些色块上会读不清
     map.setPaintProperty(BASEMAP_LABEL_LAYER_ID, "text-halo-color", p.background);
+  }
+
+  // ---- 阶段56-B：邻国底图的叠加图层（只有这几层，别的类型判空跳过即可）----
+  for (const key of overlayKeys) {
+    const id = (base: string) => basemapOverlayLayerId(key, base);
+    if (has(id("basemap-earth")))
+      map.setPaintProperty(id("basemap-earth"), "fill-color", p.earth);
+    if (has(id("basemap-water")))
+      map.setPaintProperty(id("basemap-water"), "fill-color", p.water);
+    if (has(id("basemap-river")))
+      map.setPaintProperty(id("basemap-river"), "line-color", p.river);
+    if (has(id("basemap-road-minor")))
+      map.setPaintProperty(id("basemap-road-minor"), "line-color", p.roadMinor);
+    if (has(id("basemap-road-major")))
+      map.setPaintProperty(id("basemap-road-major"), "line-color", p.roadMajor);
+    if (has(id("basemap-boundary")))
+      map.setPaintProperty(id("basemap-boundary"), "line-color", p.boundary);
+    if (has(id(BASEMAP_LABEL_LAYER_ID))) {
+      map.setPaintProperty(id(BASEMAP_LABEL_LAYER_ID), "text-color", [
+        "match",
+        ["get", "kind"],
+        "country",
+        t[0],
+        "region",
+        t[1],
+        t[2],
+      ]);
+      map.setPaintProperty(
+        id(BASEMAP_LABEL_LAYER_ID),
+        "text-halo-color",
+        p.background,
+      );
+    }
   }
 }
 
@@ -2000,8 +2061,9 @@ const BASEMAP_LAYERS: LayerSpecification[] = [
     layout: {
       // ⚠️ 这条回退链必须与 `scripts/fetch_glyphs.mjs` 里扫字形用的 NAME_KEYS 完全一致。
       //    否则会出现「扫字形时算的是 A 字、实际渲染用的是 B 字」→ 图上缺字。
-      //    `name:en` 是关键兜底：实测有 23 个码位（缅甸文/泰文等）没有任何字体子集覆盖，
-      //    没有英文兜底时那些地方会是空白标签。
+      //    `name:en` 是关键兜底：阶段56-B 扫 6 份底图归档的并集（1959 个码位）实测
+      //    有 36 个码位**没有任何候选族的子集覆盖**（阿拉伯文 18、老挝文 9、缅甸文 5、
+      //    4 个罕见汉字），没有英文兜底时那些地方会是空白标签。
       "text-field": [
         "coalesce",
         ["get", "name:zh-Hans"],
@@ -2009,7 +2071,12 @@ const BASEMAP_LAYERS: LayerSpecification[] = [
         ["get", "name:en"],
         ["get", "name"],
       ],
-      "text-font": [BASEMAP_FONT_FAMILY],
+      // 阶段56-B（T7）：**多族 fontstack**，顺序 = 回退顺序 ——
+      // MapLibre 的 FontFaceManager.getFontFamily() 会按 `text-font` 的每个名字依次找
+      // 「第一个 unicode-range 覆盖该码位的 face」。汉字族覆盖 1913/1959，必须排最前；
+      // `Noto Sans Offline` 兜它剩不下的 9 个西里尔码位（哈萨克/蒙古语）。
+      // ‼️ KR / JP / Thai 三族**实测**收益 0~1 个码位（谚文/假名/泰文各 0 个码位），已裁定不加。
+      "text-font": BASEMAP_TEXT_FONT,
       // 国家 > 省/州 > 城市：用字号与颜色拉开层次。
       // ⚠️ 不能靠 font-weight 区分 —— CJK 的字重由字体文件自带，
       //    样式里的 light/regular/medium/bold 关键字对表意文字不生效。
@@ -2046,6 +2113,178 @@ const BASEMAP_LAYERS: LayerSpecification[] = [
     },
   },
 ];
+
+/* ============================================================================
+ * 阶段56-B：**邻国底图包的叠加 source**（设计 §4.4 的 4a 方案）
+ * ============================================================================
+ * 背景：现有底图（`BASEMAP_RESOURCE`）只覆盖中国中东部 `[98,18,128,46]`，
+ * 邻国区域放大后**没有底图**（深色纯背景），而把底图扩到相邻带会让安装包破 50 MB 红线。
+ * ⇒ 5 份邻国底图包按需下载，运行时作为**独立叠加 source** 挂上。
+ *
+ * ## 与现有底图的关系（红线）
+ *   ‼️ `BASEMAP_SOURCE`（`"basemap"`）的 URL、图层、样式**一行都不动** ——
+ *      叠加层是**另一条** source（id `basemap-overlay-<区域key>`）、**另一套**图层 id
+ *      （`basemap-overlay-<区域key>--<原图层id>`）。这样叠加层随时可整体摘掉，
+ *      而现有底图那条已验证的路径完全不受影响（回归面 = 0）。
+ *
+ * ## 挂哪些层
+ *   设计 §4.4：earth / water / boundaries / places / roads。
+ *   `landcover` / `landuse` / `pois` **不挂**（前者 z5–7 之外本来就缺，后两者与数据无关）。
+ *
+ * ## 插位（最容易被误解的一处）
+ *   三个 position 而不是一个"盖在中国底图之上"：
+ *     · 填充/线（earth、water、roads、boundaries）→ 插在**电网图层之下、现有底图之上**
+ *       （用现有底图**已有的图层 id** 当锚点，锚点必然是 OSM 电网那批图层之一）
+ *     · `places` 符号 → 插在 `basemap-place-labels`（现有地名）**之前**
+ *       ⇒ 有中国底图的地方**照样用中国底图的中文地名**（叠加层只补它覆盖不到的地方）
+ *       ⇒ 也不会出现「同一座城市两个标签」那种只有在边境才看得出的怪相
+ *     · 兜底 → 追加到最顶（现有底图不存在时的退化路径，此时没有"之上/之下"可言）
+ *
+ *   ‼️ 为什么需要兜底：`buildBasemapStyle` 在底图归档缺失时**只建 background 一层**，
+ *      上面两个锚点全都不存在。没有兜底就会出现「底图包下载成功、地图上却没有底图」，
+ *      而且不报错（`moveLayer` 对不存在的 beforeId 静默失败）。
+ */
+const BASEMAP_OVERLAY_SOURCE_LAYERS: ReadonlySet<string> = new Set([
+  "earth",
+  "water",
+  "roads",
+  "boundaries",
+  "places",
+]);
+
+/** 叠加 source 的 id（一个区域包 key 一条） */
+function basemapOverlaySourceId(key: string): string {
+  return `basemap-overlay-${key}`;
+}
+
+/** 叠加图层的 id：`<原图层 id>` 前面加 `basemap-overlay-<key>--` */
+function basemapOverlayLayerId(key: string, baseId: string): string {
+  return `${basemapOverlaySourceId(key)}--${baseId}`;
+}
+
+/**
+ * 当前**挂在图上**的叠加层 key 集合（模块级，与 `packCursorHandlers` 同一个位置）。
+ *
+ * ⚠️ 只用来回答一件事：「切换深浅主题时要给哪些叠加层重刷配色」。
+ *    「挂没挂」一律以 `map.getSource()` 为准 —— 建图 effect 的 cleanup 会清掉本表
+ *    （MapLibre 的 `map.remove()` 会带着所有图层一起消失，而本表不会自己清）。
+ */
+const basemapOverlayKeys = new Set<string>();
+
+/** 按设计 §4.4 从现有底图图层派生出叠加图层（id 换掉、source 换成叠加 source） */
+function buildBasemapOverlayLayers(
+  key: string,
+  sourceId: string,
+): LayerSpecification[] {
+  const out: LayerSpecification[] = [];
+  for (const layer of BASEMAP_LAYERS) {
+    // ⚠️ `source-layer` 不在 maplibre-gl 的 `LayerSpecification` 类型里（它是扩展属性），
+    //    运行时用「先声明再展开」绕过多余属性检查 —— 与 `addPackLayers` / `addGemPlantLayers`
+    //    同一个约定。这里因为要**按 source-layer 过滤**，必须先读出来，所以额外写一次断言。
+    const sourceLayer = (layer as LayerSpecification & { "source-layer"?: string })[
+      "source-layer"
+    ];
+    if (!sourceLayer || !BASEMAP_OVERLAY_SOURCE_LAYERS.has(sourceLayer)) continue;
+    // ⚠️ 这句 `as` 不是偷懒：`LayerSpecification` 是按 `type` 收窄的联合，
+    //    而展开一个联合之后 TS 无法再把它认回某一个成员（会报 TS2345，
+    //    "source does not exist in type BackgroundLayerSpecification"）。
+    //    形状本身由 `BASEMAP_LAYERS` 保证 —— 那里每一条都是手写的合法图层。
+    out.push({
+      ...layer,
+      id: basemapOverlayLayerId(key, layer.id),
+      source: sourceId,
+    } as LayerSpecification);
+  }
+  return out;
+}
+
+/**
+ * 把一个邻国底图包作为叠加 source 挂上（+ 按锚点精确插位）。
+ *
+ * ⚠️ 插位只做**一次**（挂载时），之后不再重排：区域包图层是后加的、本来就在最顶，
+ *    叠加层已经在它们下面，不会因为再挂一个包而跑上来。
+ * ⚠️ `moveLayer(id, beforeId)` 的图层顺序语义：对同一个 `beforeId` 依次调用时，
+ *    后调用的排在先调用的**上面** —— 所以下面按 `BASEMAP_LAYERS` 的次序移动，
+ *    叠加层内部的相对次序与现有底图完全一致。
+ */
+function addBasemapOverlayLayers(
+  map: MapLibreMap,
+  key: string,
+  archive: ArchiveHandle,
+  bounds: readonly number[] | undefined,
+): void {
+  const sourceId = basemapOverlaySourceId(key);
+  if (map.getSource(sourceId)) return;
+
+  map.addSource(sourceId, {
+    type: "vector",
+    // ⚠️ 与现有底图/电网/区域包同一个约定：用 `tiles` 而不是 `url`。
+    //    用 `url` 时 MapLibre 会去问协议的 TileJSON，而协议会把归档 header 的 bbox
+    //    当 bounds 返回 —— 缩到全球视野时叠加瓦片会被整个裁掉（现有底图的注释里有实测）。
+    tiles: [`pmtiles://${archive.key}/{z}/{x}/{y}`],
+    minzoom: archive.minZoom,
+    maxzoom: archive.maxZoom,
+    // bbox 由清单给（设计 §4.2：与同区域电网包完全一致，不再算一次）。
+    // 清单没给就退回全球范围 —— 宁可多请求瓦片，也不要因为一个缺失字段把底图裁没。
+    bounds: bounds
+      ? [bounds[0], bounds[1], bounds[2], bounds[3]]
+      : [-180, -85.0511, 180, 85.0511],
+    attribution: OSM_ATTRIBUTION,
+  });
+
+  const layers = buildBasemapOverlayLayers(key, sourceId);
+  const sourceLayers = layers.map(
+    (l) => (l as LayerSpecification & { "source-layer"?: string })["source-layer"] ?? "?",
+  );
+  const fillAnchor = basemapFillAnchorLayerId(map);
+  const labelAnchor = map.getLayer(BASEMAP_LABEL_LAYER_ID)
+    ? BASEMAP_LABEL_LAYER_ID
+    : undefined;
+  for (const layer of layers) {
+    map.addLayer(layer);
+    const anchor = layer.type === "symbol" ? labelAnchor : fillAnchor;
+    if (anchor) map.moveLayer(layer.id, anchor);
+  }
+
+  basemapOverlayKeys.add(key);
+
+  console.info(
+    `[MapPage] 加载邻国底图包 ${key}（叠加 source ${sourceId}，` +
+      `图层 ${sourceLayers.join("/")} 共 ${layers.length} 个，` +
+      `z${archive.minZoom}-${archive.maxZoom}，${archive.mode} 模式）`,
+  );
+}
+
+/**
+ * 摘掉一个邻国底图包的叠加 source 与全部图层。
+ *
+ * ⚠️ 顺序不能反：先删图层再删 source。反过来 MapLibre 只是 `fire(ErrorEvent)` + `return`，
+ *    **不抛异常**、source 也**不会被删掉** —— 静默泄漏归档引用与已缓存瓦片（同 GEM 那处的实测）。
+ */
+function removeBasemapOverlayLayers(map: MapLibreMap, key: string): void {
+  for (const layer of BASEMAP_LAYERS) {
+    const id = basemapOverlayLayerId(key, layer.id);
+    if (map.getLayer(id)) map.removeLayer(id);
+  }
+  const sourceId = basemapOverlaySourceId(key);
+  if (map.getSource(sourceId)) map.removeSource(sourceId);
+  basemapOverlayKeys.delete(key);
+}
+
+/**
+ * 叠加层的「电网之下」插入锚点：**现有的第一个电网图层**。
+ *
+ * ⚠️ 不能对 `packLayerId` 加过 key 后缀的图层名取巧（叠加层 id 里也有 `--`），
+ *    这里就按 `OSM_LINE_TIERS` 的顺序找第一个**没有后缀**的那个 —— 它必然是核心区图层
+ *    （`addOsmGridLayers` 建图期就加了，且永不摘除）。
+ * 找不到（核心区归档缺失、只剩回退 GeoJSON 时也不会有）返回 undefined ⇒ 不移动，追加到最顶。
+ */
+function basemapFillAnchorLayerId(map: MapLibreMap): string | undefined {
+  for (const tier of OSM_LINE_TIERS) {
+    if (map.getLayer(tier.id)) return tier.id;
+  }
+  return undefined;
+}
 
 /**
  * 协议注册 + 底图定位，全程只执行一次。
@@ -2602,29 +2841,28 @@ function addOsmGridLayers(
 }
 
 /**
- * 阶段50-A：数据包按**生命周期**分两类（不是按内容分）。
+ * 阶段50-A / 56-B：数据包按**生命周期**分三类（不是按内容分）。
  *
- * · `"osm"` / 缺省 —— **区域包**：按视口选举、最多 2 个、随视野反复增删
- * · `"gem"`         —— **thematic / global overlay**：全球单一图层，
- *                       由图层开关控制，**该不该显示与视野完全无关**
+ * · `"region"` / 缺省 —— **区域包**：按视口选举、最多 `PACK_MAX_ACTIVE` 个、随视野反复增删
+ * · `"gem"`            —— **thematic / global overlay**：全球单一图层，
+ *                          由图层开关控制，**该不该显示与视野完全无关**
+ * · `"basemap"`        —— **邻国底图包**：不参与选举、也没有自己的图层通道，
+ *                          只在同区域的电网包被选中时作为叠加 source 挂上（见 `addBasemapOverlayLayers`）
  *
  * ‼️ 为什么必须分开：把 GEM 混进 `activePacks` 会产生三个都不能接受的行为
  *    （阶段50-A 代码审查逐条确认，均有明确代码依据）：
  *      1. 视野中心落进核心区 bbox（118,27→123,33）时 `activePacks` 被强制清空
  *         ⇒ **GEM 在长三角整片消失**
- *      2. GEM 的 bbox 是全球，重叠面积恒为最大 ⇒ 恒排第一、恒占 2 个名额之一，
+ *      2. GEM 的 bbox 是全球，重叠面积恒为最大 ⇒ 恒排第一、恒占一个名额，
  *         把华东/华中这些真正的区域包挤掉
  *      3. `zoom < PACK_MIN_ZOOM(6)` 时清空 ⇒ 缩小反而没数据，与直觉相反
  *
- * ⚠️ 判定用 `=== "gem"` 而**不是** `!== "osm"`。
- *    后者在类型改成 `"region" | "gem"`（阶段50-B）后会变成灾祸：
- *    `kind: "region"` 的条目会被算作 thematic ⇒ **所有区域包被排除出选举**，
- *    而且不报错、只是区域包再也不加载。现在这样写，
- *    任何未知/缺失值都安全地落到“区域包”这一侧。
+ * 🔴 阶段56-B：判定函数**只有一处定义**（`src/lib/packs.ts`），本文件 `import` 复用。
+ *    这里原先还留着一份本地副本（`p.kind === "gem"`），是从"两态"时代抄过来的 ——
+ *    两份判据并存就是这个文件反复警告过的漂移源，已删除。
+ *    ‼️ 也**不要**写 `!== "gem"` 之类的反向推断：加了第三态之后，反向判据会把
+ *      底图包当成区域包，而且不报错（阶段56-B）。
  */
-function isThematicOverlay(p: PackEntry): boolean {
-  return p.kind === "gem";
-}
 
 /** 区域包的 source id */
 function packSourceId(key: string): string {
@@ -3551,6 +3789,13 @@ function MapPage({
   const gemWantedRef = useRef(false);
 
   /**
+   * 阶段56-B：**当前想要挂着的邻国底图包**所属的区域 key（`null` = 都不要）。
+   * ⚠️ 与 `gemWantedRef` 同一个用途、同一个坑：叠加层的挂载是异步的，
+   *    `then` 里读的必须是**最新**的期望值，而不是闭包捕获的那次渲染的值。
+   */
+  const basemapWantedRef = useRef<string | null>(null);
+
+  /**
    * 输电线路总开关的状态：任一档（含直流档）开启即为「开」。
    * 阶段56-A2：直流档也算 —— 设计 §5.1 把它列为输电线路下的第 6 个并列档位。
    */
@@ -4407,6 +4652,10 @@ function MapPage({
       // 若组件重挂载后 GEM 没被再次挂载（探测未完成 / 开关没开），
       // 这条记录就再也没有机会被后来者覆盖 ⇒ 长期占着一份已废弃的地图内存。
       gemPmtilesHandlers.clear();
+      // 阶段56-B：同理清掉「哪些邻国底图叠加层挂在图上」那张模块级表 ——
+      // `map.remove()` 会带着它们一起消失，而这张表不会自己清；
+      // 不清的话，重挂载后主题切换会去给一批早已不存在的图层设 paint（静默失败）。
+      basemapOverlayKeys.clear();
       mapRef.current?.remove();
       mapRef.current = null;
     };
@@ -4458,12 +4707,15 @@ function MapPage({
    *    若用户在浅色主题下启动，不补这一下就会一直停在深色底图。
    * ⚠️ 订阅回调里用的是 `mapRef.current` 之外捕获的 map：本 effect 只在 mapReady
    *    翻转时建一次订阅，而地图实例在整个生命周期内不变（重建走的是 remount）。
+   *
+   * 阶段56-B：叠加层也要跟着换色 —— key 从模块级的 `basemapOverlayKeys` 现取，
+   * 而不是收进依赖数组：主题 effect 只在 mapReady 翻转时跑，叠加层却随视野反复增删。
    */
   useEffect(() => {
     if (!mapReady) return;
     const map = mapRef.current;
     if (!map) return;
-    const paint = (t: Theme) => applyBasemapTheme(map, t);
+    const paint = (t: Theme) => applyBasemapPaint(map, t, basemapOverlayKeys);
     paint(readTheme());
     return onThemeChange(paint);
   }, [mapReady]);
@@ -4556,28 +4808,46 @@ function MapPage({
       const changed = packsManifestRef.current?.packs.find(
         (p) => p.file.split("/").pop() === file,
       );
+      // ‼️ 阶段56-B：有清单条目时**一律用清单里的 key**。
+      //    `packKeyFromFile("basemap-kp-kr.pmtiles")` 推出的是 `"basemap-kp-kr"`，
+      //    而底图包在清单里的 `key` 就是 `"basemap-kp-kr"`（它靠 `forRegion` 归属）——
+      //    两者恰好相等，但**不能靠这个巧合**：区域包那条 basename 推导规则本来
+      //    就和清单 key 是两套（GEM 就是活证据）。有条目就以条目为准，没有才退回推导。
+      const packKey = changed?.key ?? key;
       if (changed && isThematicOverlay(changed)) {
         gemWantedRef.current = false;
         if (map?.getSource(gemPmtilesSourceId())) {
           removeGemPlantLayers(map);
           console.info(`[MapPage] GEM 数据包 ${changed.key} 文件已变化，拆掉旧图层等重挂`);
         }
-      } else if (map?.getSource(packSourceId(key))) {
-        removePackLayers(map, key);
-        console.info(`[MapPage] 区域包 ${key} 文件已变化，拆掉旧图层等重挂`);
+      } else if (changed && isBasemapPack(changed) && changed.forRegion) {
+        // 阶段56-B：底图包**没有**自己的 source id（它叠加在同区域电网包的选举结果上），
+        // 所以这里要按 `forRegion` 去摘。摘掉后下面的 `setPacksAvailable` 会让
+        // 底图生命周期 effect 重跑，新归档就绪后自动重挂。
+        if (map?.getSource(basemapOverlaySourceId(changed.forRegion))) {
+          removeBasemapOverlayLayers(map, changed.forRegion);
+          console.info(
+            `[MapPage] 邻国底图包 ${changed.key}（区域 ${changed.forRegion}）文件已变化，拆掉叠加层等重挂`,
+          );
+        }
+      } else if (map?.getSource(packSourceId(packKey))) {
+        removePackLayers(map, packKey);
+        console.info(`[MapPage] 区域包 ${packKey} 文件已变化，拆掉旧图层等重挂`);
       }
 
       // 先摘掉，避免拆掉 source 后 packsAvailable 还声称它可用
-      setPacksAvailable((prev) => prev.filter((k) => k !== key));
+      setPacksAvailable((prev) => prev.filter((k) => k !== packKey));
 
       void ensurePmtilesArchive(resource, {
-        label: `${key} 区域包`,
+        label: `${packKey} 数据包`,
         missingHint: `${file} 尚未下载完成`,
         quiet: true,
       }).then((handle) => {
         if (!handle) return;
-        setPacksAvailable((prev) => (prev.includes(key) ? prev : [...prev, key]));
-        console.info(`[MapPage] 区域包 ${key} 已重新可用`);
+        setPacksAvailable((prev) =>
+          prev.includes(packKey) ? prev : [...prev, packKey],
+        );
+        console.info(`[MapPage] 数据包 ${packKey} 已重新可用`);
       });
     });
   }, []);
@@ -4816,6 +5086,79 @@ function MapPage({
       if (m.getLayer(BASEMAP_LABEL_LAYER_ID)) m.moveLayer(BASEMAP_LABEL_LAYER_ID);
     });
   }, [mapReady, packsManifest, packsAvailable, visibleLayers]);
+
+  /**
+   * 阶段56-B：**邻国底图包的独立生命周期**（设计 §4.4 的 4a 方案，T6b）。
+   *
+   * ## 为什么是独立 effect，而不是塞进 `activePacks`
+   *   与 GEM 同一个理由（阶段50-A 的三条）：底图包既不是区域包也不是 thematic overlay，
+   *   「该不该显示」的判据是**它所属的那个区域包在不在 `activePacks` 里**。
+   *   塞进选举会立刻出两个静默故障：占掉 `PACK_MAX_ACTIVE` 的名额、
+   *   并以 `source-layer: "grid"` 去挂一个根本没有 grid 层的归档。
+   *   （T6a 已把选举改成 `.filter(isRegionPack)`，本 effect 是它的后半段。）
+   *
+   * ## 装载策略
+   *   ① 选中的区域包（可能多个）里，取**第一个**有 `forRegion === 它` 的底图包，
+   *      且该底图包**已安装** → 作为独立 source 叠加
+   *   ② 它不再被选中 / 底图包不可用 → 连同叠加图层一起摘掉
+   *   ③ 底图包文件变化（重下/更新）→ 由 `onPackInstalled` 先摘，本 effect 因
+   *      `packsAvailable` 变化重跑后重挂
+   *
+   * ## 三个必须写在边界上的判据
+   *   · 归属一律用 `forRegion` 字段，**不做 key 前缀解析**（改名时会静默失效，设计 §4.2）
+   *   · 「挂没挂」一律问 `map.getSource()`，**不用 ref 记状态** ——
+   *     地图重建（`map.remove()` + 新建）时模块级的表不会自己清，
+   *     拿它当判据会得出「已挂上」而其实新图上一个图层都没有
+   *   · `then` 里必须用 ref 复核一次「现在还要不要」：挂载是异步的（等 127 字节 Range 探测），
+   *     等待期间视野可能已经移走（与区域包/GEM 同一个坑）
+   *
+   * ⚠️ 只挂一个：`PACK_MAX_ACTIVE(3)` 可能同时选中「中国某区域 + 一个邻国 + 另一个邻国」，
+   *    但用户的视野中心只在一个邻国上。挂多份会让边境处两条叠加层互相重叠
+   *    （同一个邻国的底图包只有一份，重复挂也没意义）。
+   */
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapReady || !packsManifest) return;
+
+    // 选中的区域包里，第一个「有底图包且已安装」的那个邻国区域
+    const wanted = activePacks.find((regionKey) =>
+      packsManifest.packs.some(
+        (p) =>
+          isBasemapPack(p) &&
+          p.forRegion === regionKey &&
+          packsAvailable.includes(p.key),
+      ),
+    );
+    basemapWantedRef.current = wanted ?? null;
+
+    // 先把不该留的摘掉（视野移走、或那个底图包刚被删掉）
+    for (const key of [...basemapOverlayKeys]) {
+      if (key === wanted) continue;
+      removeBasemapOverlayLayers(map, key);
+      console.info(`[MapPage] 卸载邻国底图包（区域 ${key} 不再被选中或底图包不可用）`);
+    }
+
+    if (!wanted) return;
+    if (map.getSource(basemapOverlaySourceId(wanted))) return; // 已挂上
+
+    const entry = packsManifest.packs.find(
+      (p) => isBasemapPack(p) && p.forRegion === wanted,
+    );
+    if (!entry) return;
+
+    void resolvePackResource(entry).then((archive) => {
+      const m = mapRef.current;
+      if (!archive || !m) return;
+      // 这期间视野又移走了（或底图包被删了），不挂了
+      if (basemapWantedRef.current !== wanted) return;
+      if (m.getSource(basemapOverlaySourceId(wanted))) return;
+      addBasemapOverlayLayers(m, wanted, archive, entry.bbox);
+      // 叠加层是按锚点插位的（不靠「最后加的在最顶」），所以不需要像区域包那样
+      // 补 `moveLayer(BASEMAP_LABEL_LAYER_ID)`；但主题色此刻必须补一次 ——
+      // 样式是在建图时按当时的主题构建的，而叠加层可能是在用户切换主题之后才挂上的。
+      applyBasemapPaint(m, readTheme(), basemapOverlayKeys);
+    });
+  }, [mapReady, packsManifest, packsAvailable, activePacks]);
 
   /**
    * 阶段21：把「图层控制」的开关真正接到 MapLibre 上。

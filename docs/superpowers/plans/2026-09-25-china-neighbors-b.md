@@ -55,13 +55,36 @@
 | T3 | 清单 basemap 段 | `public/packs_manifest.json` 含 2 条新包（区域+底图） | `--dry-run` 前先确认包文件已存在；条目 `forRegion` 正确 | 0.5 h |
 | T4 | `packs.ts` 品类语义化 | `PackKind = "region"\|"gem"\|"basemap"` + 三个判定函数 | `tsc --noEmit` 0 | 0.3 h |
 | T5 | 向导按区域分组 | 向导里电网包与底图包成组显示 | 底图包**不再**被当成区域包；`tsc` 0 | 0.5 h |
-| T6 | 选举过滤 + 上限 3 + 底图叠加 source | `MapPage.tsx` | 底图包不进 `activePacks`；`tsc`/`vite build` 0 | 1–1.5 h |
-| T7 | 字形多族（KR/JP/Thai + 西里尔按扫描） | `src/lib/basemapFonts.generated.ts` 等 | `fetch_glyphs.mjs --estimate` 实测增量；安装包仍 ≤50 MB | 1–2 h |
-| T8 | 其余 4 区域抓取+切片 | `osm-{mn,sea-mainland,ca,ru-far}.pmtiles` + 4 底图包 | 每包门禁 PASS | 13–21 h（挂机） |
-| T9 | 清单重算 + 上传 10 包 | Release 上 18 个资产一致 | `verify_packs.mjs --remote` → **退出码 0** | 0.5 h + 上传 |
-| T10 | 重打安装包 + 红线 | `Global Power GIS_0.2.0_x64-setup.exe` | `check_release_redlines.mjs --with-exe` 通过、≤50 MB | 0.3 h |
+| T6 | 选举过滤 + 上限 3 + 底图叠加 source | `MapPage.tsx` | 底图包不进 `activePacks`；`tsc`/`vite build` 0 | ✅ 已完成（T6a+T6b） |
+| T7 | 字形多族（按实测裁族：SC + Noto Sans） | `src/lib/basemapFonts.generated.ts` 等 | 扫 6 份归档并集 1959 个码位；实测 2.28 MB（净增约 0.2 MB） | ✅ 已完成 |
+| T8 | 其余 4 区域抓取+切片 | `osm-{mn,sea-mainland,ca,ru-far}.pmtiles` + 4 底图包 | 每包门禁 PASS | ✅ 已完成（5 包 `verify_pack` 8 项全绿） |
+| T9 | 清单重算 + 上传 10 包 | Release 上 18 个资产一致 | `verify_packs.mjs --remote` → **退出码 0** | ✅ 已完成 |
+| T10 | 重打安装包 + 红线 | `Global Power GIS_0.2.0_x64-setup.exe` | `check_release_redlines.mjs --with-exe` 通过、≤50 MB | ✅ 已完成（46.09 MB） |
 | T11 | §7.1 七条验收 | 验收记录 | 含边境连续性抽样、地名无方块、中国侧零回归 | 1 h |
 | T12 | 文档同步 | README / README_OSM / PROJECT_HANDOFF | 口径、包数、体积、批次表一致 | 0.5 h |
+
+> ### 📍 进度快照（2026-09-25 收尾）
+>
+> **代码与出包侧：T0–T10 全部完成。** 只剩 **T11 验收**与 **T12 文档同步**。
+>
+> | 已核实的事实 | 证据 |
+> |---|---|
+> | 5 个邻国电网包 + 5 个底图包都在 | `data/packs/`，体积见 T8 表 |
+> | 每个包过门禁 | `verify_pack.mjs` 5 个包 × 8 项断言全绿 |
+> | **远端齐备** | `verify_packs.mjs --remote` **退出码 0**（18 个资产与清单一致） |
+> | 构建与红线 | `tsc`/`vite build` 0；`check_release_redlines.mjs --with-exe` 通过 |
+> | **安装包 ≤ 50 MB** | **46.09 MB**（手工量 NSIS 产物；红线脚本不含体积判据） |
+> | 字形 | 2 族 / 95 个子集 / **2.28 MB**（净增约 0.2 MB） |
+>
+> **下一步（T11/T12）**：
+> 1. T11 设计 §7.1 七条验收 —— 其中 **④ 边境连续性**与 **⑤ 地名无方块** 需要**真跑一次应用**
+>    （本轮所有证据都停在「静态 + 构建 + 归档实解」这一级，还没有运行时验证）；
+>    ① 的完整口径还要补跑 `verify_power_only.mjs`（geojson + pmtiles 两份）。
+> 2. T12 文档同步 —— 已知过时点：`README_OSM.md`（7 区域 / 123.15 MiB → 12 区域）、
+>    `PROJECT_HANDOFF.md`（154.96 MB 七包 → 十二包；「投放 8 个包」→ 18）、
+>    `docs/PACKS_UPLOAD_RUNBOOK.md`（顶部"GEM 从未上传"的现状描述已失效）、
+>    `README.md` 第 503 行附近「清单尚未重算」的说明。
+>    它们都是**明确过时的事实性句子**，不是编辑取舍。
 
 ---
 
@@ -270,7 +293,7 @@ Expected: 底图包**不再**出现在"选区域"列表里；底图按 `forRegio
 
 ## Task 6: 选举过滤 + 装载上限 + 底图叠加 source
 
-> ### 进展：**T6a 已完成（2026-09-25）**，T6b 待做
+> ### 进展：**T6a 与 T6b 都已落地（2026-09-25）**
 >
 > **T6a（安全关键，已落地并验证）**：
 > - `MapPage.tsx` 的选举过滤 `.filter((p) => !isThematicOverlay(p))` → **`.filter(isRegionPack)`**
@@ -281,49 +304,142 @@ Expected: 底图包**不再**出现在"选区域"列表里；底图按 `forRegio
 > - 验收：`tsc --noEmit` 0；`vite build` 0（1,479.46 kB / gzip 430.31 kB）；
 >   静态复核旧反向判据已只剩注释。
 >
-> **T6b（待做）**：底图包叠加 source 的**生命周期**（与 GEM 同构）——
+> **T6b（✅ 已落地）**：底图包叠加 source 的**生命周期**（与 GEM 同构）——
 > 当选中的区域包存在 `forRegion === 该 key` 的底图包且**已安装**时，
 > 以独立 source `basemap-overlay-<key>` 叠加，只挂 `earth/water/boundaries/places/roads`，
 > 用 `moveLayer` 精确插在「中国底图之上、电网图层之下」；卸载时连同图层一起摘。
 > 现有 `BASEMAP_SOURCE`（`"basemap"`）的 URL/图层/样式**一行不动**。
 > ⚠️ 没有 T6b 时：邻国区域能正常显示电网，但**看不到邻国底图**（不报错，只是底图是空的）。
 > 它不阻塞 T3/T9（清单与上传），阻塞的是 §7.1 第 4/5 条验收（边境连续性与地名无方块）。
+>
+> ### ✅ T6b 实测与三项实施裁定（2026-09-25）
+>
+> | 项 | 结果 |
+> |---|---|
+> | `npm run typecheck` | **0 错误** |
+> | `npm run build` | **0 错误**，1,482.02 kB / gzip 431.00 kB |
+> | 旧反向判据 | `.filter(isRegionPack)` 已是唯一选举判据；本次又发现并删掉一份**本地的** `isThematicOverlay` 副本（两态时代遗留），改为从 `packs.ts` 导入 |
+>
+> **裁定一：插位分两种，不是一个**。「压在中国底图之上、电网图层之下」对**填充/线**成立，
+> 对 `places`（符号）不成立 —— 符号层自带碰撞检测与 `text-allow-overlap:false`，
+> 插到现有地名 `basemap-place-labels` **之前**才能保证「有中国底图的地方照样用中文地名」，
+> 否则边境会出现同一座城市两个标签。两种插位的锚点：
+> 填充/线 → 第一个**无后缀**的电网图层（`osm-line-735`，核心区图层建图期就加了、永不摘除）；
+> 符号 → `basemap-place-labels`。两者都取不到时（底图归档缺失，样式里只有 `background`）
+> **追加到最顶** —— 没有兜底会变成「底图包下载成功、图上却没有底图」，而 `moveLayer`
+> 对不存在的 `beforeId` 是**静默失败**。
+>
+> **裁定二：叠加 source 要设 `bounds`**（取清单条目的 `bbox`；缺失才退回全球，宁可多请求瓦片
+> 也不要把底图裁没）。`bounds` 只**限制请求的瓦片范围**，不改变级别：
+> z0–4 仍然是归档里的全球瓦片（该区域那一份），z5–8 换成本区域瓦片 —— 与设计一致。
+> 不设 bounds 的话，同一份 z0–4 瓦片会在任何视野下都被请求，别的邻国区域也会画上它。
+>
+> **附：一次只挂一个叠加层**。`PACK_MAX_ACTIVE(3)` 可能同时选中「中国某区域 + 两个邻国」，
+> 但视野中心只在一个邻国上；挂多份会让边境处两套叠加层互相重叠（同一邻国只有一份底图包，
+> 重复挂也没有意义）。取 `activePacks` 里**第一个**「有底图包且已安装」的区域。
+>
+> **裁定三：主题要跟着走**。`applyBasemapTheme` → **`applyBasemapPaint(map, theme, overlayKeys)`**：
+> 叠加层是另一套图层 id，浅色主题下不重刷就会「中国那半浅色、邻国那半深色」。
+> 叠加层可能是在用户切主题**之后**才挂上的，所以挂载时会补刷一次；
+> 模块级 `basemapOverlayKeys` 只服务这一件事，**不参与「挂没挂」的判定**（那以 `map.getSource()` 为准）。
+>
+> **附带修掉的一处旧缺陷**：`onPackInstalled` 一律以**清单条目的 `key`** 为准
+> （原来对底图包会用 basename 推导出的 `basemap-kp-kr`，而它在清单里的 key 是区域名 ——
+> 不修则底图包**重下/更新后叠加层永远不会重挂**，且不报错）。清单里查不到条目时才退回 basename 推导。
+>
+> **实测数据（归档解开逐层打印，`basemap-kp-kr.pmtiles`，10.45 MB，`z0-8`）**：
+> `z0` 全球瓦片图层 = `boundaries/earth/landcover/water`（**没有 `places`**）；
+> `z4+` 起 = `boundaries/earth/landcover/landuse/places/roads/water`；
+> `z8` 共 66 张瓦片 4.48 MB。元数据里的 `minzoom`：`boundaries`/`earth`/`water` 0、
+> `places` 1、`landuse` 2、`roads` 3、`landcover` **0–7**。
+> ⇒ 底图覆盖「z≥5 空白」确实由本任务补上；`places` 的标签在 z≥6 是有的（但归属与
+> 缺字属 T7 字形那一档，本任务只保证图层挂对地方）。
+>
+> **未完成的前置（阻塞运行时验证，不阻塞本任务交付）**：
+> 🔴 **T3 还没做** —— `public/packs_manifest.json` 里**没有** `kind:"basemap"` 的条目
+> （当前 8 条：7 个区域包 + GEM），`gen_packs_manifest.mjs` 也还没有 basemap 段。
+> 于是 T6b 的效果在运行时**暂时无法触发**（叠加 source 需要清单条目才能被找到）。
+> T3 落地后本任务**无需再改代码**；届时按 §7.1 第 4/5 条验收（边境连续性、地名无方块）。
 
 **Files:**
 - Modify: `src/pages/MapPage.tsx`（选举过滤、`PACK_MAX_ACTIVE`、新增 basemap 叠加生命周期）
 
-- [ ] **Step 1: 选举只认区域包**
+- [x] **Step 1: 选举只认区域包**
 
 ```ts
 // 原：.filter((p) => !isThematicOverlay(p))  ← 底图包会被选进来、占名额、被当 grid 图层挂载
 const candidates = packsManifest.packs.filter(isRegionPack);
 ```
 
-- [ ] **Step 2: `PACK_MAX_ACTIVE` 2 → 3**（`PACK_MIN_ZOOM` 保持 6）
+- [x] **Step 2: `PACK_MAX_ACTIVE` 2 → 3**（`PACK_MIN_ZOOM` 保持 6）
 
-- [ ] **Step 3: 底图包叠加生命周期（与 GEM 同构）**
+- [x] **Step 3: 底图包叠加生命周期（与 GEM 同构）**
 
 ```ts
 // 当选中的区域包有 forRegion === 该 key 的底图包**且已安装**时，作为独立 source 叠加：
 //   id: `basemap-overlay-${key}`；tiles: pmtiles://…；只挂 earth/water/boundaries/places/roads
 // 位置：压在中国底图图层之上、电网图层之下（用 moveLayer 精确插位，别依赖 addLayer 追加到顶）
 ```
-Expected: 现有 `BASEMAP_SOURCE`（`"basemap"`）的 URL/图层/样式**一行不动**
+Expected: 现有 `BASEMAP_SOURCE`（`"basemap"`）的 URL/图层/样式**一行不动** ✅
 
-- [ ] **Step 4: `tsc --noEmit` 0 与 `vite build` 0 → Commit**
+- [x] **Step 4: `tsc --noEmit` 0 与 `vite build` 0** ✅（提交并入下一次推送）
 
 ---
 
 ## Task 7: 字形多族
 
+> ### ✅ 已完成（2026-09-25）—— 但**结论与设计 §6.2 第 2 条相反**，按实测裁族
+>
+> **实测（`scripts/scan_place_codepoints.mjs` + `scripts/glyph_coverage.mjs`，6 份底图归档的并集）**：
+>
+> | 项 | 实测 |
+> |---|---|
+> | 扫描归档 | 核心 `basemap.pmtiles` + 5 份邻国底图包；码位**并集 1959 个** |
+> | 谚文（韩） | **0 个码位**（邻国底图的 `places` 里根本没有谚文） |
+> | 假名（日） | **0 个码位** |
+> | 泰文 | **0 个码位** |
+> | 西里尔 | **66 个码位**（ca 64 + ru-far 51，有重叠） |
+> | 阿拉伯 / 老挝 / 缅甸 | 22 / 9 / 5 个码位（**任何候选族都没有子集**） |
+>
+> **逐族新增覆盖**（顺序 = `text-font` 回退顺序）：
+> `Noto Sans SC` 新增 **1913**；`Noto Sans KR` **0**；`Noto Sans JP` **1**（U+59F6）；
+> `Noto Sans Thai` **0**；`Noto Sans` 新增 **9**（哈萨克/蒙古语西里尔：U+493/49A/49B/4A3/4AE/4AF/4D8/4D9/4E9）。
+>
+> ⇒ **裁定（用户拍板）：只加 `Noto Sans`（西里尔），不加 KR / JP / Thai。**
+> 设计 §6.2 第 2 条写的「先加 KR / JP / Thai 三族」是**基于假设**（以为会出现这些文字），
+> 扫描结果推翻了它 —— 加了净收益 0~1 个码位、代价 +1~3 MB 进安装包。
+> 日韩地名在这份数据里走 `name:en` 兜底（拉丁字母）。
+>
+> **交付**：
+> - `scripts/fetch_glyphs.mjs`：单族 → `FAMILIES` 配置数组；扫**多份**归档取并集；
+>   `--archive` 可重复 / `--archives a,b`；**自动清理不再命中的孤儿子集**
+>   （`.woff2` 被 gitignore，孤儿会静默进安装包 —— 实测清理掉 1 个）。
+> - `src/lib/basemapFonts.generated.ts`：新增 `BASEMAP_TEXT_FONT`（文字栈，2 族 / 95 条 font-face），
+>   `BASEMAP_FONT_FILES` 改为按族分组。
+> - `src/pages/MapPage.tsx`：`text-font` 由 `[BASEMAP_FONT_FAMILY]` 改为 `BASEMAP_TEXT_FONT`。
+> - 实测体积：**95 个文件 / 2.28 MB**（SC 2237.2 KB + Noto Sans 101.0 KB）。
+>   阶段27 的基线是「1 份归档 / 86 个子集 / 2.1 MB」⇒ 扩到 6 份归档的并集后只多了约 0.2 MB。
+>
+> ### 🔴 一处旧实现是多余的（顺手删掉）
+> 阶段27 的注释写「把字体文件交给 CSS Font Loading API」，但**不需要产出或注入任何 CSS 文件**：
+> `FontFaceManager.setFontFaces()`（`node_modules/maplibre-gl/src/render/font_face_manager.ts`）
+> 把每个 face **直接 `new FontFace(...)`** 交给 `document.fonts`，**自己另起内部族名**
+> （`maplibre-gl-font-face-<n>`）——它**不读 CSS、也不用 CSS 里的字体族名**。
+> 所以：`font-faces` 的**键**才是 `text-font` 里的名字；多族 = 多键；族间回退靠 `text-font` 的先后顺序。
+> 三条结论都写进了脚本头部注释，避免后人再按「CSS 注入」的思路改坏它。
+>
+> ### ⚠️ 体积红线的正式验收仍待 T10
+> 字体进安装包（`public/fonts`），所以 `check_release_redlines.mjs --with-exe` 要在 T10 重打安装包时跑。
+> 本次净增约 **0.2 MB**（不是设计预估的 +2–6 MB —— 那是按"加三族"估的）。
+
 **Files:**
 - Modify: `scripts/fetch_glyphs.mjs`（单族 → 配置数组）、`src/lib/basemapFonts.generated.ts`（重新生成）、`MapPage.tsx`（`text-font` 改多族 fontstack）
 
-- [ ] **Step 1: 字体族从常量改配置数组**（每族：family / fontsource CSS 地址 / CDN 基址 / 输出目录）
-- [ ] **Step 2: 先加 KR / JP / Thai 三族**
-- [ ] **Step 3: 重扫**5 份新底图归档 `places` 层码位（含 T2 的 `basemap-kp-kr`），只下载命中子集
-- [ ] **Step 4: 西里尔按扫描结果决定**是否加 `Noto Sans`（不预设结论）
-- [ ] **Step 5: `text-font` 改 `[SC, KR, JP, Thai]`；`fetch_glyphs.mjs --estimate` 记录增量 → Commit**
+- [x] **Step 1: 字体族从常量改配置数组**（每族：family / fontsource CSS 地址 / CDN 基址 / 输出目录）
+- [x] **Step 2: 先加 KR / JP / Thai 三族** → **被实测推翻**：三族各新增 0 / 1 / 0 个码位，**裁定不加**（见上表）
+- [x] **Step 3: 重扫**6 份底图归档 `places` 层码位（含 T2 的 `basemap-kp-kr` 与核心底图），只下载命中子集
+- [x] **Step 4: 西里尔按扫描结果决定** —— **缺 9 个码位，加 `Noto Sans`**（设计 §6.2 第 4 条要的正是这个结论）
+- [x] **Step 5: `text-font` 改多族 fontstack；记录增量** —— **2.28 MB**（净增约 0.2 MB），`tsc`/`vite build` 0
 
 ---
 
@@ -349,21 +465,88 @@ node scripts/run_pipeline.mjs --regions mn,sea-mainland,ca,ru-far --category pow
 ```
 每批完成后立刻跑门禁（同 T1 Step 4），失败块原样重跑补齐（kp-kr 的经验：通常 2–3 轮清空）。
 
+> ### ✅ 已完成（2026-09-25）—— 4 区全部跑完，5 个包门禁全绿
+>
+> `data/packs/pipeline_report.json` 里 12 个批次**全部 `status: "ok"`**（含 4 个新批次），
+> 各批 `complete: true` / `failed_chunks: []`。实测（`data/packs/` 文件字节数）：
+>
+> | 区域 | 网格 | 电网包 | 底图包 |
+> |---|---|---|---|
+> | `mn` 蒙古 | 6x3 | 11.41 MB | 9.48 MB |
+> | `sea-mainland` 中南半岛 | 3x6 | 18.24 MB | 15.50 MB |
+> | `ca` 中亚五国 | 8x5 | 35.98 MB | 24.13 MB |
+> | `ru-far` 俄相邻带 | 13x3 | 16.06 MB | 20.97 MB |
+> | `kp-kr` 朝鲜半岛（T1/T2） | 6x5 | 4.51 MB | 10.45 MB |
+>
+> **门禁（2026-09-25 实跑，5 个包逐个 `node scripts/verify_pack.mjs`）：8 项断言全绿**，
+> 退出码 0。要点摘录：
+> - 最大单瓦片：kp-kr 174.7 KB / mn 110.7 KB / sea-mainland 274.7 KB / ca 370.0 KB / ru-far 179.3 KB（均 < 500 KB）
+> - **`z<8` 的线路要素带 `is_dc` 比例全是 100%**（7542/7542、20320/20320、35337/35337、58091/58091、20452/20452）
+>   ⇒ 低缩放直流配色不会静默失效
+> - 无解码失败、无 `undefined/null` 属性值；z≥8 各 ftype 专属属性与扩容属性都命中
+> - `ru-far` 的 `converter` 显示「未抽样到」——该区换流站要素为 0（`converters 0 features`），不是缺陷
+>
+> ⚠️ 设计 §7.1 第 1 条的完整口径还要 `verify_power_only.mjs`（geojson + pmtiles 两份），
+> 那一步留到 T11 一并跑并留档；本次已跑的是 `verify_pack.mjs`（体积与不丢数据口径）。
+
 ---
 
 ## Task 9: 清单重算 + 上传 10 个新包
 
-- [ ] **Step 1: 确认 10 个包文件都在**（5 电网 + 5 底图）
-- [ ] **Step 2: `node scripts/gen_packs_manifest.mjs`** → 清单 18 条
-- [ ] **Step 3: `node scripts/upload_packs.mjs --dry-run`** → 确认计划里是 8 个"已一致（跳过）"+ 10 个"新增"
-- [ ] **Step 4: `node scripts/upload_packs.mjs`**（**对外发布，需用户确认**）
-- [ ] **Step 5: `node scripts/verify_packs.mjs --remote`** → **退出码 0**
+> ### ✅ T9 已完成（2026-09-25）—— 10 个包已上传，远端门禁退出码 0
+>
+> | 步骤 | 结果 |
+> |---|---|
+> | Step 1 10 个包文件都在 | ✅ 5 电网（4.51 / 11.41 / 18.24 / 35.98 / 16.06 MB）+ 5 底图（10.45 / 9.48 / 15.50 / 24.13 / 20.97 MB） |
+> | Step 2 `gen_packs_manifest.mjs` | ✅ 清单 **18 条**：`region:12 + basemap:5 + gem:1`；5 条 `forRegion` **指纹非空**；`downloadUrl` 无 null |
+> | Step 3 `upload_packs.mjs --dry-run` | ✅ 计划正是 **8 个「已一致（跳过）」+ 10 个「新增」** |
+> | Step 4 上传 | ✅ `upload_packs.mjs --yes`，**10 个新增全部成功**：逐个「上传为 `.stage` → 远端校验 size+digest → PATCH 改回正式名」，**全程无资产缺失窗口**；已一致的 8 个跳过 |
+> | Step 5 `verify_packs.mjs --remote` | ✅ **退出码 0**：远端 18 个资产与清单**全部一致**（`🔴 未发现问题`） |
+>
+> **两处操作性记录**（避免下次再踩）：
+> - `upload_packs.mjs` 默认**交互式**问一次 `yes`；后台/脚本跑必须加 **`--yes`**，
+>   否则会以 `Detected unsettled top-level await` 退出（exit 1）而**看起来像失败**。
+> - `verify_packs.mjs --remote` 同时报「本机 `%APPDATA%\...\packs\` 装了 8/18」——
+>   **那是正常的**（数据包按需下载）；要本地投满用 `install_packs.mjs --user-dir`。
+>   门禁的判据是**远端那 18 行**，不是本机装了几个。
+>
+> 上传完成后**清单与远端已一致** ⇒ T3 的处置条件满足，18 条清单已提交；
+> T10 那份 46.09 MB 的安装包因此也**变得可发布**（它带着同一份 18 条清单）。
+
+- [x] **Step 1: 确认 10 个包文件都在**（5 电网 + 5 底图）
+- [x] **Step 2: `node scripts/gen_packs_manifest.mjs`** → 清单 18 条
+- [x] **Step 3: `node scripts/upload_packs.mjs --dry-run`** → 确认计划里是 8 个"已一致（跳过）"+ 10 个"新增"
+- [x] **Step 4: `node scripts/upload_packs.mjs --yes`**（10 个新增全部上传成功）
+- [x] **Step 5: `node scripts/verify_packs.mjs --remote`** → **退出码 0**
 
 ---
 
 ## Task 10–12: 安装包、验收、文档
 
-- [ ] T10 `npm run tauri build` → `check_release_redlines.mjs --with-exe` → 记录体积（≤50 MB）
+> ### ✅ T10 已完成（2026-09-25）—— 体积与红线实测
+>
+> | 项 | 实测 |
+> |---|---|
+> | `npm run tauri build` | ✅ 退出码 0（Rust release 编译 3 分 20 秒） |
+> | NSIS 安装包 | **46.09 MB（48,327,873 字节）≤ 50 MB 红线** |
+> | 裸 exe | 9.67 MB |
+> | `check_release_redlines.mjs --with-exe` | ✅ **通过**（dist 5 条禁用串全未命中、对照串 `localhost:11434` 命中；exe 侧禁用串未命中、`export_csv_file`/`tauri.localhost` 命中） |
+>
+> **体积构成（实测，用来核对"字体净增 0.2 MB"这个数字）**：
+> 随包资源 = `basemap.pmtiles` 31.76 MB + `global_power_gis.db` 9.00 MB + `osm_grid.pmtiles` 7.12 MB
+> + `osm-zhejiang.pmtiles` 3.48 MB + dist 4.89 MB（其中字体 2.28 MB）+ 裸 exe 9.67 MB ≈ 66 MB 未压缩，
+> LZMA 压到 46.09 MB。本次相对上一版的净增就是字体的 **+0.18 MB**（2.10 → 2.28 MB）
+> 与清单的 +0.02 MB ⇒ 与实测增幅一致。
+>
+> ⚠️ **`check_release_redlines.mjs` 不检查安装包体积**（它只查 dist 与 exe 里的禁用/对照串，
+> 全文没有 50 MB 判据）⇒ 50 MB 红线必须**另外手工量 NSIS 产物**，
+> 不能把"红线脚本通过"当成"体积达标"。这是一处容易自欺的地方，记在这里。
+>
+> ✅ **这份安装包现在可发布**：T9 已把 10 个新包上传完成，`verify_packs.mjs --remote` 退出码 0，
+> 清单里的 18 条与远端 18 个资产**全部一致** —— 不存在「点不动的空区域」。
+> （构建当时的清单就已经是 18 条，所以**不需要**重新打包。）
+
+- [x] T10 `npm run tauri build` → `check_release_redlines.mjs --with-exe` → 记录体积（≤50 MB）
 - [ ] T11 设计 §7.1 七条：①每包门禁 ②远端全绿 ③构建红线 ④**边境连续性抽样**（满洲里/二连浩特/凭祥，两侧 50 km 内电网与底图都存在）⑤**地名无方块**（平壤/首尔/乌兰巴托/东京/曼谷/河内）⑥中国侧零回归（长三角/华北 + 安装包 ≤50 MB）⑦`--bbox` 非国界的偏差已写进 README 与向导文案
 - [ ] T12 同步 README / README_OSM / PROJECT_HANDOFF / 设计文档（把"实测项"换成实测值）
 
