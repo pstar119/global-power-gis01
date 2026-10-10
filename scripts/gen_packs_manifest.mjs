@@ -69,15 +69,17 @@ const DEFAULT_BASE_URL =
 const BASE_URL = (process.env.PACKS_BASE_URL ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
 
 /**
- * 阶段48：**预留字段**。目前**没有任何代码读取它**（用户拍板的 YAGNI 决定：
- * “自动降级逻辑先不做，只预留 directBaseUrl 字段”）。
+ * 阶段48 曾把它当**预留字段**（用户拍板的 YAGNI 决定：「自动降级逻辑先不做，只预留 directBaseUrl 字段」）。
+ * ⚠️ **2026-10-09 更正**：阶段53 起**代码已经接入降级** —— `src/lib/packs.ts` 的 `effectiveBasesOf()` 会按
+ * 「镜像优先、直连兜底」给出候选基址，`src/hooks/usePackDownloads.ts` 用它重试，
+ * `scripts/verify_packs.mjs:140` 也用它核对远端。**「没有任何代码读取它」这句话已经过期。**
  *
  * 写进清单的意义是把「镜像挂了该退到哪」这个**事实**固化成数据，
- * 而不是逼后来的实现者去猜或重查一遍。真要做降级时，
- * `packs.rs` 只需在镜像失败后用这个基址重试一次，清单无需再改。
+ * 而不是逼后来的实现者去猜或重查一遍。降级已在**前端**实现（见上面的更正：`effectiveBasesOf()`
+ * 逐个候选基址重试）；`packs.rs` 不参与选基址，只负责下载与校验。
  *
  * 注意它恒为 GitHub 直连地址，**不受 PACKS_BASE_URL 影响** ——
- * 否则本地联调会把预留值也写成 127.0.0.1，预留就失去意义了。
+ * 否则本地联调会把这个直连值也写成 127.0.0.1，它就失去意义了。
  */
 const DIRECT_BASE_URL =
   "https://github.com/pstar119/global-power-gis01/releases/download/v1.0-packs";
@@ -346,7 +348,7 @@ function main() {
         "数据包托管在 GitHub Release，默认经国内加速镜像（gh-proxy.com）分发。" +
         "仓库已转公开，直连地址同样可用。" +
         "⚠️ 换托管只需改 gen_packs_manifest.mjs 的 DEFAULT_BASE_URL 并重跑本脚本。" +
-        "directBaseUrl 是阶段48 的预留字段（当前无代码读取）：镜像失效时可作为降级重试的备用基址。",
+        "directBaseUrl 是阶段53 起**已接入代码**的降级基址（src/lib/packs.ts 的 effectiveBasesOf() + src/hooks/usePackDownloads.ts 会按镜像优先/直连兜底重试；此前写「当前无代码读取」已过期）：镜像失效时的备用基址。",
     },
     core: {
       label: "核心区（长三角 + 浙江）",
