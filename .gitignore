@@ -91,3 +91,11 @@ __pycache__/
 *.njsproj
 *.sln
 *.sw?
+
+# 阶段56-C 收尾（2026-10-09）：DSH / WorkBuddy 的**编辑审计产物**，不是项目产物。
+# 实测仓库根曾出现 .dsh-edit-review.json（27,519,481 B）与
+# .dsh-edit-review-archive.json（76,231,243 B），合计 **98.95 MiB**，且未被忽略
+# （git check-ignore 退出码 1，会混进 git status）。与阶段54 记录过的
+# 「仓库根垃圾文件」是同一类问题，见 PROJECT_HANDOFF.md §11.1 第 8 条。
+# 用通配符一并覆盖 -archive 变体。
+/.dsh-edit-review*.json
