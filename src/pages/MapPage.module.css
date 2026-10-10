@@ -1037,3 +1037,46 @@
   left: 12px;
   max-height: calc(100% - 108px);
 }
+
+/* ---------- 阶段56-C：非折叠的第三层小标题（尺寸图例用） ----------
+   与 .subHeader 同一视觉层级，但它**不是按钮**（尺寸图例没有展开/收起），
+   所以不能复用 .subHeader —— 那是 <button> 的样式，套到 <p> 上会带上 hover 与 cursor。 */
+.subHeaderStatic {
+  margin: 0;
+  padding: 0.2rem 0.5rem;
+  color: var(--gpg-muted);
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-align: left;
+}
+
+/* 尺寸图例：一行铺开的圆点示意 + 容量文字。
+   ⚠️ 圆的大小是**示意**（按 sqrt 缩放，让面积与容量大致成比例），
+      不代表地图上电厂点的真实半径 —— 面板文案里已注明这一点。 */
+.sizeLegend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.55rem;
+  margin: 0.15rem 0 0.25rem;
+  padding: 0 0.5rem 0 1.25rem;
+  list-style: none;
+}
+
+.sizeLegendItem {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.15rem;
+  color: var(--gpg-muted);
+  font-size: 0.6rem;
+  line-height: 1;
+}
+
+.sizeLegendDot {
+  display: block;
+  border: 1px solid rgba(77, 170, 252, 0.55);
+  border-radius: 50%;
+  background-color: rgba(77, 170, 252, 0.16);
+}

@@ -14,6 +14,7 @@
     data/osm/<name>_power_lines.geojson        power=line / minor_line / cable → LineString
     data/osm/<name>_power_substations.geojson  power=substation           → Point
     data/osm/<name>_power_plants.geojson       power=plant                → Point
+    data/osm/<name>_power_plant_areas.geojson  power=plant（**闭合 way**）→ Polygon
     data/osm/<name>_power_meta.json            统计信息（数量、电压分布、抓取耗时）
 
 阶段56-A2 新增**补抓通道**（`--category converters`，不重跑上面那 3 类）：
@@ -126,9 +127,20 @@ CHUNK_WAIT = 2.0
 #    电力必须沿用历史的 lines/substations/plants 桶名 ——
 #    改了会与已在 data/osm/ 的 7 个区域产物、以及 *progress.json 断点文件对不上，
 #    后果是全部重抓或覆盖失败。
-POWER_KIND_TO_FTYPE = {"lines": "line", "substations": "substation", "plants": "plant", "converters": "converter"}
+#
+# 阶段56-C（2026-09-26）：新增 `plant_areas` 桶（面状发电设施）。
+# ‼️ 它**不是**一条独立查询：与 `plants` 共用同一条 union 查询（两者都是
+#    `way["power"="plant"]`，分两次查等于把同一片区域检索两遍）。产物靠
+#    `build_feature(el, "plant_area")` 从同一批 elements 二次构造，见主循环。
+POWER_KIND_TO_FTYPE = {
+    "lines": "line",
+    "substations": "substation",
+    "plants": "plant",
+    "plant_areas": "plant_area",
+    "converters": "converter",
+}
 CATEGORY_KINDS: dict[str, list[str]] = {
-    "power": ["lines", "substations", "plants"],
+    "power": ["lines", "substations", "plants", "plant_areas"],
     # 阶段56-A2：补抓通道。只有一个"桶"，但一条 union 查询同时取两类东西：
     #   · power=converter（node+way）→ 进 converters 桶（换流站点层）
     #   · 带 frequency 标签的电力 way → 不进桶，收进 <name>_dc_tags.json 的映射
@@ -175,6 +187,44 @@ def meta_path(out_dir: str, name: str, category: str = "power") -> str:
     if category == "power":
         return os.path.join(out_dir, f"{name}_power_meta.json")
     return os.path.join(out_dir, f"{name}_{category}_meta.json")
+
+
+def bucket_coverage_path(out_dir: str, name: str) -> str:
+    """各桶的「覆盖完整性」标记文件路径。
+
+    阶段56-C 新增。记录哪些桶**曾经在一次完整覆盖的抓取里**被产出过。
+    """
+    return os.path.join(out_dir, f"{name}_bucket_coverage.json")
+
+
+def load_bucket_coverage(out_dir: str, name: str) -> dict[str, str]:
+    """读覆盖标记；文件不存在/坏了都返回空表（= 什么都不知道 ⇒ 宁可重抓）。"""
+    path = bucket_coverage_path(out_dir, name)
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        cov = data.get("buckets")
+        return {k: str(v) for k, v in cov.items()} if isinstance(cov, dict) else {}
+    except Exception:  # noqa: BLE001 - 标记坏了就当没有，重抓一遍最安全
+        return {}
+
+
+def save_bucket_coverage(out_dir: str, name: str, coverage: dict[str, str]) -> None:
+    write_json_atomic(
+        bucket_coverage_path(out_dir, name),
+        {
+            "note": (
+                "每个桶最后一次**完整覆盖**抓取的时间戳。"
+                "成因见 fetch_osm_power.py 里 unavailable_buckets() 的注释："
+                "断点按区域记、不区分桶，所以新桶/被中断的桶必须靠这张表判断，"
+                "不能靠'产物文件非空'——半途中断也会留下非空文件。"
+            ),
+            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "buckets": coverage,
+        },
+    )
 
 
 def write_json_atomic(path: str, payload: Any, indent: int | None = None) -> None:
@@ -392,6 +442,21 @@ def element_center(element: dict[str, Any]) -> tuple[float, float] | None:
     return (round((min(lons) + max(lons)) / 2, 7), round((min(lats) + max(lats)) / 2, 7))
 
 
+def way_to_polygon(element: dict[str, Any]) -> list[list[list[float]]] | None:
+    """闭合 way → 单环多边形（GeoJSON 的 Polygon 坐标：[[[lon,lat], ...]]）。
+
+    · 判据：首尾顶点相同（OSM 的 area 就是这个约定）
+    · 洞（inner ring）需要 multipolygon relation 才能表达；本脚本只取 way，
+      所以**只有外环** —— 这在电厂地块上几乎不出错（截图里也都是单纯多边形）。
+    """
+    coords = way_to_linestring(element)
+    if not coords or len(coords) < 4:
+        return None
+    if coords[0] != coords[-1]:
+        return None          # 不是闭合环 ⇒ 交给原来的点逻辑
+    return [coords]
+
+
 def common_props(element: dict[str, Any]) -> dict[str, Any]:
     tags = element.get("tags", {}) or {}
     kv = parse_voltage_kv(tags.get("voltage"))
@@ -438,6 +503,23 @@ def build_feature(element: dict[str, Any], geom_type: str) -> dict[str, Any] | N
             return None
         props["power"] = tags.get("power")
         return {"type": "Feature", "properties": props, "geometry": {"type": "Point", "coordinates": list(center)}}
+
+    if geom_type == "plant_area":
+        # 阶段56-C：把**闭合 way** 的环保留成面（此前一律被 element_center 降级成点）。
+        # ‼️ 只认 `power=plant`：本桶与 `plants` 共用一条 union 查询，
+        #    若不做这层判断，node 与开放 way 会被误当"面"塞进来。
+        ring = way_to_polygon(element)
+        if ring is None:
+            return None                       # 开放 way / 太短的，不进面层（点层仍然有它）
+        if tags.get("power") != "plant":
+            return None
+        props["power"] = tags.get("power")
+        props["plant_source"] = tags.get("plant:source")
+        props["landuse"] = tags.get("landuse")
+        # ‼️ `source` 在 OSM 里可能是 gem.wiki 链接（实测上海多个电厂就是），
+        #    保留它既是对齐它的弹窗，也是 ODbL/CC-BY 署名的依据
+        props["source_url"] = tags.get("source")
+        return {"type": "Feature", "properties": props, "geometry": {"type": "Polygon", "coordinates": ring}}
 
     # point 类（变电站 / 电厂）
     center = element_center(element)
@@ -553,6 +635,19 @@ def queries_for(
             f"{tail}"
         ),
     }
+
+
+def derived_kinds(kind: str, category: str) -> list[str]:
+    """哪些 kind 由**同一条查询**的返回体二次构造（不为它们单独发请求）。
+
+    阶段56-C：`plants`（点）与 `plant_areas`（面）都来自 `way["power"="plant"]`，
+    分两次查等于把同一片区域检索两遍（Overpass 的成本主要在空间检索，
+    不是返回体大小 —— 见本文件 `converters` 那条 union 的实测注释）。
+    ⇒ `queries_for()` 只给 `plants` 一条查询，`plant_areas` 在这里挂上去。
+    """
+    if category == "power" and kind == "plants":
+        return ["plants", "plant_areas"]
+    return [kind]
 
 
 def count_from_payload(payload: dict[str, Any]) -> int | None:
@@ -923,13 +1018,18 @@ def print_status(
     """--status：只读本地文件，不发任何网络请求。"""
     print(f"=== 抓取进度：{name} / {CATEGORY_LABEL.get(category, category)} ===")
     print(f"分块    : {len(done)}/{len(chunks)} 已完成")
+    _cov = load_bucket_coverage(out_dir, name)
     for kind in CATEGORY_KINDS[category]:
         path = geom_path(out_dir, name, category, kind)
         if os.path.exists(path):
             try:
                 with open(path, encoding="utf-8") as fh:
                     n = len(json.load(fh).get("features", []))
-                print(f"  {kind:12s} {n:7d} 个要素  ({os.path.getsize(path) / 1024:.0f} KB)")
+                # ‼️ 有文件 ≠ 覆盖完整：中断也会留下非空文件（见 uncovered 的注释）。
+                # ⚠️ 这里**不要用 emoji**：Windows 控制台默认 GBK，写 ✅ 会抛
+                #    UnicodeEncodeError，把 --status 整个搞挂（实测）。
+                mark = "[覆盖完整]" if kind in _cov else "[无完整覆盖标记, 下次会重抓]"
+                print(f"  {kind:12s} {n:7d} 个要素  ({os.path.getsize(path) / 1024:.0f} KB)  {mark}")
             except Exception as exc:  # noqa: BLE001
                 print(f"  {kind:12s} 读取失败：{exc}")
         else:
@@ -955,7 +1055,9 @@ def print_status(
         for b in missing[:20]:
             print(f"  未抓 bbox = {b[0]:.4f},{b[1]:.4f},{b[2]:.4f},{b[3]:.4f}")
     else:
-        print("\n全部块已完成 ✅")
+        # ⚠️ 不要加 emoji：Windows 控制台默认 GBK，写 ✅ 会抛 UnicodeEncodeError，
+        #    把 --status 整个搞挂（阶段56-C 实测踩到）。
+        print("\n全部块已完成")
     return 0
 
 
@@ -1075,6 +1177,28 @@ def main() -> int:
         if n < 0:
             print(f"⚠️ 已有产物无法解析（可能是上次写入被中断）：{geom_path(args.out_dir, name, args.category, k)}")
             print("   → 本次会拒绝用空结果覆盖它；确定要重抓请加 --restart。")
+    # ---- 阶段56-C：哪些桶**没有完整覆盖** ⇒ 本次必须真抓 ----
+    #
+    # 🔴 为什么不能只看"产物文不非空"（我最初就是这么写的，连踩两次）：
+    #    断点文件 `<name>_progress.json` 是按**区域**记的、不区分桶。
+    #    于是对一个「上次已抓完、但那时还没有新桶」的区域重跑时，所有块都被跳过，
+    #    新桶拿到 0 条；而 `guard_empty_overwrite` 对"原本没有产物"(preexisting==0)
+    #    是**放行**的 ⇒ 会写一个空文件，日志说"抓取完成"，面层永远是空的。
+    #    我第一次的修法是"桶还空着就忽略断点"，结果：
+    #      ① 第 1 块抓到 1 个面之后桶就不空了 ⇒ 第 2~30 块又全部跳过，只扫了 1 块；
+    #      ② 进程被中途杀掉时 checkpoint 已写下一个**部分**文件 ⇒ 桶非空，
+    #         下次运行以为"已经有数据了"，**部分覆盖被当成完整覆盖**（实测 huadong 524/应为数千）。
+    #    ⇒ 结论：判断依据必须是**覆盖完整性**，不是"文件非空"。用一张显式标记表记录
+    #      "这个桶曾在一次**零失败块**的抓取里产出过"。没有标记 ⇒ 重抓。
+    coverage = load_bucket_coverage(args.out_dir, name)
+    uncovered: list[str] = [k for k in kinds if k not in coverage]
+    if uncovered:
+        print(
+            f"⚠️ 以下产物**没有完整覆盖标记**，本次将**忽略断点、重抓全部 {len(chunks)} 块**："
+            f"{', '.join(uncovered)}\n"
+            f"   原因：断点文件按区域记、不区分桶；新桶，或上次被中途中断（会留下**部分**文件，\n"
+            f"   而'文件非空'不等于覆盖完整）。已有完整覆盖标记的桶照旧走断点续抓。\n"
+        )
     kv_hist: dict[str, int] = {}
     # 同一要素可能横跨两个相邻块（bbox 查询会重复返回），按 osm_id 去重
     seen: dict[str, set[str]] = {k: set() for k in kinds}
@@ -1141,7 +1265,16 @@ def main() -> int:
     for idx, chunk in enumerate(chunks, 1):
         cw, cs, ce, cn = chunk
         key = tuple(round(v, 6) for v in chunk)
-        if key in done_chunks:
+        # 阶段56-C：有"没有完整覆盖标记"的桶时，**本次一律真抓**，不做断点跳过。
+        #
+        # 🔴 这里踩过一个坑，别再"优化"回去：最初的写法是"新桶还空着才跳过断点"
+        #    （`any(not buckets[k] for k in never_had)`）。结果是第 1 块抓到 1 个面之后
+        #    新桶就不空了 ⇒ 第 2~30 块全部按断点跳过 ⇒ **只有第 1 块被扫过面**，
+        #    面层只拿到 1 个要素，而日志显示"抓取完成"、没有任何报错。
+        #    换句话说：这个判断必须对整个**本次运行**成立，不能逐块变化。
+        #    代价：为了补一个新桶要把该区域重抓一遍（Overpass 成本），这是可接受的；
+        #    换来的是新桶一定拿到**全区域**的数据，而不是残缺的第一块。
+        if key in done_chunks and not uncovered:
             print(f"[{idx}/{len(chunks)}] 已完成，跳过")
             continue
         print(f"[{idx}/{len(chunks)}] 块 {cw:.3f},{cs:.3f},{ce:.3f},{cn:.3f}")
@@ -1150,7 +1283,10 @@ def main() -> int:
             for kind, query in queries_for(chunk, category=args.category).items():
                 payload = overpass_query(query)
                 elements = payload.get("elements", [])
-                added = 0
+                # 阶段56-C：本 kind 的返回体还要构造哪些**派生桶**（面来自同一条查询，
+                # 不为它单独发请求 —— 见 `derived_kinds` 的注释）。
+                dkinds = derived_kinds(kind, args.category)
+                added_by: dict[str, int] = {k: 0 for k in dkinds}
                 tag_added = 0
                 for el in elements:
                     # ‼️ 补抓通道的查询是 **union**：先按 way_id 收 frequency 标签，
@@ -1158,21 +1294,25 @@ def main() -> int:
                     #    （其余全返回 None，见其注释）。
                     if args.category == "converters" and add_dc_tag(dc_tags, el):
                         tag_added += 1
-                    feat = build_feature(el, ftype_of(kind))
-                    if not feat:
-                        continue
-                    oid = feat["properties"]["osm_id"]
-                    if oid in seen[kind]:
-                        dup += 1
-                        continue
-                    seen[kind].add(oid)
-                    buckets[kind].append(feat)
-                    added += 1
-                    cls = feat["properties"].get("vclass")
-                    if cls:
-                        kv_hist[cls] = kv_hist.get(cls, 0) + 1
+                    for dkind in dkinds:
+                        feat = build_feature(el, ftype_of(dkind))
+                        if not feat:
+                            continue
+                        oid = feat["properties"]["osm_id"]
+                        if oid in seen[dkind]:
+                            dup += 1
+                            continue
+                        seen[dkind].add(oid)
+                        buckets[dkind].append(feat)
+                        added_by[dkind] += 1
+                        cls = feat["properties"].get("vclass")
+                        if cls:
+                            kv_hist[cls] = kv_hist.get(cls, 0) + 1
+                # ‼️ 派生桶要**逐个报数**：合成一行会在某个桶静默变 0 时看不出来
+                #    （「面一层全空」正是本阶段最需要一眼发现的事故）。
+                detail = "，".join(f"{k} +{n}" for k, n in added_by.items())
                 extra = f"，frequency 标签 +{tag_added:5d}" if args.category == "converters" else ""
-                print(f"    {kind:12s} 返回 {len(elements):6d} 条，新增 {added:6d} 条{extra}")
+                print(f"    {kind:12s} 返回 {len(elements):6d} 条，新增 {detail}{extra}")
                 # 块内也要歇 —— 连发是 429 的直接原因
                 time.sleep(QUERY_WAIT)
         except Exception as exc:  # noqa: BLE001
@@ -1238,6 +1378,21 @@ def main() -> int:
         size_mb = os.path.getsize(path) / 1048576
         written[kind] = {"file": path, "features": len(feats), "size_mb": round(size_mb, 2)}
         print(f"  → {path}  ({len(feats)} 要素, {size_mb:.2f} MB)")
+
+    # ---- 阶段56-C：覆盖完整才打标记；有失败块就**不打** ----
+    # 只有"零失败块"才算一次完整覆盖。否则下次运行会以为这个桶已经覆盖好了
+    # （断点又按区域记，块级断点会把失败块留着重抓，但**桶级**的完整性只有这里能判）。
+    # ⚠️ 旧标记不能删：已有完整覆盖的桶要继续享有断点续抓。
+    if not failed_chunks:
+        for kind in kinds:
+            coverage[kind] = time.strftime("%Y-%m-%dT%H:%M:%S")
+        save_bucket_coverage(args.out_dir, name, coverage)
+        print(f"  → 覆盖标记已更新：{', '.join(kinds)}（本次 0 个失败块）")
+    else:
+        print(
+            f"  ⚠️ 本次有 {len(failed_chunks)} 个失败块 ⇒ **不更新覆盖标记** "
+            f"（{', '.join(uncovered) if uncovered else '无'} 仍会被判为未完整覆盖，下次继续补）"
+        )
 
     # ---- 阶段56-A2：换流站类别还要落 frequency 映射（第二个产物）----
     dc_info: dict[str, Any] | None = None

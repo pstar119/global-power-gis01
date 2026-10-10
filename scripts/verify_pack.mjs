@@ -125,6 +125,9 @@ async function main() {
     plant: new Set(),
     // 阶段56-A2：换流站点层
     converter: new Set(),
+    // 阶段56-C：面状发电设施。集合为空 = 抽样到的瓦片里**一个都没有** ⇒ 面层没进归档，
+    // 这正是本阶段最需要一眼发现的事故（数据都在、就是不画面，且不会有任何报错）。
+    plant_area: new Set(),
   };
   /**
    * 阶段56-A2：低级别瓦片里 `is_dc` 的存在性计数。
@@ -354,6 +357,14 @@ async function main() {
   const expandProp = {
     line: ["cables", "circuits", "operator", "ref"],
     plant: ["plant_output"],
+    /**
+     * 阶段56-C：面层必须**至少**带一个自己的字段。为什么用与 `plant` 同样的
+     * "至少命中一个"口径而不是钉死 `landuse`/`source_url`：
+     * 这两个都是可选 OSM 标签，实测覆盖率低，钉死必然假失败；而 `area_ha` 是本脚本
+     * 自己算的、**每个面都有** ⇒ 只要面进了归档，"至少命中一个"就一定成立。
+     * 真正的"一个字段都没保留"（白名单没同步）会被这条逮住。
+     */
+    plant_area: ["landuse", "source_url", "area_ha"],
   };
   /**
    * 阶段56-A2：`is_dc` 必须在**每一条**低级别线路要素上（设计 §5.1）。
@@ -367,6 +378,22 @@ async function main() {
     });
   }
   if (results.some((r) => r.z >= 8)) {
+    /**
+     * 阶段56-C：面层**必须真的存在**，这条是新增的硬断言（Step 5 明列的验收项）。
+     *
+     * ⚠️ 为什么不能只靠上面 `expectProp` 那套循环：它对"该 ftype 没抽样到"是**跳过**
+     *    （`size === 0 ⇒ continue`），而面层整层缺失的表现恰好就是 size===0 ⇒
+     *    会被当成"没抽样到"静默放过。所以这里反过来把 size===0 判成失败。
+     */
+    checks.push({
+      断言: "z>=8 的瓦片里存在 plant_area 图层且要素数 > 0（阶段56-C 的面数据确实进了归档）",
+      实测:
+        keysByType.plant_area.size > 0
+          ? `面层属性键 ${[...keysByType.plant_area].join(",")}`
+          : "抽样瓦片里一个面要素都没有",
+      通过: keysByType.plant_area.size > 0,
+    });
+
     const missing = [];
     for (const [ftype, keys] of Object.entries(expectProp)) {
       const seen = keysByType[ftype];

@@ -97,6 +97,21 @@ const DEFAULTS = {
     "cables",
     "wires",
     "circuits",
+    /**
+     * 阶段56-C：面状发电设施（`ftype=plant_area`）专用的三个字段。
+     *
+     * ‼️ 它们必须**同时**出现在这里与 `prepare_osm_geojson.mjs` 的 `KEEP_PROPS.plant_area`
+     *    —— 这是本阶段最容易漏的一处：上游保留了、下游白名单没有，字段在切片时**静默消失**
+     *    （阶段42 的 `plant_source` 就是这么丢了很久，光看构建 exit=0 永远发现不了）。
+     *    门禁靠 `verify_power_only.mjs` 的 `missing=` 与 `verify_pack.mjs` 的属性断言。
+     *   · `landuse` / `source_url` 是逐要素自由文本（`source_url` 常是 gem.wiki 链接）；
+     *   · `area_ha` 是数值近似面积（鞋带公式，UI 标"近似"）。
+     * ⚠️ 但**不要**把它们塞进 `collapseProps`：低级别每张瓦片装全部要素，
+     *    自由文本会把 MVT 字符串表撞大（见 fullPropsFromZoom 的注释与高基数告警）。
+     */
+    "landuse",
+    "source_url",
+    "area_ha",
     // 阶段56-A2：线路合并的产物（merged_count / length_km 是数值，osm_ids 是逗号串
     // —— MVT 不支持数组属性，见 merge-lines.mjs 的 decorate）
     "merged_count",

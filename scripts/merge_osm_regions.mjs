@@ -22,13 +22,19 @@ import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const KINDS = ["lines", "substations", "plants", "converters"];
+const KINDS = ["lines", "substations", "plants", "plant_areas", "converters"];
 /**
  * 允许缺失的 kind（缺失只警告，不中断）。
  *
  * ‼️ 只有 `converters` 能进这里：它来自 A2 的补抓通道，可能没跑过；
- *    而三个电力 kind 缺失说明抓取/命名出了问题，**必须响亮失败**
- *    （静默少一类 = 归档里凭空少掉一整层要素，而 prepare 不会报错）。
+ *    而**四个**电力几何 kind（含阶段56-C 新增的 `plant_areas`）缺失说明抓取/命名出了问题，
+ *    **必须响亮失败**（静默少一类 = 归档里凭空少掉一整层要素，而 prepare 不会报错）。
+ *
+ * 阶段56-C：`plant_areas` **必须**加进 `KINDS`。漏了它的后果是**静默**的 ——
+ *    区域包里看得到面、**核心区永远没有面**（合并脚本根本不读那个桶），
+ *    而两个通道各自都"正常"，没有任何报错。这正是计划 §8 列的"面层遗漏某个挂载通道"。
+ * ⚠️ 加进来也意味着：**核心区归档（`src-tauri/resources/maps/osm_grid.pmtiles`）
+ *    必须重新生成**才会带上面层。只重跑区域包不会影响它。
  */
 const OPTIONAL_KINDS = new Set(["converters"]);
 

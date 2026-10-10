@@ -66,7 +66,7 @@ import styles from "./MapPage.module.css";
  * 「换流站」既是直流识别的锚点，也是可点选的独立要素；
  * 「海底电缆」是 `power=cable` 单独成层（不再混在电压档里按电压上色）。
  */
-const LAYERS = ["电厂", "变电站", "换流站", "输电线路", "海底电缆"] as const;
+const LAYERS = ["电厂", "变电站", "换流站", "输电线路", "海底电缆", "面状电厂"] as const;
 
 /**
  * GEM 层在图层面板上的开关名（阶段48-A 引入，50-C.2-A 改名）。
@@ -170,6 +170,13 @@ const LAYER_SWATCH: Record<string, string> = {
   // 阶段56-A2：色块与地图**同一份常量**，开关本身就是图例（与下面两处同样的约定）
   [CONVERTER_LAYER_KEY]: OSM_CONVERTER_COLOR,
   [CABLE_LAYER_KEY]: OSM_CABLE_COLOR,
+  // 阶段56-C：面状电厂是**按燃料多色**的填充，与「电厂」那个 conic 渐变同义
+  //（同一个 OSM 数据源的两条呈现通道：点层白描圈 / 面层按燃料填色）。
+  // ‼️ 这里写**字面量**而不是 `[PLANT_AREA_KEY]` / `PLANT_FILL_FALLBACK`：那两个常量
+  //    声明在下方，而 `LAYER_SWATCH` 是模块级对象字面量 ⇒ 会踩 TDZ
+  //    （TS 这次真的报了 TS2448/TS2454，正是本文件顶部那两段注释警告的同一个坑）。
+  //    字面量与 `PLANT_AREA_KEY` / `PLANT_FILL_FALLBACK` 必须保持一致。
+  面状电厂: "#6b7280",
   // 阶段48-A / 50-C.2-A：GEM 层是**实心彩色圆**，按 `plant_type` 三色
   //    （coal / oil-gas / bioenergy，见 addGemPlantLayers 的 `gemFuelColor`）。
   //    所以色块用 conic 三色饼：既表达了「三种燃料」，又是地图上填色的直接缩略。
@@ -393,11 +400,15 @@ const OSM_LINE_TIERS: ReadonlyArray<{
   color: string;
   width: number;
 }> = [
-  { id: "osm-line-735", vclass: "735+", color: "#e879f9", width: 3 },
-  { id: "osm-line-500", vclass: "500-734", color: "#f59e0b", width: 2 },
-  { id: "osm-line-220", vclass: "220-499", color: "#4daafc", width: 1.5 },
-  { id: "osm-line-lt220", vclass: "<220", color: "#6b7280", width: 0.8 },
-  { id: "osm-line-unknown", vclass: "unknown", color: "#8b96a8", width: 1 },
+  // 阶段56-C：换成对 opengridworks.com 截图的**像素实测**冷色带（计划 §0.3）——
+  // 电压越高越"深蓝/紫"，低压是青。‼️ `id` 与 `vclass` **一个都不能改**：
+  // 它们被 `lineTierFilter()`、`LINE_TIER_KEYS`（开关持久化的键）和
+  // `packLayerId()` 引用，改了会让面板开关与已有用户配置对不上。
+  { id: "osm-line-735", vclass: "735+", color: "#2f6fd8", width: 3 },
+  { id: "osm-line-500", vclass: "500-734", color: "#3888f8", width: 2 },
+  { id: "osm-line-220", vclass: "220-499", color: "#28b8f8", width: 1.5 },
+  { id: "osm-line-lt220", vclass: "<220", color: "#28d8f8", width: 0.8 },
+  { id: "osm-line-unknown", vclass: "unknown", color: "#5a7a94", width: 1 },
 ];
 
 /**
@@ -474,6 +485,79 @@ function cableLineFilter(): FilterSpecification {
 }
 
 /**
+ * 阶段56-C：面状发电设施的 filter。
+ *
+ * ‼️ 只认 `ftype === "plant_area"` —— 面在归档里与线、点同处 `grid` 一层，
+ *    不写这条 filter 会把这层里**所有**要素（含线）当多边形填充画出来。
+ */
+function plantAreaFilter(): FilterSpecification {
+  return ["==", ["get", "ftype"], "plant_area"];
+}
+
+/**
+ * 阶段56-C：变电站的 filter —— `ftype` + **启用的中国电压档**。
+ *
+ * 🔴 为什么用 filter 而不是"一档一层"：区域包图层数已顶到上限
+ *    （见 `HIT_BBOX_PAD` 的注释）。改 filter 是零新增图层的做法。
+ *
+ * ⚠️ 判定要点：
+ *   · 没有 `voltage_kv` 的归「电压未知」档 —— 实测这类占比很高，
+ *     **不能**让它落进任何电压区间（那是把未知当已知）；
+ *   · `have()` 为空时返回**恒假** filter（而不是恒真）：一档都不勾就该什么都不画。
+ *     MapLibre 的 `["match", …]` 在无分支时会落到兜底值，这里用 `["boolean", false]`
+ *     这种写法在类型上不合法，所以用 `["==", ["get","ftype"], "__none__"]` 表达恒假。
+ */
+function substationFilter(enabled: (key: string) => boolean): FilterSpecification {
+  return bandFilterOn("ftype", "substation", "voltage_kv", enabled);
+}
+
+/**
+ * 阶段56-C：把「启用的变电站电压档」表达成一个 MapLibre filter。
+ *
+ * ‼️ 两个参数不是多余的：
+ *   · `typeField`/`typeValue` —— OSM 电网层用 `ftype === "substation"` 判别；
+ *     而**数据库演示层**（`SUBSTATIONS_LAYER_ID`，阶段21 的 GeoJSON）**根本没有
+ *     `ftype`**，它用 `properties.voltage`（单位 kV，数字）。给它套 OSM 那套 filter
+ *     会把该层**整层过滤掉**（一个都画不出来，且不报错）。
+ *   · `kvField` —— 同理：一个是 `voltage_kv`，一个是 `voltage`。
+ *   ⚠️ 所以两处必须各用各的参数，不能图省事共用一份。
+ *
+ * ‼️ 缺电压值时**先**命中那一支：不能让它掉进任何电压区间（那是把未知当已知）。
+ *    「电压未知」档关闭时给 0，而不是删掉这一支 —— 结构固定更不容易写错。
+ */
+function bandFilterOn(
+  typeField: string | null,
+  typeValue: string,
+  kvField: string,
+  enabled: (key: string) => boolean,
+): FilterSpecification {
+  const kv = ["get", kvField];
+  // 逐档生成 `[[">=",kv,lo],["<",kv,hi], 1|0]`
+  const branches: unknown[] = [];
+  for (const b of CN_SUBSTATION_BANDS) {
+    const [lo, hi] = b.kvRange;
+    const conds: unknown[] = [">=", kv, lo];
+    if (hi != null) conds.push(["<", kv, hi]);
+    branches.push(conds, enabled(b.key) ? 1 : 0);
+  }
+  const missing = enabled(CN_SUBSTATION_UNKNOWN_KEY) ? 1 : 0;
+  const cond: unknown = [
+    "case",
+    ["has", kvField],
+    ["case", ...branches, 0], // 有值却落在所有档之外（理论上不该有）⇒ 不画
+    missing,
+  ];
+  return (typeField
+    ? ["all", ["==", ["get", typeField], typeValue], cond]
+    : cond) as never;
+}
+
+/** 全部变电站档都关了吗？（用于面板显示"当前不画任何变电站"的提示） */
+function noSubstationBandOn(on: (key: string) => boolean): boolean {
+  return !CN_SUBSTATION_BAND_KEYS.some((k) => on(k));
+}
+
+/**
  * 「任一线路图层开着吗」—— 热区层与旧演示线层的可见性都跟它走。
  *
  * ‼️ 必须把直流档与海缆层一起算进去：只判 5 个交流档的话，
@@ -505,6 +589,115 @@ const TOP_FUEL_ROWS = 5;
 const STATS_SLOW_DEBOUNCE_MS = 900;
 const OSM_SUBSTATION_LAYER_ID = "osm-substations";
 const OSM_PLANT_LAYER_ID = "osm-plants";
+
+/* ============================================================================
+ * 阶段56-C：面状发电设施（`ftype = plant_area`）
+ * ============================================================================
+ * 数据侧（T1）把 `power=plant` 的**闭合 way** 保留成了 Polygon，前端按燃料类型填色。
+ * 配色取自对 opengridworks.com 截图的像素统计（见计划 §0.3）—— 光伏金 / 风电青 /
+ * 煤灰 / 气橙 / 水蓝 / 生物质绿，是该站的实测主色。
+ *
+ * ⚠️ 缺 `plant_source` 的面很多（实测 OSM 里大量电厂只有 name 没有燃料标签）⇒
+ *    必须有回退色，否则这些面会整片不可见（MapLibre 对 match 无兜底时取默认黑）。
+ */
+const OSM_PLANT_AREA_LAYER_ID = "osm-plant-areas";
+
+/**
+ * 阶段56-C：面状电厂层的**开关键**（`visibleLayers` 里的字符串），已并入 `LAYERS`。
+ * 默认开启（见 `visibleLayers` 初始化注释）：它是本阶段新增的主要看点。
+ */
+const PLANT_AREA_KEY = "面状电厂";
+
+/**
+ * 阶段56-C：变电站按**中国电压等级**分档。
+ *
+ * 🔴 为什么不照抄 OpenGridWorks 的档位（345-499 / 230-344 / 31-99 kV）：
+ *    那是**美制**体系，在中国大半是空档 —— 照抄会得到一个"看着像、用着错"的面板。
+ *    中国实际体系是 1000 / 750 / 500 / 330 / 220 / 110 / 35 / 10 kV。
+ *    （判定依据是归档里的 `voltage_kv`，实测取值如 250 / 180 / 220 等，
+ *      所以档边界按上面这套整数等级切，不出现 345 这种数。）
+ *
+ * ‼️ 这些开关**不新增图层**：区域包的图层数已经顶到上限
+ *    （见 `HIT_BBOX_PAD` 的注释：每包 1 source + N 图层，同时最多
+ *     `PACK_MAX_ACTIVE` 个包）。所以分档靠**改 filter**实现，不是一档一层。
+ *    代价：拨动开关会重建一次 substation 图层 filter（O(1) 表达式，可忽略）。
+ *
+ * ⚠️ 颜色说明：变电站用的是**单一** SUBSTATION_COLOR，本就"不按电压上色"
+ *    （见该常量的注释：燃料配色盘已被占满，再加一套会和图例打架）。
+ *    所以面板里每一档用同一色块 + 明确的电压区间文字，**不要**给每档编一个颜色 ——
+ *    那会让色块成为"面板上存在、地图上不存在"的假图例（本文件反复警告过的漂移）。
+ */
+interface CnSubstationBand {
+  key: string;
+  label: string;
+  /** 该档的判定：由 `voltage_kv` 推出的**闭区间**语义 */
+  test: (kv: number) => boolean;
+  /** 同一区间的 [下界, 上界)；上界为 null 表示无上界。给 MapLibre filter 用（表达式不能调 JS 函数） */
+  kvRange: readonly [number, number | null];
+}
+const CN_SUBSTATION_BANDS: readonly CnSubstationBand[] = [
+  { key: "1000+", label: "1000 kV 及以上", test: (kv) => kv >= 1000, kvRange: [1000, null] },
+  { key: "750-999", label: "750-999 kV", test: (kv) => kv >= 750 && kv < 1000, kvRange: [750, 1000] },
+  { key: "500-749", label: "500-749 kV", test: (kv) => kv >= 500 && kv < 750, kvRange: [500, 750] },
+  { key: "330-499", label: "330-499 kV", test: (kv) => kv >= 330 && kv < 500, kvRange: [330, 500] },
+  { key: "220-329", label: "220-329 kV", test: (kv) => kv >= 220 && kv < 330, kvRange: [220, 330] },
+  { key: "110-219", label: "110-219 kV", test: (kv) => kv >= 110 && kv < 220, kvRange: [110, 220] },
+  { key: "lt110", label: "110 kV 以下", test: (kv) => kv < 110, kvRange: [0, 110] },
+];
+/** 没有 `voltage_kv` 的变电站 —— 单独一档（实测占比很高，绝不能混进任何电压档） */
+const CN_SUBSTATION_UNKNOWN_KEY = "电压未知";
+const CN_SUBSTATION_BAND_KEYS: readonly string[] = [
+  ...CN_SUBSTATION_BANDS.map((b) => b.key),
+  CN_SUBSTATION_UNKNOWN_KEY,
+];
+/**
+ * 默认全开 —— 这是**有意**的：它逐字保持改动前的渲染结果（以前所有变电站都画）。
+ * 分档是新加的**筛选**能力，默认不该改变用户已经熟悉的画面。
+ */
+const DEFAULT_ON_SUBSTATION_BANDS: readonly string[] = CN_SUBSTATION_BAND_KEYS;
+
+/**
+ * 阶段56-C：尺寸图例（气泡分级）。
+ *
+ * ⚠️ 这是**图例**，不是当前生效的半径规则 —— 本阶段没有改电厂点的半径算法。
+ *    所以必须注明依据（容量），不能让人以为"圆圈大小真的按装机容量画"
+ *    （那要改 cluster 的 radius 表达式，属另一件事）。
+ */
+const SIZE_LEGEND_TIERS: readonly number[] = [100, 500, 1000, 2500, 5000];
+
+/**
+ * 燃料 → 填充色。键与 OSM `plant:source` 的取值一致（小写）。
+ *
+ * ‼️ 取值域来自 OSM 的 `plant:source` 标签，不是 WRI/GEM 的 `plant_type` ——
+ *    后者另有 `OSM_PLANT_SOURCE_TO_WRI` 做映射，两者不要混用。
+ */
+const PLANT_FILL: Record<string, string> = {
+  solar: "#d8a828",
+  wind: "#28d8f8",
+  coal: "#8a8f98",
+  gas: "#f0883e",
+  hydro: "#3f8fd8",
+  biomass: "#4a8f52",
+  waste: "#4a8f52",
+  nuclear: "#b06fd8",
+  oil: "#a06a3a",
+  geothermal: "#d85858",
+  battery: "#7ad0a0",
+};
+const PLANT_FILL_FALLBACK = "#6b7280";
+
+/**
+ * 燃料 → 填充色表达式（MapLibre `match`）。
+ *
+ * ⚠️ `["get","plant_source"]` 在缺键时返回 undefined，`match` 会落到兜底色 ——
+ *    这正是我们要的（不是 bug）。但**不要**把兜底色写成透明：
+ *    那样"没有燃料标签的面"会在图上彻底消失，看起来像数据没进来。
+ */
+function plantFillColorExpr(): unknown {
+  const branches: unknown[] = [];
+  for (const [source, color] of Object.entries(PLANT_FILL)) branches.push(source, color);
+  return ["match", ["get", "plant_source"], ...branches, PLANT_FILL_FALLBACK];
+}
 
 /**
  * 阶段34：`osm-grid` 输电线路的**透明点击热区**图层 id。
@@ -653,6 +846,10 @@ function packLayerIds(key: string) {
     converter: packLayerId(OSM_CONVERTER_LAYER_ID, key),
     substations: packLayerId(OSM_SUBSTATION_LAYER_ID, key),
     plants: packLayerId(OSM_PLANT_LAYER_ID, key),
+    // 阶段56-C：面状发电设施。‼️ 登记在这里是**必须**的，不只是为了好找 ——
+    //    `removePackLayers()` 是遍历本函数全部字段卸载的，漏登记会让 source
+    //    因"仍被图层引用"而卸载失败，区域包每次切视野都泄漏一份瓦片缓存（静默）。
+    plantAreas: packLayerId(OSM_PLANT_AREA_LAYER_ID, key),
     hit: packLayerId(OSM_LINES_HIT_LAYER_ID, key),
   };
 }
@@ -1086,6 +1283,7 @@ function buildPopupFrame(
   fallbackTitle: string,
   rows: readonly PopupRow[],
   meta?: string,
+  note?: string,
 ): HTMLElement {
   const root = document.createElement("div");
   root.className = styles.popup;
@@ -1142,6 +1340,15 @@ function buildPopupFrame(
   }
 
   root.appendChild(list);
+
+  // 阶段56-C：口径说明（目前只有面的"近似面积"用）。放在 meta **之上** ——
+  // 它是对上面某个数字的解释，必须紧跟着数字，而不是被 ID 隔开。
+  if (note) {
+    const noteEl = document.createElement("p");
+    noteEl.className = styles.popupMeta;
+    noteEl.textContent = note;
+    root.appendChild(noteEl);
+  }
 
   // 阶段34：弱化的元信息（如 OSM ID），放 Popup 最底部，不与主信息抢注意力。
   // 专业 GIS 工具里带底层 ID 对排查数据问题很关键。
@@ -1212,6 +1419,16 @@ type OsmPointProperties = {
    */
   operator?: string;
   plant_output?: string;
+  /**
+   * 阶段56-C：**面状**发电设施专有（`ftype = plant_area`，来自 OSM 闭合 way）。
+   *   · `landuse`     —— OSM 的土地利用标签（实测电厂地块多为 industrial）；
+   *   · `source_url`  —— OSM 的 `source` 标签，实测上海多个电厂直接是 `gem.wiki/...`
+   *                      （既是与 OpenGridWorks 弹窗对齐的字段，也是署名依据）；
+   *   · `area_ha`     —— 由 prepare 用鞋带公式算的**近似**面积（公顷），UI 必须标"近似"。
+   */
+  landuse?: string;
+  source_url?: string;
+  area_ha?: number;
 };
 
 /**
@@ -1287,6 +1504,8 @@ function buildOsmPointPopup(props: OsmPointProperties): HTMLElement {
   const isSubstation = props.ftype === "substation";
   // 阶段56-A2：换流站也是点要素，但与变电站/电厂的字段表不同（设计 §4.1）
   const isConverter = props.ftype === "converter";
+  // 阶段56-C：面状电厂 —— 与点状电厂共用"电厂"语义，但多三个面专有字段
+  const isPlantArea = props.ftype === "plant_area";
   const rows: PopupRow[] = [];
 
   // 有精确值就「220 kV（220-499kV）」，只有档位就显示档位，都没有才是「未知」
@@ -1307,6 +1526,7 @@ function buildOsmPointPopup(props: OsmPointProperties): HTMLElement {
   } else if (isConverter) {
     // 换流站没有 plant/substation 的子类型字段（设计 §4.1：osm_id/name/operator/vclass/voltage_kv）
   } else {
+    // 点状电厂与面状电厂共用这段（面只是多了下面的 landuse / 面积 / 来源）
     const src = osmPlantSourceLabel(props.plant_source);
     if (src) rows.push({ label: "能源来源", value: src.text, swatch: src.swatch });
     // 阶段56-A2（设计 §5.2）：电厂新增出力。OSM 的 `plant:output:electricity` 是**自由文本**
@@ -1314,9 +1534,44 @@ function buildOsmPointPopup(props: OsmPointProperties): HTMLElement {
     if (props.plant_output) rows.push({ label: "出力", value: props.plant_output });
   }
 
+  if (isPlantArea) {
+    if (props.landuse) rows.push({ label: "土地利用", value: props.landuse });
+    // ⚠️ 面积是**近似值**（鞋带公式 + 纬度余弦修正，见 prepare_osm_geojson.mjs 的 ringAreaHa）。
+    //    所以值后面带「≈」，并且整条口径由下面的 note 再说一次 —— 不能让它看起来像精确面积。
+    if (typeof props.area_ha === "number" && Number.isFinite(props.area_ha)) {
+      rows.push({ label: "占地面积", value: `≈ ${props.area_ha.toFixed(2)} ha` });
+    }
+    // 来源常是 gem.wiki / 其它数据集链接 —— 原样给出可点链接。
+    if (props.source_url) {
+      const url = /^https?:\/\//i.test(props.source_url)
+        ? props.source_url
+        : `https://${props.source_url}`;
+      rows.push({ label: "来源", value: props.source_url, link: url });
+    }
+  }
+
   // 阶段56-A2（设计 §5.2）：变电站与换流站显示运营商
   if ((isSubstation || isConverter) && props.operator) {
     rows.push({ label: "运营商", value: props.operator });
+  }
+
+  /**
+   * 阶段56-C：**「在 OSM 打开」外链**。
+   *
+   * ‼️ 这不只是"对齐它的弹窗"，它同时**履行 ODbL 的署名与溯源义务**
+   *    （见计划 §7 B 类：许可类约束不可取消）。所以这个链接是合规要件，不是装饰。
+   * ⚠️ 必须走 buildPopupFrame 的 `link` 通道（渲染成 button + 交给系统浏览器）——
+   *    Tauri 的 WebView 里 `<a href>` 会让**整个窗口导航走**，应用等于挂了。
+   */
+  if (props.osm_id) {
+    const [kind, id] = props.osm_id.split("/");
+    if (kind && id) {
+      rows.push({
+        label: "开放街道地图",
+        value: "在 OSM 打开",
+        link: `https://www.openstreetmap.org/${kind}/${id}`,
+      });
+    }
   }
 
   // ‼️ `osm_id` 只在 z>=8 的瓦片里保留（低缩放为压体积被裁掉）。
@@ -1330,6 +1585,9 @@ function buildOsmPointPopup(props: OsmPointProperties): HTMLElement {
     isSubstation ? "未命名变电站" : isConverter ? "未命名换流站" : "未命名电厂",
     rows,
     meta,
+    isPlantArea
+      ? "占地面积为由地块轮廓推算的**近似值**（非实测面积）。数据 © OpenStreetMap 贡献者（ODbL）。"
+      : undefined,
   );
 }
 
@@ -1381,9 +1639,13 @@ function showOsmPointOrLine(
     OSM_SUBSTATION_LAYER_ID,
     // 阶段56-A2：换流站也是可点要素（弹窗走 buildOsmPointPopup 的 converter 分支）
     OSM_CONVERTER_LAYER_ID,
+    // 阶段56-C：面状电厂同样可点（`buildOsmPointPopup` 的 plant_area 分支）。
+    // ‼️ 少了它就会出现"看得见面、点不开"的幽灵交互 —— 与热区层那条约束同一个道理。
+    OSM_PLANT_AREA_LAYER_ID,
     ...packIds.map((i) => i.plants),
     ...packIds.map((i) => i.substations),
     ...packIds.map((i) => i.converter),
+    ...packIds.map((i) => i.plantAreas),
   ].filter((id) => !!map.getLayer(id));
   const osmLineLayers = [OSM_LINES_HIT_LAYER_ID, ...packIds.map((i) => i.hit)].filter((id) =>
     !!map.getLayer(id),
@@ -1406,13 +1668,54 @@ function showOsmPointOrLine(
   if (osmPointLayers.length) {
     const hit = map.queryRenderedFeatures(box, { layers: osmPointLayers })[0];
     if (hit) {
-      // 弹窗挂到要素自身坐标，而不是鼠标位置 —— 鼠标可能在扩大的热区边缘。
-      // 几何兼底：理论上点要素只有 Point，但拿不到就退回鼠标位置（总比不弹好）。
-      const geom = hit.geometry as { type?: string; coordinates?: [number, number] };
-      const at: [number, number] =
-        geom?.type === "Point" && Array.isArray(geom.coordinates)
-          ? geom.coordinates
-          : [e.lngLat.lng, e.lngLat.lat];
+      const geom = hit.geometry as {
+        type?: string;
+        coordinates?: unknown;
+      };
+      let at: [number, number];
+      if (geom?.type === "Point" && Array.isArray(geom.coordinates)) {
+        // 弹窗挂到要素自身坐标，而不是鼠标位置 —— 鼠标可能在扩大的热区边缘。
+        at = geom.coordinates as [number, number];
+      } else if (geom?.type === "Polygon" || geom?.type === "MultiPolygon") {
+        /**
+         * 阶段56-C：面要素（`plant_area`）的锚点。
+         *
+         * 🔴 这里**不能**像点那样直接把 `geometry.coordinates` 当经纬度用：
+         *    `queryRenderedFeatures` 返回的多边形坐标是**瓦片坐标**（0..extent），
+         *    不是 lng/lat。直接拿它当坐标会把弹窗挂到几内亚湾去（而且不报错）。
+         *
+         * ✅ 正确做法：瓦片坐标与屏幕坐标是**线性**关系，所以
+         *    「多边形中心相对于点击点」的**像素偏移**是可靠的 ——
+         *    把它加到 `e.lngLat` 上就得到多边形的经纬度锚点。
+         *    这样不需要 `map.unproject`，也不需要假设 extent 的具体数值。
+         */
+        const pts: Array<[number, number]> = [];
+        const push = (c: unknown) => {
+          if (Array.isArray(c) && c.length >= 2 && typeof c[0] === "number" && typeof c[1] === "number") {
+            pts.push([c[0], c[1]]);
+          }
+        };
+        const rings = geom.type === "Polygon" ? [geom.coordinates] : (geom.coordinates as unknown[]);
+        for (const poly of rings as unknown[]) {
+          if (Array.isArray(poly)) for (const ring of poly) if (Array.isArray(ring)) for (const c of ring) push(c);
+        }
+        if (pts.length) {
+          let sx = 0;
+          let sy = 0;
+          for (const p of pts) {
+            sx += p[0];
+            sy += p[1];
+          }
+          const dx = sx / pts.length - e.point.x;
+          const dy = sy / pts.length - e.point.y;
+          at = [e.lngLat.lng + dx, e.lngLat.lat - dy];
+        } else {
+          at = [e.lngLat.lng, e.lngLat.lat];
+        }
+      } else {
+        // 几何拿不到就退回鼠标位置（总比不弹好）
+        at = [e.lngLat.lng, e.lngLat.lat];
+      }
       popup
         .setLngLat(at)
         .setDOMContent(buildOsmPointPopup(hit.properties as OsmPointProperties))
@@ -2679,6 +2982,24 @@ function addOsmGridLayers(
   // ‼️ 曾经必须先于电压档循环添加，否则虚线铁路会盖在 735kV 线上 —— 这个顺序约束
   //    随图层一起消失了，不要再为了它调整下面的循环。
 
+  // ---- 阶段56-C：面状发电设施（fill）----
+  // ‼️ 必须**先于线路档加入**：MapLibre 先加的在下，而面是被线路"穿过去"的背景，
+  //    面压住线路会让整片电网在电厂密集区变暗（本阶段明确列为风险）。
+  //    这里的"先加"就是全部保证 —— 不需要 moveLayer（没有比它更早的电网图层）。
+  map.addLayer({
+    id: OSM_PLANT_AREA_LAYER_ID,
+    type: "fill",
+    source: OSM_SOURCE,
+    ...layerRef,
+    filter: plantAreaFilter(),
+    paint: {
+      "fill-color": plantFillColorExpr() as never,
+      "fill-opacity": 0.35,
+      // 描边用同色：色带本身就是"燃料"的判别依据，另给一种描边色会引入第二种语义
+      "fill-outline-color": plantFillColorExpr() as never,
+    },
+  });
+
   // ‼️ 自下而上加层，让 735kV 画在最顶（详见 `OSM_LINE_TIERS_BOTTOM_UP`）。
   //    ⚠️ 必须与 `addPackLayers` 用同一个数组，否则核心区与区域包画序不一致。
   for (const tier of OSM_LINE_TIERS_BOTTOM_UP) {
@@ -2905,6 +3226,33 @@ function addPackLayers(
   const id = (base: string) => packLayerId(base, key);
 
   // ---- 阶段56-A1：区域包侧的铁路 / 油气管道图层同样已整体撤销 ----
+
+  // ---- 阶段56-C：面状发电设施（fill）----
+  // ‼️ 区域包与核心区**必须都有这一层**：只加一处会出现"包里有面、核心区没有"
+  //    （或反之），而这类不一致是完全静默的 —— 没有任何报错，只是某处不画面。
+  // ⚠️ 与核心区不同，这里**不能用"先加"来保证在下面**：区域包是在底图之后随视野
+  //    动态挂上去的，直接 addLayer 会落到最顶 ⇒ 面压住线路。
+  //    所以先加、再用 moveLayer 精确插到本包**最底下那一档线路之下**
+  //    （与 `addBasemapOverlayLayers` 用 moveLayer 插位是同一手法）。
+  {
+    const areaId = id(OSM_PLANT_AREA_LAYER_ID);
+    map.addLayer({
+      id: areaId,
+      type: "fill",
+      source: sourceId,
+      ...layerRef,
+      filter: plantAreaFilter(),
+      paint: {
+        "fill-color": plantFillColorExpr() as never,
+        "fill-opacity": 0.35,
+        "fill-outline-color": plantFillColorExpr() as never,
+      },
+    });
+    // ⚠️ MapLibre 的 moveLayer 对**不存在的 beforeId** 是静默失败（面会留在最顶）。
+    //    所以插位前先判空 —— 这个包若一档线路都没有，就让它留在原位（无线路可遮挡）。
+    const lowestTierId = id(OSM_LINE_TIERS_BOTTOM_UP[0]!.id);
+    if (map.getLayer(lowestTierId)) map.moveLayer(areaId, lowestTierId);
+  }
 
   // ‼️ 用自下而上的顺序：先加的在下面，让 735kV 最后加、画在最顶。
   //    详见 `OSM_LINE_TIERS_BOTTOM_UP` 的说明（原先低压盖高压）。
@@ -3535,6 +3883,12 @@ function MapPage({
   const [fuelMenuOpen, setFuelMenuOpen] = useState(false);
 
   /**
+   * 阶段56-C：「变电站电压分档」子菜单的展开状态（第三层，与 `tierMenuOpen` 同一层）。
+   * 默认折叠：7 个档位约 154px，全展开会明显拉长面板（阶段54 刚把溢出修到 0）。
+   */
+  const [subBandMenuOpen, setSubBandMenuOpen] = useState(false);
+
+  /**
    * 阶段48：「统计筛选」的勾选状态。
    *
    * ‼️ 它**只过滤左侧看板的统计数字，不改地图渲染** —— 用户拍板的方案。
@@ -3593,7 +3947,14 @@ function MapPage({
     // 阶段56-A2：`LAYERS` 现在含「换流站」「海底电缆」（默认开），
     // 另外显式加上**直流档** —— 它不在 DEFAULT_ON_TIERS 里（那是交流 5 档），
     // 但直流是本阶段的重点新增内容，默认不可见会让人以为没做。
-    normalizeLayerKeys([...LAYERS, ...DEFAULT_ON_TIERS, DC_LAYER_KEY]),
+    // 阶段56-C：再加**变电站分档**（默认全开 ⇒ 与改动前的渲染结果逐字一致，
+    // 见 `DEFAULT_ON_SUBSTATION_BANDS` 的注释）与「面状电厂」（已在 `LAYERS` 里）。
+    normalizeLayerKeys([
+      ...LAYERS,
+      ...DEFAULT_ON_TIERS,
+      DC_LAYER_KEY,
+      ...DEFAULT_ON_SUBSTATION_BANDS,
+    ]),
   );
 
   /**
@@ -4685,6 +5046,26 @@ function MapPage({
   };
 
   /**
+   * 阶段56-C：切换单个**变电站电压档**（中国体系）。
+   *
+   * ‼️ 与 `toggleTier` 是两套独立的键空间：线路的键是 `vclass`
+   *    （735+ / 500-734 / 220-499 / <220 / unknown），变电站的键是
+   *    CN_SUBSTATION_BANDS 的 key（1000+ / 750-999 / … / 电压未知）。
+   *    两者**取值有意不同**（735+ 对 1000+），因为线路与变电站的中国档位划分本就不同：
+   *    线路那一套是历史产物且被归档的 `vclass` 属性钉死，变电站这一套是新加的筛选。
+   *    ⚠️ 不要为了"看起来统一"把两者合并成一个键空间 —— 那会让线路档与变电站档互相串台。
+   */
+  const toggleSubstationBand = (bandKey: string) => {
+    // 「变电站」总开关关着时，拨分档没有意义却会悄悄改状态；先把它打开。
+    setVisibleLayers((prev) => {
+      const next = prev.includes(bandKey)
+        ? prev.filter((n) => n !== bandKey)
+        : [...prev, bandKey];
+      return next.includes("变电站") ? next : [...next, "变电站"];
+    });
+  };
+
+  /**
    * 阶段30：输电线路总开关 —— 一键全开 / 全关所有电压档。
    * 规则：当前「有任一档开启」就全部关闭；一档都不开则全部开启（含「电压未知」）。
    */
@@ -4988,6 +5369,10 @@ function MapPage({
         }
         m.setLayoutProperty(ids.substations, "visibility", on("变电站") ? "visible" : "none");
         m.setLayoutProperty(ids.plants, "visibility", on("电厂") ? "visible" : "none");
+        // 阶段56-C：面状电厂跟自己的开关（它是同一数据源的第二条通道，不归「电厂」管）
+        m.setLayoutProperty(ids.plantAreas, "visibility", on(PLANT_AREA_KEY) ? "visible" : "none");
+        // 阶段56-C：新包的变电站也要立刻套上电压档 filter，否则会短暂地画出所有档
+        if (m.getLayer(ids.substations)) m.setFilter(ids.substations, substationFilter(on));
         // 阶段56-A2：三个新图层也要设一次初始可见性
         m.setLayoutProperty(ids.dc, "visibility", on(DC_LAYER_KEY) ? "visible" : "none");
         m.setLayoutProperty(ids.cable, "visibility", on(CABLE_LAYER_KEY) ? "visible" : "none");
@@ -5005,7 +5390,8 @@ function MapPage({
         // 阶段41：点图层现在也能点开弹窗，一并给指针提示
         // （只给 hit 层的话，鼠标移到变电站/电网上不会有“可点”的反应感）。
         // 阶段56-A2：换流站也是可点要素，加进来。
-        const cursorLayers = [ids.hit, ids.plants, ids.substations, ids.converter];
+        // 阶段56-C：面状电厂也能点开弹窗，同样给指针反馈。
+        const cursorLayers = [ids.hit, ids.plants, ids.substations, ids.converter, ids.plantAreas];
         packCursorHandlers.set(key, { layers: cursorLayers, enter: onEnter, leave: onLeave });
         for (const lid of cursorLayers) {
           m.on("mouseenter", lid, onEnter);
@@ -5213,6 +5599,27 @@ function MapPage({
     apply([OSM_DC_LAYER_ID], on(DC_LAYER_KEY));
     apply([OSM_CABLE_LAYER_ID], on(CABLE_LAYER_KEY));
     apply([OSM_CONVERTER_LAYER_ID], on(CONVERTER_LAYER_KEY));
+    // 阶段56-C：面状电厂层。它跟「面状电厂」这一个开关走，**不**跟「电厂」总开关
+    // —— 两者是同一 OSM 数据源的两条通道（点层 / 面层），用户可以只看面。
+    apply([OSM_PLANT_AREA_LAYER_ID], on(PLANT_AREA_KEY));
+
+    /**
+     * 阶段56-C：变电站按**中国电压档**过滤（不新增图层，见 `substationFilter`）。
+     *
+     * ‼️ 这里是**改 filter**，不是 `setLayoutProperty` —— 与上面所有开关的实现方式不同，
+     *    别误以为它漏了。总开关「变电站」关掉时由上面的 `apply` 接管（整层隐藏）。
+     * ⚠️ MapLibre 的 `setFilter` 对不存在的图层会**抛错**（不像 setLayoutProperty 静默），
+     *    所以这里必须逐个判空。
+     */
+    const bandFilter = substationFilter(on);
+    // ⚠️ 数据库演示层没有 `ftype`、电压字段叫 `voltage` ⇒ 必须用**另一份** filter
+    //    （共用 OSM 那份会把整层过滤成空，且不报错）。
+    const dbBandFilter = bandFilterOn(null, "", "voltage", on);
+    const applySubFilter = (ids: readonly string[]) => {
+      for (const lid of ids) if (map.getLayer(lid)) map.setFilter(lid, bandFilter);
+    };
+    applySubFilter([OSM_SUBSTATION_LAYER_ID]);
+    if (map.getLayer(SUBSTATIONS_LAYER_ID)) map.setFilter(SUBSTATIONS_LAYER_ID, dbBandFilter);
     // 旧的 DB 演示线层（阶段28 已清空）与热区层跟随「任一**线**图层开启」
     // （阶段56-A2：判据从「任一交流档」扩到 `anyLineLayerOn`，含直流与海缆 ——
     //   只开直流时热区若被关掉，就会出现"看得见、点不开"）
@@ -5233,6 +5640,9 @@ function MapPage({
       apply([packLayerId(OSM_CONVERTER_LAYER_ID, key)], on(CONVERTER_LAYER_KEY));
       apply([packLayerId(OSM_SUBSTATION_LAYER_ID, key)], on("变电站"));
       apply([packLayerId(OSM_PLANT_LAYER_ID, key)], on("电厂"));
+      apply([packLayerId(OSM_PLANT_AREA_LAYER_ID, key)], on(PLANT_AREA_KEY));
+      // 阶段56-C：区域包的变电站也要套同一份电压档 filter（否则"核心区过滤了、包没过滤"）
+      applySubFilter([packLayerId(OSM_SUBSTATION_LAYER_ID, key)]);
       apply([packLayerId(OSM_LINES_HIT_LAYER_ID, key)], anyLineLayerOn(on));
     }
 
@@ -5685,6 +6095,110 @@ function MapPage({
                             </label>
                           </li>
                         </ul>
+                      </div>
+
+                      {/* ---------- 阶段56-C：变电站电压分档（中国体系）----------
+                          ‼️ 这里的档位是**中国**体系（1000/750/500/330/220/110 kV），
+                             不是 OpenGridWorks 那套美制档（345-499 等）——
+                             照抄会得到大半是空档的面板。理由见 CN_SUBSTATION_BANDS 的注释。
+                          ⚠️ 这些勾选改的是**图层 filter**，不新增图层（区域包图层数已到上限）。
+                             色块统一用 SUBSTATION_COLOR：变电站本就"不按电压上色"，
+                             给每档编个颜色会变成"面板上有、地图上没有"的假图例。 */}
+                      <div className={styles.tierGroup}>
+                        <button
+                          type="button"
+                          className={styles.subHeader}
+                          aria-expanded={subBandMenuOpen}
+                          aria-controls="substation-band-menu"
+                          onClick={() => setSubBandMenuOpen((v) => !v)}
+                        >
+                          <span>变电站电压分档</span>
+                          <span className={styles.chevron} aria-hidden="true">
+                            {subBandMenuOpen ? "▼" : "▶"}
+                          </span>
+                        </button>
+
+                        <ul
+                          id="substation-band-menu"
+                          className={`${styles.tierList} ${styles.subList}`}
+                          hidden={!subBandMenuOpen}
+                        >
+                          {CN_SUBSTATION_BANDS.map((band) => (
+                            <li key={band.key}>
+                              <label className={styles.tierItem}>
+                                <input
+                                  type="checkbox"
+                                  className={styles.tierCheck}
+                                  checked={visibleLayers.includes(band.key)}
+                                  onChange={() => toggleSubstationBand(band.key)}
+                                />
+                                <span
+                                  className={styles.layerSwatch}
+                                  style={{ background: SUBSTATION_COLOR }}
+                                  aria-hidden="true"
+                                />
+                                {band.label}
+                              </label>
+                            </li>
+                          ))}
+                          {/* 没有 voltage_kv 的单独一档 —— 实测占比很高，不能混进任何电压档 */}
+                          <li key={CN_SUBSTATION_UNKNOWN_KEY}>
+                            <label className={styles.tierItem}>
+                              <input
+                                type="checkbox"
+                                className={styles.tierCheck}
+                                checked={visibleLayers.includes(CN_SUBSTATION_UNKNOWN_KEY)}
+                                onChange={() => toggleSubstationBand(CN_SUBSTATION_UNKNOWN_KEY)}
+                              />
+                              <span
+                                className={styles.layerSwatch}
+                                style={{ background: SUBSTATION_COLOR }}
+                                aria-hidden="true"
+                              />
+                              {CN_SUBSTATION_UNKNOWN_KEY}
+                            </label>
+                          </li>
+                        </ul>
+
+                        {/* 全关时会"什么都看不见"，必须说清楚是开关造成的，而不是数据没了 */}
+                        {!visibleLayers.includes("变电站") && (
+                          <p className={styles.viewWarn}>
+                            「变电站」总开关是关的 —— 上面的分档要先把总开关打开才生效。
+                          </p>
+                        )}
+                        {visibleLayers.includes("变电站") &&
+                          noSubstationBandOn((k) => visibleLayers.includes(k)) && (
+                            <p className={styles.viewWarn}>
+                              一个电压档都没勾选 ⇒ 地图上不会画任何变电站。
+                            </p>
+                          )}
+                      </div>
+
+                      {/* ---------- 阶段56-C：尺寸图例（气泡分级）----------
+                          ⚠️ 这是**图例**，不是字号/半径规则：本阶段没有改电厂点的半径算法，
+                             所以下面的圆只是"这些容量大致对应这么大"的示意，并明确注明依据。
+                             写成"当前生效的半径"会是对事实的夸大。 */}
+                      <div className={styles.tierGroup}>
+                        <p className={styles.subHeaderStatic}>尺寸（装机容量，示意）</p>
+                        <ul className={styles.sizeLegend}>
+                          {SIZE_LEGEND_TIERS.map((mw) => (
+                            <li key={mw} className={styles.sizeLegendItem}>
+                              <span
+                                className={styles.sizeLegendDot}
+                                style={{
+                                  width: `${4 + Math.sqrt(mw) * 0.55}px`,
+                                  height: `${4 + Math.sqrt(mw) * 0.55}px`,
+                                }}
+                                aria-hidden="true"
+                              />
+                              {mw >= 1000 ? `${mw / 1000} GW` : `${mw} MW`}
+                            </li>
+                          ))}
+                        </ul>
+                        <p className={styles.viewNote}>
+                          缩放比例 {viewportInfo?.zoom != null ? viewportInfo.zoom.toFixed(1) : "--"} ·
+                          气泡大小 1.00 倍（本阶段未按容量缩放半径，仅作图例示意）
+                        </p>
                       </div>
 
                       {/* 阶段48：第三层折叠 —— 「统计筛选」

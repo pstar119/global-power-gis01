@@ -94,6 +94,16 @@ const KEEP_PROPS = {
   substation: ["osm_id", "name", "operator", "vclass", "voltage_kv", "substation_kind"],
   plant: ["osm_id", "name", "vclass", "voltage_kv", "plant_source", "plant_output"],
   /**
+   * 阶段56-C：面状发电设施（`power=plant` 的**闭合 way**）。
+   *
+   * ‼️ 与 `plant` 分开是**有意**的：点层字段更短、每个电厂都要能点选；
+   *    面层多带 `landuse` / `source_url` / `area_ha` 三个只在面上才有意义的字段。
+   *   · `source_url` —— OSM 的 `source` 标签，实测上海多个电厂直接是 `gem.wiki/...`
+   *     （既是弹窗要对齐它的字段，也是 ODbL / CC-BY 的署名依据）；
+   *   · `area_ha` —— 本脚本用鞋带公式算的**近似**面积，UI 必须标"近似"。
+   */
+  plant_area: ["osm_id", "name", "vclass", "voltage_kv", "plant_source", "landuse", "source_url", "area_ha"],
+  /**
    * 阶段56-A2：换流站（`power=converter`，node 与 way 都收）。
    *
    * ⚠️ 只留这 5 个：它是**点要素**，属性表越短越好（整包只有几十个，但每个都要能点选）。
@@ -113,6 +123,11 @@ const FILES = [
   { ftype: "line", src: (n) => `${n}_power_lines.geojson`, power: true },
   { ftype: "substation", src: (n) => `${n}_power_substations.geojson`, power: true },
   { ftype: "plant", src: (n) => `${n}_power_plants.geojson`, power: true },
+  // 阶段56-C：面状发电设施。来源是**同一轮抓取**的第四个桶（`plant_areas`），
+  // 与 `plants` 点层并存（OSM 里很多电厂只有 node，去掉点层会造成要素数下降的假回归）。
+  // ⚠️ 缺失时只警告不抛错：`power: true` 的条目缺文件走的是上面那条 `console.warn`，
+  //    在灰度阶段（T1 Step 4 只跑 kp-kr）这是有用的信号，不是致命错误。
+  { ftype: "plant_area", src: (n) => `${n}_power_plant_areas.geojson`, power: true },
   // 阶段56-A2：换流站来自**补抓通道**（`fetch_osm_power.py --category converters`）。
   // ⚠️ 缺失时只警告不抛错：小区域确实可能一个换流站都没有（产物文件是空的，不是不存在），
   //    而"文件不存在"说明补抓没跑过 —— 那种情况会在下面的直流判定统计里如实反映出来。
@@ -137,6 +152,35 @@ function loadDcTags(inDir, name) {
 
 const round6 = (n) => Math.round(n * 1e6) / 1e6;
 
+/**
+ * 阶段56-C：多边形环的**近似**面积（公顷）。
+ *
+ * ‼️ 这是近似值，不是精确面积，UI 上必须标"近似"：
+ *    · 鞋带公式在**经纬度**平面上算（不是投影平面，也不是球面）——小地块误差可忽略，
+ *      跨纬度的大地块会偏（本用途是电厂地块，量级合适）；
+ *    · 每度米数取赤道值 + 该环**平均纬度**的余弦修正，没有投影带的精确校正。
+ * ⚠️ 不做环方向（顺/逆时针）判定：取绝对值，内外环语义本脚本不表达
+ *    （way 只有外环，见 fetch_osm_power.py 的 `way_to_polygon`）。
+ */
+function ringAreaHa(ring) {
+  let a = 0;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    a += ring[j][0] * ring[i][1] - ring[i][0] * ring[j][1];
+  }
+  const meanLat = ring.reduce((s, p) => s + p[1], 0) / ring.length;
+  const mPerDegLat = 111132.0;
+  const mPerDegLon = 111320.0 * Math.cos((meanLat * Math.PI) / 180);
+  return (Math.abs(a / 2) * mPerDegLat * mPerDegLon) / 10000; // ⇒ 公顷
+}
+
+/** 只有面要素有面积；其余几何一律返回 undefined（不写进属性，避免空值进瓦片） */
+function areaHaOf(geometry) {
+  if (geometry.type === "Polygon" && geometry.coordinates[0]?.length >= 3) {
+    return round6(ringAreaHa(geometry.coordinates[0]));
+  }
+  return undefined;
+}
+
 /** 端点键：与 merge-lines 的 round6 一致（6 位小数），保证"同一点"是**精确**比较 */
 const coordKey = (lon, lat) => `${round6(lon).toFixed(6)},${round6(lat).toFixed(6)}`;
 
@@ -147,6 +191,12 @@ function coordsValid(geometry) {
   if (geometry.type === "LineString") return geometry.coordinates.length >= 2 && geometry.coordinates.every(check);
   if (geometry.type === "MultiLineString") return geometry.coordinates.length > 0 && geometry.coordinates.every((ls) => ls.length >= 2 && ls.every(check));
   if (geometry.type === "Polygon") return geometry.coordinates.length > 0 && geometry.coordinates.every((r) => r.length >= 3 && r.every(check));
+  // 阶段56-C：为将来的 multipolygon relation 留口（本阶段只产出 Polygon —— way 只有外环）。
+  if (geometry.type === "MultiPolygon")
+    return (
+      geometry.coordinates.length > 0 &&
+      geometry.coordinates.every((poly) => poly.length > 0 && poly.every((r) => r.length >= 3 && r.every(check)))
+    );
   return false;
 }
 
@@ -156,6 +206,8 @@ function roundCoords(geometry) {
   if (geometry.type === "LineString") return { type: "LineString", coordinates: geometry.coordinates.map(r) };
   if (geometry.type === "MultiLineString") return { type: "MultiLineString", coordinates: geometry.coordinates.map((ls) => ls.map(r)) };
   if (geometry.type === "Polygon") return { type: "Polygon", coordinates: geometry.coordinates.map((ring) => ring.map(r)) };
+  if (geometry.type === "MultiPolygon")
+    return { type: "MultiPolygon", coordinates: geometry.coordinates.map((poly) => poly.map((ring) => ring.map(r))) };
   return geometry;
 }
 
@@ -201,6 +253,12 @@ function main() {
       }
       const slim = { ftype };
       if (props.vclass != null) slim.vclass = props.vclass;
+      // 阶段56-C：面积只对**面**有意义，由本脚本现算（上游没有这个字段）。
+      // ‼️ 只在白名单真的要它时才写（`plant_area`），否则会给点要素也塞一个面积键。
+      if (keep.includes("area_ha")) {
+        const ha = areaHaOf(g);
+        if (ha !== undefined) slim.area_ha = ha;
+      }
       for (const k of keep) {
         if (k === "vclass") continue;
         const v = props[k];
