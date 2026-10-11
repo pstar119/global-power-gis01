@@ -12,7 +12,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Channel, invoke } from "@tauri-apps/api/core";
 
-import { emitPackInstalled } from "../lib/packEvents";
+import { emitPackInstalled, onPackInstalled } from "../lib/packEvents";
 import {
   effectiveBaseOf,
   effectiveBasesOf,
@@ -101,7 +101,12 @@ export function usePackDownloads(): PackDownloadsApi {
       if (!mountedRef.current) return;
       const next: Record<string, PackFileStatus> = {};
       for (const r of rows) next[r.file] = r;
-      setStatuses(next);
+      // ‼️ 只能合并进旧快照，不能整体替换。
+      //    下载成功与删除之后，调用方都只传一个文件名来调这个函数，
+      //    整体替换会把其余所有包的状态抹成 undefined —— installStateOf()
+      //    对 undefined 一律返回 "missing"，界面上刚装好的其它包全部显示
+      //    「未下载」，用户会当成没装上而重复下载（单包有 12–38 MB）。
+      setStatuses((prev) => ({ ...prev, ...next }));
       setBridgeOk(true);
       // 已存在的包不保留错误态
       setErrors((prev) => {
@@ -131,6 +136,21 @@ export function usePackDownloads(): PackDownloadsApi {
     return () => {
       cancelled = true;
     };
+  }, [refresh]);
+
+  /**
+   * 阶段57：同一运行里可能有**两个实例同时挂载** —— 首启向导（AppLayout）与
+   * 设置页的包管理各调一次本 hook，而三个页面只切 hidden 不卸载。
+   * 两个实例各持一份 statuses 快照，谁下载/删除了都必须让另一个重新探测，
+   * 否则那张表会在同一次运行里一直显示旧状态（向导里下完，设置页仍显示未下载）。
+   *
+   * ⚠️ 复用的是别人的安装事件，所以本实例自己发出的广播也会回到自己身上 ——
+   *    重复探测一次无害（pack_status 是幂等查询），换来的是零新增状态。
+   */
+  useEffect(() => {
+    return onPackInstalled((file) => {
+      void refresh([file]);
+    });
   }, [refresh]);
 
   /**
@@ -191,10 +211,14 @@ export function usePackDownloads(): PackDownloadsApi {
             onProgress: channel,
           });
           // 成功
+          // ‼️ 广播必须排在 mountedRef 检查之前。下载是长任务，用户很可能在下完的
+          //    那一瞬间切走页面（向导 → 设置页），原来这里直接 return 会跳过
+          //    emitPackInstalled —— 地图页订阅的正是这个事件，于是出现
+          //    「提示下载成功，地图上依然没有数据」。
+          emitPackInstalled(file);
           if (!mountedRef.current) return true;
           setPhases((p) => ({ ...p, [file]: "done" }));
           await refresh([file]);
-          emitPackInstalled(file);
           return true;
         } catch (err) {
           lastError = err;

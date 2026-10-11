@@ -2,15 +2,14 @@ import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 // @ts-expect-error type error without @types/node package
 import process from "node:process";
+// ‼️ 每个 node: 内建模块的 import 都必须**紧跟**自己的 `@ts-expect-error`，
+//    而且只能写成**单行 import**：注解只作用于紧接的下一行，而 TS 把
+//    「Cannot find name 'node:fs'」报在**多行 import 的最后一行**（`} from "node:fs"`）上——
+//    于是多行写法会让注解被判定为 unused（TS2578），而真正的错误反而没被压住。
+//    实测：`tsc -p tsconfig.node.json --noEmit` 在多行写法下报 2 条错，
+//    单行写法下 0 条（本项目没有装 @types/node，见下面第 3 条 `npm i -D @types/node` 的取舍）。
 // @ts-expect-error type error without @types/node package
-import {
-  readFileSync,
-  readdirSync,
-  statSync,
-  mkdirSync,
-  copyFileSync,
-  existsSync,
-} from "node:fs";
+import { readFileSync, readdirSync, statSync, mkdirSync, copyFileSync, existsSync } from "node:fs";
 // @ts-expect-error type error without @types/node package
 import { join, dirname } from "node:path";
 

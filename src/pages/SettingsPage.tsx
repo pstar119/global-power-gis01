@@ -219,7 +219,13 @@ function SettingsPage({
           与上面那几组静态占位选项不是一回事。 */}
       <PackManager />
 
-      <GreetSelfCheck />
+      {/* ‼️ `GreetSelfCheck` 是 Tauri 模板自带的 greet 演示（前端↔Rust 连通性），
+          只在 `vite dev` 下渲染 —— 在生产界面里它是一块与业务无关的脚手架。
+          `import.meta.env.DEV` 在 `vite build` 时会被静态替换成 false，
+          这一段连同组件本身都会从产物里被摇掉。
+          下面 `DbSelfCheck` 保留：数据库打不开是本应用的已知故障路径
+          （见 MapPage 的 DB_FAILED_NOTICE），用户需要一个能自查的地方。 */}
+      {import.meta.env.DEV && <GreetSelfCheck />}
 
       <DbSelfCheck />
 

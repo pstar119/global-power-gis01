@@ -14,8 +14,6 @@
  * 下载成功后必须广播 `emitPackInstalled` —— 地图页据此失效归档缓存并重挂图层。
  * 少了这一步的症状是「提示下载成功，但地图上依然没有数据」。
  */
-import { useMemo } from "react";
-
 import { usePackDownloads } from "../hooks/usePackDownloads";
 import { DEV_BASE_URL_OVERRIDE, mb } from "../lib/packs";
 import styles from "./PackManager.module.css";
@@ -47,13 +45,6 @@ function PackManager() {
     remove,
   } = usePackDownloads();
 
-  /**
-   * 每行的文件名。
-   * ⚠️ hook 已返回同序的 `files`，这里仍用 useMemo 包一层只为写法一致 ——
-   *    不要改成 `packs.map(...)` 内联，那会在每次渲染建新数组。
-   */
-  const fileList = useMemo(() => files, [files]);
-
   if (manifestErr) {
     return (
       <section className={styles.panel}>
@@ -79,7 +70,10 @@ function PackManager() {
 
       <ul className={styles.list}>
         {packs.map((pack, i) => {
-          const file = fileList[i];
+          // ‼️ 直接用 hook 返回的 `files`（与 `packs` 同序）。
+          //    这里原先还套了一层 `useMemo(() => files, [files])` —— 它只是把同一个
+          //    引用原样返回，既不稳定也不省任何计算，属于纯粹的噪音，已删。
+          const file = files[i];
           const st = statuses[file];
           const phase = phases[file] ?? "idle";
           const pr = progress[file];

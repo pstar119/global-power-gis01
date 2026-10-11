@@ -36,7 +36,13 @@ type Row = Record<string, unknown>;
  */
 export function csvCell(value: unknown): string {
   const s = value == null ? "" : String(value);
-  return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  // ⚠️ 公式注入（CWE-1236）：name / owner / url 这些字段来自 WRI、GEM、OSM 等外部数据集，
+  //    值可能以 = + - @ 开头，Excel / WPS 打开时会当公式执行（可外带 http 请求）。
+  //    前面加一个单引号是最省事的中和方式，Excel 会把它当纯文本。
+  //    ‼️ 只对字符串下手：负数是合法数值，带上引号会毁掉「可参与计算」这个约定。
+  const safe =
+    typeof value === "string" && /^[=+\-@\t\r]/.test(s) ? `'${s}` : s;
+  return /[",\r\n]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
 }
 
 /**

@@ -178,8 +178,11 @@ function WelcomeWizard({ api, onFinish }: WelcomeWizardProps) {
 
   const stopAll = () => {
     stoppedRef.current = true;
-    // 取消当前正在下的那个；排队中的会在循环里被 stoppedRef 拦下
-    for (const p of targets) {
+    // 取消当前正在下的那个；排队中的会在循环里被 stoppedRef 拦下。
+    // ‼️ 必须扫全部三个队列：start() 的顺序是 区域包 → 同区域底图包 → thematic(GEM)，
+    //    只扫 targets 时，如果此刻正在下底图包或 GEM，「取消全部」完全不起作用 ——
+    //    用户以为停了，实际还在跑完一个 12–38 MB 的包。
+    for (const p of [...targets, ...basemapTargets, ...thematicTargets]) {
       const f = fileNameOf(p);
       if (phases[f] === "downloading") void cancel(f);
     }

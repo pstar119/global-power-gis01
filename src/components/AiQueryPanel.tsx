@@ -1,4 +1,4 @@
-import { useEffect, useState, type RefObject } from "react";
+import { useEffect, useRef, useState, type RefObject } from "react";
 import { countryLabel } from "../lib/country";
 import { fuelLabel } from "../lib/fuel";
 import {
@@ -168,6 +168,16 @@ function AiQueryPanel({
   /** 开关开启、且当前 provider 所需的配置已填齐，才走大模型 */
   const aiReady = useAi && isConfigComplete(aiConfig);
 
+  /**
+   * 在途查询的序号。
+   *
+   * ‼️ 为什么不靠「按钮禁用」就够：示例按钮、表单提交、以及未来的任何新入口
+   *    都可能并发触发 run()。旧一轮 await 回来后会把新一轮的结果覆盖掉，
+   *    并且把**旧轮次**写进共享 history（下一轮追问就会基于错误上下文）。
+   *    每次 run 领一个递增序号，只有最后发出的那一轮允许落地。
+   */
+  const runSeqRef = useRef(0);
+
   const runTest = async () => {
     setTesting(true);
     setTestResult(null);
@@ -176,6 +186,7 @@ function AiQueryPanel({
   };
 
   const run = async (question: string) => {
+    const seq = ++runSeqRef.current;
     setInput(question);
 
     // ---- 阶段25：先把上一次的结果彻底清干净 ----
@@ -193,6 +204,9 @@ function AiQueryPanel({
       config: aiReady ? aiConfig : null,
       history,
     });
+    // 这一轮已被后发的一轮取代：结果、地图高亮与 history 全部丢弃。
+    // 少了这一条的症状是「先问的问题后出结果」，表格和地图指向上一问。
+    if (seq !== runSeqRef.current) return;
     setState(next);
     if (next.status === "done") {
       onQueryDone?.({
@@ -422,6 +436,7 @@ function AiQueryPanel({
             <button
               type="button"
               className={styles.exampleBtn}
+              disabled={state.status === "running"}
               onClick={() => void run(example)}
             >
               {example}

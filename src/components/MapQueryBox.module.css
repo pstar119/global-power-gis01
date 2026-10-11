@@ -148,7 +148,7 @@
 
 .input:focus {
   outline: none;
-  border-color: #4daafc;
+  border-color: var(--gpg-accent-text);
 }
 
 .btn {
@@ -203,7 +203,9 @@
 }
 
 .err {
-  color: #ffb4a2;
+  /* 阶段52：错误文字改用语义令牌（深色下由 #ffb4a2 归并为 --gpg-danger 的 #ff8a8a，
+     两者深色观感几乎一致，换来的是一档浅色可用值）。 */
+  color: var(--gpg-danger);
 }
 
 .table {

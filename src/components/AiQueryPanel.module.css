@@ -163,12 +163,12 @@
 .localNote {
   margin: 0 0 8px;
   padding: 8px 10px;
-  border-left: 3px solid #3fd0c9;
+  border-left: 3px solid var(--gpg-info);
   border-radius: 4px;
   background-color: rgba(63, 208, 201, 0.1);
   font-size: 12.5px;
   line-height: 1.6;
-  color: #8fe3dd;
+  color: var(--gpg-info-text);
 }
 
 .testResult {
@@ -177,18 +177,19 @@
   line-height: 1.6;
 }
 
+/* 阶段52：状态色改用语义令牌，浅色主题下有对应的压暗值 */
 .testResult[data-state="ok"] {
-  color: #5ee39b;
+  color: var(--gpg-ok);
 }
 
 .testResult[data-state="error"] {
-  color: #ff8a8a;
+  color: var(--gpg-danger);
 }
 
 /* 明文存储的安全提醒：按要求用红字，不能用灰色弱化 */
 .warn {
   margin: 0;
-  color: #ff8a8a;
+  color: var(--gpg-danger);
   font-size: 0.72rem;
   line-height: 1.6;
 }
@@ -360,11 +361,11 @@
 }
 
 .status[data-state="rejected"] {
-  color: #ffd24a;
+  color: var(--gpg-highlight);
 }
 
 .status[data-state="error"] {
-  color: #ff8a8a;
+  color: var(--gpg-danger);
 }
 
 /* 解析说明：让用户看到「这句话被理解成了什么」 */

@@ -37,6 +37,27 @@
   --gpg-link-hover: #4daafc; /* a:hover（原写死） */
   --gpg-shadow: rgba(0, 0, 0, 0.45); /* 浮层阴影 */
   --gpg-map-bg: #1a1a1a; /* 地图视窗兜底底色（原 .viewport 写死的值，深色下与改动前完全一致） */
+
+  /* 阶段52：语义状态色 —— 原先散落在各 CSS Modules 里写死十六进制，
+     浅色主题下要么对比度不足、要么与浅色底撞成一片。深色值 = 改动前的字面值。 */
+  /* 阶段52 / 阶段57 定稿：凡是**原本写 #4daafc** 的地方（文字、border、outline、
+     accent-color、小色块底）一律用 --gpg-accent-text —— 深色值与改动前逐字节一致，
+     浅色下换成 #0060a8（白底 6.9:1）。
+     --gpg-accent(#007acc) 只承担**原本就写 #007acc** 的焦点环 / 描边，两个主题同值。 */
+  --gpg-danger: #ff8a8a;          /* 错误 / 失败文字 */
+  --gpg-warn: #f59e0b;            /* 需要注意（版本过期等） */
+  --gpg-warn-muted: #d7ba7d;      /* 次要提醒（.part 未完成） */
+  --gpg-ok: #3fb950;              /* 完成 / 通过 */
+  --gpg-highlight: #ffd24a;       /* 提示 / 被拒绝（黄） */
+  --gpg-code-bg: #3c3c3c;         /* 行内代码底 */
+  --gpg-control-disabled-bg: #333336; /* 禁用控件底 */
+  --gpg-track-bg: rgba(255, 255, 255, 0.08); /* 进度条轨道（半透明白只能配深色底） */
+  --gpg-progress-fill: #094771;   /* 进度条填充 */
+  --gpg-accent-text: #4daafc;     /* 亮蓝：文字 / border / outline / accent-color（原写死的 #4daafc） */
+  --gpg-accent-soft: #7cc0ff;     /* 强调色浅一档 */
+  --gpg-accent-fg: #101418;       /* 铺在强调色底上的文字 */
+  --gpg-info: #3fd0c9;            /* 中性信息（本地 Ollama 提示） */
+  --gpg-info-text: #8fe3dd;
 }
 
 /*
@@ -44,6 +65,7 @@
  *
  * ‼️ 只覆盖**同名令牌**，不改任何选择器结构、不改任何布局 —— 所以 11 个
  *    CSS Modules 文件（共 265 处 `var(--gpg-*)`）**一行都不用改**。
+ *    阶段52 新增的语义状态色令牌同样是「只覆盖同名令牌」，选择器结构不变。
  *
  * ‼️ 注意 `color-scheme` 必须跟着切：它控制 WebView 的原生滚动条、输入框光标、
  *    自动填充背景。不切的话浅色主题里会拖着一堆深色原生控件，很刺眼。
@@ -70,6 +92,22 @@
   --gpg-link-hover: #005a9e;
   --gpg-shadow: rgba(0, 0, 0, 0.18);
   --gpg-map-bg: #f6f6f4; /* 与浅色底图背景层同色 */
+
+  /* 语义状态色：浅色底下要压暗才够对比（#ff8a8a 在白底只有 1.6:1，几乎看不见） */
+  --gpg-danger: #b3261e;
+  --gpg-warn: #8a5200;
+  --gpg-warn-muted: #6b5314;
+  --gpg-ok: #1a7f37;
+  --gpg-highlight: #8a5200;
+  --gpg-code-bg: #efefef;
+  --gpg-control-disabled-bg: #e6e6e6;
+  --gpg-track-bg: rgba(0, 0, 0, 0.08);
+  --gpg-progress-fill: #007acc;
+  --gpg-accent-text: #0060a8;     /* #4daafc 在白底仅 2.5:1 */
+  --gpg-accent-soft: #005a9e;
+  --gpg-accent-fg: #ffffff;
+  --gpg-info: #0b6b64;
+  --gpg-info-text: #0b6b64;
 }
 
 /* 布局基础：必须让 html / body / #root 撑满窗口，

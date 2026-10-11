@@ -90,10 +90,12 @@ export interface PacksManifest {
   release?: {
     baseUrl: string;
     /**
-     * 阶段48：**预留字段，当前只读不用**（用户拍板：降级逻辑先不做）。
+     * 阶段53 起**已接入代码**：`effectiveBasesOf()` 会把它排到镜像基址之后当兜底
+     * （即「镜像优先、直连兜底」的候选序列）。
      *
-     * 值是 GitHub 直连基址（不经镜像）。真正做自动降级时，
-     * 只需在镜像下载失败后用 `effectiveBaseOf()` 传入这个地址重试一次。
+     * ⚠️ 此前这里写的是「阶段48：预留字段，当前只读不用（降级逻辑先不做）」——
+     *    那句话已经过期，代码早就在读了，容易让后来者以为可以直接删掉这个字段。
+     *    值是 GitHub 直连基址（不经镜像）。
      */
     directBaseUrl?: string | null;
     note?: string;

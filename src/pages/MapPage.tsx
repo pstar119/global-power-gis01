@@ -926,6 +926,17 @@ const OSM_FALLBACK_NOTICE =
   "运行 node scripts/build_pmtiles.mjs 可切出长三角全量瓦片。";
 
 /**
+ * 数据库这一支失败时的提示。
+ *
+ * 库打不开（首次安装的库被截断、schema 漂移、IPC 异常）时三张表都查不出来，
+ * 电力图层会退化成空集合 —— 地图骨架与 OSM 电网瓦片仍然可用，
+ * 但必须让用户看见原因，不能只留一行 console。
+ */
+const DB_FAILED_NOTICE =
+  "数据库加载失败：电厂 / 变电站 / 线路图层暂不可用，OSM 电网瓦片不受影响。" +
+  "详见控制台；若为首次安装，可删除本应用的本地数据库后重启再试。";
+
+/**
  * 执行查询后的最低缩放级别。
  *
  * fitBounds 只能限制 maxZoom，**没有 minZoom**。而「全球前10大电厂」
@@ -1678,16 +1689,20 @@ function showOsmPointOrLine(
         at = geom.coordinates as [number, number];
       } else if (geom?.type === "Polygon" || geom?.type === "MultiPolygon") {
         /**
-         * 阶段56-C：面要素（`plant_area`）的锚点。
+         * 阶段56-C / 阶段57：面要素（`plant_area`）的锚点。
          *
-         * 🔴 这里**不能**像点那样直接把 `geometry.coordinates` 当经纬度用：
-         *    `queryRenderedFeatures` 返回的多边形坐标是**瓦片坐标**（0..extent），
-         *    不是 lng/lat。直接拿它当坐标会把弹窗挂到几内亚湾去（而且不报错）。
+         * 🔴 这里**不能**像点那样无条件把 `geometry.coordinates` 当经纬度用：
+         *    `queryRenderedFeatures` 返回的多边形坐标**不保证**是 lng/lat ——
+         *    GeoJSON 源给的是经纬度，而矢量切片（PMTiles）源给的是切片内坐标
+         *    （0..extent）。直接拿切片坐标当经纬度，弹窗会被挂到几内亚湾去，
+         *    而且**不会报错**。
          *
-         * ✅ 正确做法：瓦片坐标与屏幕坐标是**线性**关系，所以
-         *    「多边形中心相对于点击点」的**像素偏移**是可靠的 ——
-         *    把它加到 `e.lngLat` 上就得到多边形的经纬度锚点。
-         *    这样不需要 `map.unproject`，也不需要假设 extent 的具体数值。
+         * ✅ 所以按「坐标是否落在合法经纬度范围内」来判：是经纬度就用质心
+         *    （能把弹窗摆到面中心，而不是鼠标碰到的那个角）；否则退回点击点 ——
+         *    点击点必然落在这个面里，位置永远不会离谱。
+         *    （旧注释说「瓦片坐标与屏幕坐标是线性关系，所以像素偏移可靠」，
+         *      但切片坐标与 CSS 像素是**不同尺度**，两者相减没有意义，
+         *      因此那段换算已删除。）
          */
         const pts: Array<[number, number]> = [];
         const push = (c: unknown) => {
@@ -1699,17 +1714,19 @@ function showOsmPointOrLine(
         for (const poly of rings as unknown[]) {
           if (Array.isArray(poly)) for (const ring of poly) if (Array.isArray(ring)) for (const c of ring) push(c);
         }
-        if (pts.length) {
+        const isLngLat = pts.every(
+          (p) => Math.abs(p[0]) <= 180 && Math.abs(p[1]) <= 90,
+        );
+        if (pts.length && isLngLat) {
           let sx = 0;
           let sy = 0;
           for (const p of pts) {
             sx += p[0];
             sy += p[1];
           }
-          const dx = sx / pts.length - e.point.x;
-          const dy = sy / pts.length - e.point.y;
-          at = [e.lngLat.lng + dx, e.lngLat.lat - dy];
+          at = [sx / pts.length, sy / pts.length];
         } else {
+          // 切片坐标（或几何缺失）→ 用点击点，它一定在这个面里
           at = [e.lngLat.lng, e.lngLat.lat];
         }
       } else {
@@ -3917,6 +3934,13 @@ function MapPage({
   const appliedIdRef = useRef(-1);
   /** 早到的命令先存这里，等地图就绪后再消费 */
   const pendingCommandRef = useRef<MapCommand | null>(null);
+  /** 阶段57：指令执行的**轮次号**。
+      指令管线里有三处 await（开库、取 bbox、取高亮点），而调用方是
+      「fire-and-forget」。用户连点两条指令时，先发那条会在 await 回来后
+      继续 fitBounds / 高亮 / 写提示，把后发那条的结果盖掉 —— 表现为
+      「明明刚查了 A，地图却飞回上一条的 B」。
+      每次发起自增，await 回来发现轮次已变就整条放弃。 */
+  const commandSeqRef = useRef(0);
   /** 给用户看的执行结果提示 */
   const [mapNotice, setMapNotice] = useState<string | null>(null);
 
@@ -4188,6 +4212,14 @@ function MapPage({
   const popupRef = useRef<Popup | null>(null);
   /** 阶段39：activePacks 的 ref 镜像，供地图级 click 回调读到**最新**值 */
   const activePacksRef = useRef<readonly string[]>([]);
+  /** 阶段57：异步挂载的**代次号**（区域包 / GEM / 邻国底图各一份）。
+      挂载要等归档探测的 Promise，而这三个 effect 都会因 `packsAvailable` 变化重跑 ——
+      旧那轮的 `then` 回来后，可能把一个**已被替换掉**的旧归档重新挂到图上
+      （新包刚装好、旧句柄已作废），此时图上显示的是上一版数据。
+      每轮 effect 自增一次，`then` 里发现代次已变就整条放弃；新一轮会自己重新挂。 */
+  const packAttachSeqRef = useRef(0);
+  const gemAttachSeqRef = useRef(0);
+  const basemapAttachSeqRef = useRef(0);
 
   /**
    * 阶段31：发布「当前视野 + 已选图层」上下文，供 AI 解析「当前视野」类问题。
@@ -4271,7 +4303,7 @@ function MapPage({
    * ⚠️ 筛选值全部走 SQL 参数绑定（见 nlq.ts 的 buildBoundsSql / buildHighlightSql），
    *    不拼接任何用户输入。
    */
-  const applyCommand = async (cmd: MapCommand) => {
+  const applyCommand = async (cmd: MapCommand, seq: number) => {
     const map = mapRef.current;
     if (!map) return;
 
@@ -4339,6 +4371,8 @@ function MapPage({
 
     try {
       const db = await Database.load(DB_URL);
+      // 开库期间可能已经来了更新的指令，此轮作废（见 commandSeqRef 注释）
+      if (seq !== commandSeqRef.current) return;
 
       // 全球概览：飞回默认视图。全球不做单点高亮 —— 3.5 万个点毫无意义且会卡
       if (cmd.intent === "global_stats") {
@@ -4376,6 +4410,9 @@ function MapPage({
         boundsRows = (await db.select(boundsPlan.sql, boundsPlan.params)) as typeof boundsRows;
       }
 
+      // 取 bbox 期间可能已经来了更新的指令，此轮作废
+      if (seq !== commandSeqRef.current) return;
+
       const b = boundsRows[0];
       if (
         b &&
@@ -4412,6 +4449,10 @@ function MapPage({
         lon: number;
         capacity_mw: number | null;
       }>;
+
+      // 取明细点期间可能已经来了更新的指令，此轮作废 ——
+      // 不这么做就会用旧结果盖掉新指令刚画好的高亮
+      if (seq !== commandSeqRef.current) return;
 
       if (points.length > MAX_HIGHLIGHT_POINTS) {
         clearHighlight(map);
@@ -4451,7 +4492,9 @@ function MapPage({
 
     appliedIdRef.current = pending.id;
     pendingCommandRef.current = null;
-    void applyCommand(pending);
+    // 新轮次：上一条指令若还卡在 await 上，回来后会被这个序号挡掉
+    const seq = ++commandSeqRef.current;
+    void applyCommand(pending, seq);
   };
 
   // 地图实例的创建与销毁都在这个 effect 里。
@@ -4554,14 +4597,34 @@ function MapPage({
               grid,
               fallback: grid ? null : await loadOsmGridData(),
             })),
-            Database.load(DB_URL).then(() =>
-              Promise.all([
-                loadSubstationsGeoJson(),
-                loadLinesGeoJson(),
-                loadPlantsGeoJson(),
-              ]),
-            ),
-          ]).then(([{ grid, fallback }, [substationData, lineData, data]]) => {
+            // ‼️ 这一支必须自己兜住错误。整条 Promise.all 只要有一支 reject，
+            //    下面的 .then 就整体被跳过 —— 核心 OSM 电网图层、点击与光标
+            //    handler、mapReady 全都不执行，用户看到「底图在、什么都没有」，
+            //    界面上没有任何提示（只有一行 console）。
+            //    库损坏 / schema 漂移 / IPC 失败都属于可降级故障，
+            //    所以退化成空图层 + 一条可见提示，而不是拖垮整张地图。
+            Database.load(DB_URL)
+              .then(() =>
+                Promise.all([
+                  loadSubstationsGeoJson(),
+                  loadLinesGeoJson(),
+                  loadPlantsGeoJson(),
+                ]),
+              )
+              .catch((err: unknown) => {
+                console.error("[MapPage] 数据库加载失败，电力图层将为空", err);
+                setMapNotice(DB_FAILED_NOTICE);
+                return null;
+              }),
+          ]).then(([{ grid, fallback }, dbData]) => {
+            // dbData === null 表示数据库那一支失败了（见上面的 catch）。
+            // 用三个空集合继续把图层建起来，保住地图骨架、交互与 mapReady ——
+            // 空图层不会报错，addSource/addLayer 照常成功。
+            const [substationData, lineData, data] = dbData ?? [
+              { type: "FeatureCollection", features: [] } as FeatureCollection,
+              { type: "FeatureCollection", features: [] } as FeatureCollection,
+              { type: "FeatureCollection", features: [] } as FeatureCollection,
+            ];
             // 等异步查询期间组件可能已卸载，此时不能碰地图
             if (disposed || !mapRef.current) return;
 
@@ -4805,8 +4868,19 @@ function MapPage({
               };
 
               // 动画期间标记会与圆错位，干脆先清掉、移动结束后再重建
-              map.on("movestart", clearClusterLabels);
-              map.on("moveend", refreshClusterLabels);
+              // ⚠️ 阶段57：同时记一个「正在移动」标志。原来是 movestart 清空、
+              //    moveend 重建，但下面的 sourcedata 会在动画中反复触发、
+              //    把刚刚清掉的标记又全量重建一遍（一半时间都与聚合圆错位），
+              //    等于把 movestart 的清空策略抵消掉。动画期间一律不重建。
+              let clusterLabelsMoving = false;
+              map.on("movestart", () => {
+                clusterLabelsMoving = true;
+                clearClusterLabels();
+              });
+              map.on("moveend", () => {
+                clusterLabelsMoving = false;
+                refreshClusterLabels();
+              });
 
               // 把两个函数交给外部：图层开关需要能在不开图的情况下主动清空 / 重建数字
               labelApiRef.current = {
@@ -4818,6 +4892,9 @@ function MapPage({
               //    「聚合圆都画出来了，但数字一个都不显示」。所以要等 source
               //    真正加载完成后再刷新一次。
               map.on("sourcedata", (e) => {
+                // 移动中不重建（见上面 movestart 的说明）：此刻重建出来的
+                // 标记位置是移动前的，会在动画里和圆一起错位。
+                if (clusterLabelsMoving) return;
                 if (e.sourceId === PLANTS_SOURCE && e.isSourceLoaded) {
                   refreshClusterLabels();
                 }
@@ -4956,6 +5033,10 @@ function MapPage({
                 OSM_LINES_HIT_LAYER_ID,
                 OSM_PLANT_LAYER_ID,
                 OSM_SUBSTATION_LAYER_ID,
+                // 阶段57：这两个图层同样可点（见 showOsmPointOrLine 的图层清单），
+                // 之前漏登记，鼠标移上去没有手型提示 —— 用户不知道它们是能点的。
+                OSM_CONVERTER_LAYER_ID,
+                OSM_PLANT_AREA_LAYER_ID,
               ]) {
                 map.on("mouseenter", layerId, () => {
                   map.getCanvas().style.cursor = "pointer";
@@ -5017,6 +5098,10 @@ function MapPage({
       // `map.remove()` 会带着它们一起消失，而这张表不会自己清；
       // 不清的话，重挂载后主题切换会去给一批早已不存在的图层设 paint（静默失败）。
       basemapOverlayKeys.clear();
+      // 阶段57：区域包图层的光标处理器也登记在模块级 packCursorHandlers 里，
+      // 同样不会被 map.remove() 清掉 —— 不清的话重挂载后这张表还会为
+      // 已销毁的地图增删处理器（静默失败）。
+      packCursorHandlers.clear();
       mapRef.current?.remove();
       mapRef.current = null;
     };
@@ -5318,6 +5403,7 @@ function MapPage({
     const map = mapRef.current;
     if (!map || !mapReady || !packsManifest) return;
 
+    const attachSeq = ++packAttachSeqRef.current;
     const want = activePacks.filter((k) => packsAvailable.includes(k));
 
     for (const key of packsAvailable) {
@@ -5347,6 +5433,8 @@ function MapPage({
         const m = mapRef.current;
         if (!archive || !m) return;
         if (!activePacksRef.current.includes(key)) return; // 视野又变了，不挂了
+        // 这一轮已被后来的 effect 取代（例如同一个包刚被重下完毕），旧归档不能再挂
+        if (attachSeq !== packAttachSeqRef.current) return;
         addPackLayers(m, key, archive);
 
         // ‼️ 阶段40：把地名标签提回最顶。
@@ -5400,6 +5488,11 @@ function MapPage({
         console.info(
           `[MapPage] 加载区域包 ${key}（${entry.label}${entry.features ? `，${entry.features} 个要素` : ""}）`,
         );
+      }).catch((err: unknown) => {
+        // 阶段57：探测/挂载失败不能再走「无人接管的 Promise」——
+        // 之前这里没有 catch，失败只会在控制台留一条 unhandled rejection，
+        // 而用户看到的是「区域包一直没出来」，没有任何线索。
+        console.warn(`[MapPage] 挂载区域包 ${key} 失败`, err);
       });
     }
   }, [activePacks, mapReady, packsManifest, packsAvailable]);
@@ -5436,6 +5529,7 @@ function MapPage({
     const map = mapRef.current;
     if (!map || !mapReady || !packsManifest) return;
 
+    const attachSeq = ++gemAttachSeqRef.current;
     const entry = packsManifest.packs.find(isThematicOverlay);
     if (!entry) {
       // 清单里根本没有 thematic overlay（或清单被换掉）→ 确保不残留
@@ -5466,10 +5560,14 @@ function MapPage({
       const m = mapRef.current;
       if (!archive || !m) return;
       if (!gemWantedRef.current) return; // 这期间开关被关了，不挂了
+      if (attachSeq !== gemAttachSeqRef.current) return; // 已被更新的 effect 取代
       addGemPlantLayers(m, entry.key, archive, popupRef.current);
       // 与区域包同理：`addLayer` 会把新图层**追加到样式最顶**，
       // 得把地名标签提回来，否则 GEM 的点会盖住地名。
       if (m.getLayer(BASEMAP_LABEL_LAYER_ID)) m.moveLayer(BASEMAP_LABEL_LAYER_ID);
+    }).catch((err: unknown) => {
+      // 阶段57：补兜底，理由同区域包（这里原先也是无人接管的 Promise）
+      console.warn("[MapPage] 挂载 GEM 数据包失败", err);
     });
   }, [mapReady, packsManifest, packsAvailable, visibleLayers]);
 
@@ -5506,6 +5604,7 @@ function MapPage({
     const map = mapRef.current;
     if (!map || !mapReady || !packsManifest) return;
 
+    const attachSeq = ++basemapAttachSeqRef.current;
     // 选中的区域包里，第一个「有底图包且已安装」的那个邻国区域
     const wanted = activePacks.find((regionKey) =>
       packsManifest.packs.some(
@@ -5537,12 +5636,16 @@ function MapPage({
       if (!archive || !m) return;
       // 这期间视野又移走了（或底图包被删了），不挂了
       if (basemapWantedRef.current !== wanted) return;
+      if (attachSeq !== basemapAttachSeqRef.current) return; // 已被更新的 effect 取代
       if (m.getSource(basemapOverlaySourceId(wanted))) return;
       addBasemapOverlayLayers(m, wanted, archive, entry.bbox);
       // 叠加层是按锚点插位的（不靠「最后加的在最顶」），所以不需要像区域包那样
       // 补 `moveLayer(BASEMAP_LABEL_LAYER_ID)`；但主题色此刻必须补一次 ——
       // 样式是在建图时按当时的主题构建的，而叠加层可能是在用户切换主题之后才挂上的。
       applyBasemapPaint(m, readTheme(), basemapOverlayKeys);
+    }).catch((err: unknown) => {
+      // 阶段57：补兜底，理由同区域包（这里原先也是无人接管的 Promise）
+      console.warn("[MapPage] 挂载邻国底图包失败", err);
     });
   }, [mapReady, packsManifest, packsAvailable, activePacks]);
 

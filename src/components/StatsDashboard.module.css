@@ -89,7 +89,7 @@
   border: 1px solid rgba(77, 170, 252, 0.4);
   border-radius: 3px;
   background-color: rgba(77, 170, 252, 0.1);
-  color: #4daafc;
+  color: var(--gpg-accent-text);
   font-size: 0.6rem;
   letter-spacing: 0;
   white-space: nowrap;
@@ -119,7 +119,7 @@
 /* ⚠️ <dd> 浏览器默认 margin-inline-start: 40px，不重置会整体右移 */
 .totalValue {
   margin: 0;
-  color: #4daafc;
+  color: var(--gpg-accent-text);
   font-size: 0.92rem;
   font-weight: 600;
   /* 等宽数字：数值刷新时不会左右抖 */
@@ -245,7 +245,7 @@
 .dot {
   justify-self: center;
   border-radius: 50%;
-  background-color: #4daafc;
+  background-color: var(--gpg-accent-text);
 }
 
 .dot[data-size="xl"] {
@@ -280,7 +280,7 @@
 .protoNote {
   margin: 0;
   padding: 0.3rem 0.4rem;
-  border-left: 2px solid #4daafc;
+  border-left: 2px solid var(--gpg-accent-text);
   background-color: rgba(77, 170, 252, 0.08);
   color: var(--gpg-muted);
   font-size: 0.65rem;

@@ -160,7 +160,8 @@
 }
 
 .stateHint[data-state="error"] {
-  color: #ff8a8a;
+  /* 阶段52：#ff8a8a 铺在白底上几乎看不见，改用语义错误色 */
+  color: var(--gpg-danger);
 }
 
 /* ---------- 窄窗口降级（Tauri 窗口可自由缩放） ----------

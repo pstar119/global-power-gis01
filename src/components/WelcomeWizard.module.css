@@ -2,7 +2,8 @@
    阶段48：首次启动「欢迎向导」
 
    视觉语言沿用应用现有面板：同一套 `--gpg-*` 变量、同样的圆角/边框，
-   强调色用地图侧一直在用的 #4daafc。不引入任何 UI 库。
+   强调色用地图侧一直在用的 #4daafc（阶段52 起统一走 --gpg-accent* 令牌，
+   浅色主题下会自动压暗，不再写死）。不引入任何 UI 库。
    ========================================================== */
 
 .overlay {
@@ -27,7 +28,8 @@
   max-height: 82vh;
   border: 1px solid var(--gpg-border);
   border-radius: 8px;
-  background-color: #252526;
+  /* 阶段52：向导卡片底改用侧边栏令牌，浅色主题下不再是深色卡片 */
+  background-color: var(--gpg-sidebar-bg);
   box-shadow: 0 18px 48px rgba(0, 0, 0, 0.6);
   color: var(--gpg-text);
   font-size: 0.8rem;
@@ -107,12 +109,12 @@
 }
 
 .stepOn {
-  color: #4daafc;
+  color: var(--gpg-accent-text);
   font-weight: 600;
 }
 
 .stepDone {
-  color: #5ee39b;
+  color: var(--gpg-ok);
 }
 
 .stepOff {
@@ -150,7 +152,7 @@
   flex: 0 0 auto;
   width: 14px;
   height: 14px;
-  accent-color: #4daafc;
+  accent-color: var(--gpg-accent-text);
 }
 
 .name {
@@ -184,7 +186,7 @@
 
 .stateText {
   flex: 0 0 auto;
-  color: #4daafc;
+  color: var(--gpg-accent-text);
   font-size: 0.72rem;
   font-variant-numeric: tabular-nums;
 }
@@ -197,12 +199,13 @@
   height: 16px;
   overflow: hidden;
   border-radius: 3px;
-  background-color: rgba(255, 255, 255, 0.08);
+  /* 阶段52：半透明白轨道只在深色底成立，浅色主题换成半透明黑 */
+  background-color: var(--gpg-track-bg);
 }
 
 .barInner {
   height: 100%;
-  background-color: #094771;
+  background-color: var(--gpg-progress-fill);
   transition: width 0.2s ease;
 }
 
@@ -220,14 +223,15 @@
 
 .err {
   margin: 0.3rem 0 0;
-  color: #ff8a8a;
+  /* 阶段52：#ff8a8a 在白底只有 1.6:1，改用语义错误色 */
+  color: var(--gpg-danger);
   font-size: 0.7rem;
 }
 
 .warn {
   margin: 0;
   padding: 0.5rem 1.125rem;
-  color: #ffd24a;
+  color: var(--gpg-highlight);
   font-size: 0.72rem;
 }
 
@@ -240,7 +244,7 @@
 
 .doneTitle {
   margin: 0 0 0.375rem;
-  color: #5ee39b;
+  color: var(--gpg-ok);
   font-size: 0.95rem;
   font-weight: 600;
 }
@@ -283,17 +287,18 @@
 }
 
 .primaryBtn {
-  border: 1px solid #4daafc;
-  background-color: #4daafc;
+  border: 1px solid var(--gpg-accent-text);
+  background-color: var(--gpg-accent-text);
   box-shadow: none;
-  color: #101418;
+  /* 铺在强调色底上的文字：深色主题是深字，浅色主题反过来用白字 */
+  color: var(--gpg-accent-fg);
   font-weight: 600;
 }
 
 .primaryBtn:hover,
 .primaryBtn:active {
-  border-color: #7cc0ff;
-  background-color: #7cc0ff;
+  border-color: var(--gpg-accent-soft);
+  background-color: var(--gpg-accent-soft);
   box-shadow: none;
 }
 
@@ -324,7 +329,7 @@
   border: none;
   background: none;
   box-shadow: none;
-  color: #4daafc;
+  color: var(--gpg-accent-text);
   font: inherit;
   font-size: 0.7rem;
   text-decoration: underline;

@@ -34,7 +34,7 @@
   padding: 0.45rem 0.9rem;
   border: 1px solid var(--gpg-border);
   border-radius: 6px;
-  background-color: #3c3c3c;
+  background-color: var(--gpg-control-bg);
   color: var(--gpg-text);
   font: inherit;
   font-size: 0.85rem;
@@ -47,12 +47,12 @@
 .button:hover,
 .button:active {
   border-color: var(--gpg-accent);
-  background-color: #4a4a4d;
+  background-color: var(--gpg-control-active-bg);
 }
 
 .button:disabled {
   border-color: var(--gpg-border);
-  background-color: #333336;
+  background-color: var(--gpg-control-disabled-bg);
   color: var(--gpg-muted);
   cursor: progress;
 }
@@ -64,15 +64,15 @@
   line-height: 1.5;
 }
 
-/* 深色主题下自检结果的三种状态色 */
+/* 自检结果的三种状态色（阶段52：改用语义令牌，浅色主题下有压暗值） */
 .result[data-state="idle"] {
   color: var(--gpg-muted);
 }
 
 .result[data-state="ok"] {
-  color: #6fcf72;
+  color: var(--gpg-ok);
 }
 
 .result[data-state="error"] {
-  color: #f0a35e;
+  color: var(--gpg-warn);
 }

@@ -278,14 +278,32 @@ export const EXAMPLES: readonly string[] = [
  */
 export const DEFAULT_PLANT_LIMIT = 10;
 
-/** 长别名优先，避免短词先命中导致语义跑偏 */
+/**
+ * 长别名优先，避免短词先命中导致语义跑偏。
+ *
+ * ‼️ 拉丁别名必须**整词**匹配。国家表会把 ISO3 码反向生成小写别名
+ *    （chn/usa/ind/...），只用 includes() 时任何含这三个字母的英文词都会命中：
+ *    "wind power plants" → IND、"how many are there" → ARE、
+ *    "what can you do" → CAN、"north america" → NOR。
+ *    后果不是报错而是**自信的错答案**：静默加上 country = ? 后返回某国统计。
+ *    中文别名没有词边界可言，仍走子串匹配。
+ */
 function matchAlias(
   text: string,
   aliases: ReadonlyArray<readonly [string, string]>,
 ): string | undefined {
   const sorted = [...aliases].sort((a, b) => b[0].length - a[0].length);
   for (const [alias, value] of sorted) {
-    if (text.includes(alias.toLowerCase())) return value;
+    const needle = alias.toLowerCase();
+    if (!/[a-z]/.test(needle)) {
+      if (text.includes(needle)) return value;
+      continue;
+    }
+    // 前后都不许再有字母/数字：既是「整词」，也顺带挡住 chn1 这类伪码
+    const re = new RegExp(
+      `(?<![a-z0-9])${needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![a-z0-9])`,
+    );
+    if (re.test(text)) return value;
   }
   return undefined;
 }

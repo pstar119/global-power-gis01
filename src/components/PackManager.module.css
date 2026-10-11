@@ -1,6 +1,7 @@
 /* ==========================================================
    阶段44：数据包管理面板
-   颜色全部取自 App.css 的 --gpg-* 深色令牌，与设置页其余卡片一致。
+   颜色全部取自 App.css 的 --gpg-* 令牌，与设置页其余卡片一致。
+   阶段52：状态徽标/错误文字也改成语义令牌，浅色主题下自动压暗。
    ========================================================== */
 
 .panel {
@@ -32,7 +33,7 @@
 .code {
   padding: 0 4px;
   border-radius: 3px;
-  background-color: #3c3c3c;
+  background-color: var(--gpg-code-bg);
   color: var(--gpg-text);
   font-size: 0.72rem;
   word-break: break-all;
@@ -40,7 +41,7 @@
 
 .error {
   margin: 0;
-  color: #f48771;
+  color: var(--gpg-danger);
   font-size: 0.75rem;
   line-height: 1.5;
 }
@@ -127,21 +128,21 @@
 }
 
 .badgeDone {
-  border-color: #3fb950;
-  color: #3fb950;
+  border-color: var(--gpg-ok);
+  color: var(--gpg-ok);
 }
 
 .badgePart {
-  border-color: #d7ba7d;
-  color: #d7ba7d;
+  border-color: var(--gpg-warn-muted);
+  color: var(--gpg-warn-muted);
 }
 
 /* 阶段56-A3（设计 §5.4）：已安装但指纹与清单不符 —— 是上一版的数据。
    与 badgePart（.part 未完成）用同一档"需要注意"的暖色，但**语义不同**：
    那个是"没下完"，这个是"下过了、但下的是旧版"。 */
 .badgeOutdated {
-  border-color: #f59e0b;
-  color: #f59e0b;
+  border-color: var(--gpg-warn);
+  color: var(--gpg-warn);
   font-weight: 600;
 }
 
@@ -152,7 +153,7 @@
   padding: 3px 10px;
   border: 1px solid var(--gpg-border);
   border-radius: 4px;
-  background-color: #3c3c3c;
+  background-color: var(--gpg-control-bg);
   color: var(--gpg-text);
   font: inherit;
   font-size: 0.75rem;
@@ -170,11 +171,11 @@
 }
 
 .btnDanger {
-  color: #f48771;
+  color: var(--gpg-danger);
 }
 
 .btnDanger:hover {
-  border-color: #f48771;
+  border-color: var(--gpg-danger);
   background-color: var(--gpg-hover);
 }
 
@@ -186,7 +187,7 @@
   overflow: hidden;
   border: 1px solid var(--gpg-border);
   border-radius: 8px;
-  background-color: #3c3c3c;
+  background-color: var(--gpg-control-bg);
 }
 
 .barInner {
