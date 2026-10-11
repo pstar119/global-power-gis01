@@ -20,7 +20,7 @@ rustflags = [
   # 兜底：其余出现在用户目录下的路径
   "--remap-path-prefix",
   "C:\\Users\\Administrator=~",
-  # 本项目源码路径
+  # 本项目源码路径（2026-10-11：项目已从 D:\Projects 迁到 J:\Projects，旧前缀会在产物里留下真实路径）
   "--remap-path-prefix",
-  "D:\\Projects\\global-power-gis=/app",
+  "J:\\Projects\\global-power-gis=/app",
 ]
