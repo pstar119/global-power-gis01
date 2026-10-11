@@ -75,3 +75,67 @@ Get-CimInstance Win32_Process -Filter "Name='node.exe'" |
 标签是 DSH 沙箱按设计常驻的——它的文档写明「工作区 ACE、拒绝项与标签按设计常驻（复用缓存，
 绝不撤销）」，且**手工 `icacls` 清理会以 `ERROR_NONE_MAPPED`（1332）失败**，所以不要试图去掉它；
 要么用 DSH 自己的回收路径，要么就按上面的导出流程走。
+
+## 环境速查与省时节奏（别再每次重新试错）
+
+### 一条命令的入口：`scripts/dev/*.mjs`（不要裸用 `npm` / PowerShell）
+
+```powershell
+& 'D:\Node,js\node.exe' scripts/dev/verify.mjs         # 快路径：类型检查 ×2 + 单元测试（约 3 秒）
+& 'D:\Node,js\node.exe' scripts/dev/verify.mjs --rust  # 再加上 cargo check / clippy -D warnings / test（分钟级）
+& 'D:\Node,js\node.exe' scripts/dev/test.mjs           # 只跑 scripts/**/*.test.mjs
+& 'D:\Node,js\node.exe' scripts/dev/package.mjs        # 打包（tauri build）并自动导出到项目树外
+```
+
+也可以用 npm 脚本：`npm run verify` / `npm run verify:rust` / `npm run test` / `npm run package`。
+
+### 工具链绝对路径（都不在 PATH 该在的位置）
+
+| 工具 | 路径 / 用法 |
+| --- | --- |
+| node / npm | `D:\Node,js\node.exe` / `D:\Node,js\npm.cmd` |
+| cargo | `%USERPROFILE%\.cargo\bin\cargo.exe`（**不在 PATH**） |
+| git | `D:\Git\cmd\git.exe`，对本仓库必须加 `-c safe.directory=J:/Projects/global-power-gis` |
+| python | `D:\pyrhon3.12\python.exe`（没有 `sqlite3` 命令） |
+
+### 为什么不能直接 `npm run tauri build`（node 垫片）
+
+DSH Harness 启动时把 `%APPDATA%\dsh-desktop\harness\.desktop-bin`（内含 `node.cmd` / `pnpm.cmd`，
+指向 `F:\DSH Desktop\DSH Desktop.exe`）**动态前置**到进程 PATH 的第一项，实测顺序是
+`[垫片, F:\DSH Desktop] + Machine PATH + USER PATH`。于是 `node_modules/.bin/tauri.cmd` 解析到的
+`node` 是 Electron 主程序，报错：
+
+```text
+error: unrecognized subcommand 'F:\DSH Desktop\DSH Desktop.exe'
+```
+
+- 临时解法：`$env:PATH = 'D:\Node,js;' + $env:PATH`，再 `& 'D:\Node,js\npm.cmd' run tauri build`。
+- **改 Machine / USER PATH 没用**（垫片是运行时前置的）——`scripts/dev/env.mjs` 的 `childEnv()`
+  在 spawn 之前把真 node 目录放到**子进程** PATH 第一位，这才是正解。
+
+### PowerShell 5.1 的坑（能少用就少用）
+
+- **不要写裸的 `--- 标题 ---` 当分隔行**：会被当命令解析，ParserError 让**整段脚本一行都不执行**。
+- 读退出码不要走管道：`cmd | Select-Object -Last 5` 之后 `$LASTEXITCODE` 已经不是 cmd 的了；
+  要么重定向到文件再读，要么用 `scripts/dev/*.mjs`（node 里拿得到真实退出码）。
+- `.ps1` 被执行策略拦：用 `iex (Get-Content -Raw '<path>')` 绕；`-Raw` 默认按 ANSI 解码，中文要 `-Encoding UTF8`。
+- 控制台按 GBK 解码 node 的 UTF-8 输出 ⇒ 中文乱码。**`scripts/dev/*.mjs` 的控制台标签一律 ASCII**，
+  就是为了这个。
+
+### 时间预算（实测）
+
+| 动作 | 实测耗时 | 什么时候做 |
+| --- | --- | --- |
+| `scripts/dev/verify.mjs`（快路径） | ~3 秒 | 每次改完代码 |
+| `cargo check` / `clippy` | 数秒~1 分钟 | 改 Rust 时 |
+| `cargo build --release`（纯重新链接） | 分钟级 | **只在要出包时** |
+| `npm run tauri build`（前端 + Rust + NSIS） | 约 3~5 分钟 | 出安装包时，一次跑完 |
+
+⇒ 节奏固定为「改代码 → `verify.mjs` → 攒够一批 → `package.mjs` 一次出包」，不要改一行打一次包。
+
+### 加依赖前先读要求（血泪）
+
+`cargo add tauri-plugin-single-instance` 看似无害，但它最新版清单写着 `tauri = "2.12"`，
+一解析就把整个 tauri 栈从 2.11.5 顶到 2.12.3（Cargo.lock 87 行 version 变动，连 wry 一起换）。
+**规矩**：先看目标 crate 的 `[dependencies.<核心库>] version`，再用 `=x.y.z` 精确锁；上例最终锁成
+`tauri-plugin-single-instance = "=2.4.0"`，Cargo.lock 只多 16 行。
