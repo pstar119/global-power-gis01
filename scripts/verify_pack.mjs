@@ -141,6 +141,16 @@ async function main() {
   let decodeFailed = 0;
   let decodeErrMsg = null;
   /**
+   * ‼️ 读取瓦片时**抛异常**的次数。
+   *
+   * 与 decodeFailed 的区别：这里失败在更前面（PMTiles 目录/字节流层面），
+   * 原先也是 `catch { continue; }` 静默跳过 ⇒ 归档读不动时脚本照样「全部通过」。
+   * ⚠️ 只统计**抛异常**：`getZxy` 返回空是正常的（稀疏数据在 header 包围盒里大量空瓦片），
+   *    把空瓦片也算失败会让这条断言恒红、等于没有断言。
+   */
+  let tileReadFailed = 0;
+  let tileReadErrMsg = null;
+  /**
    * ‼️ 阶段43：空属性值计数器。
    *
    * 背景：vt-pbf 遇到 `undefined` 属性值时，会走 JSON.stringify(undefined) -> undefined
@@ -177,14 +187,28 @@ async function main() {
     let maxTileBytes = 0;
     let maxAt = "-";
     const hist = {};
+    /**
+     * ‼️ 阶段56-C 修：属性键与要素数改按 **zoom 分桶**。
+     *
+     * 原先只有一个跨所有 zoom 累加的 keysByType：低级别瓦片里 ftype 被收敛成
+     * `{ftype,vclass}`，高级别才有的面层键很容易被**别的级别/别的要素**凑出来 ⇒
+     * 「z>=8 有 plant_area」这条验收断言在 z>=8 一个面要素都没有时也可能通过。
+     * 断言必须只看它自己声称的那些级别。
+     */
+    const zoomKeys = Object.fromEntries(Object.keys(keysByType).map((t) => [t, new Set()]));
+    const zoomCounts = Object.fromEntries(Object.keys(keysByType).map((t) => [t, 0]));
     for (let x = xFrom; x <= xTo; x++) {
       for (let y = yFrom; y <= yTo; y++) {
         let r;
         try {
           r = await pm.getZxy(z, x, y);
-        } catch {
+        } catch (e) {
+          // ‼️ 不允许静默跳过（与上面解码失败同一条纪律）
+          tileReadFailed++;
+          if (!tileReadErrMsg) tileReadErrMsg = e && e.message ? e.message : String(e);
           continue;
         }
+        // 空瓦片是稀疏数据的正常形态，不计失败（见 tileReadFailed 的说明）
         if (!r) continue;
         tiles++;
         const bytes = r.data.byteLength ?? r.data.length;
@@ -216,7 +240,11 @@ async function main() {
           const k = p.vclass ?? "?";
           hist[k] = (hist[k] ?? 0) + 1;
           const t = p.ftype;
-          if (keysByType[t]) for (const key of Object.keys(p)) keysByType[t].add(key);
+          if (keysByType[t]) {
+            for (const key of Object.keys(p)) keysByType[t].add(key);
+            for (const key of Object.keys(p)) zoomKeys[t].add(key);
+            zoomCounts[t]++;
+          }
           if (z < LOWZOOM_CAP_FROM && t === "line") {
             lowZoomLineFeats++;
             if ("is_dc" in p) lowZoomLineWithIsDc++;
@@ -232,7 +260,7 @@ async function main() {
         }
       }
     }
-    results.push({ z, tiles, feats, maxTileFeats, maxTileBytes, maxAt, hist });
+    results.push({ z, tiles, feats, maxTileFeats, maxTileBytes, maxAt, hist, zoomKeys, zoomCounts });
     const span = `${xFrom}..${xTo} x ${yFrom}..${yTo}`;
     const dist = VCLASS_ORDER.filter((k) => hist[k]).map((k) => `${k}=${hist[k]}`).join(" ");
     console.log(
@@ -323,6 +351,13 @@ async function main() {
     通过: decodeFailed === 0,
   });
 
+  // ①b 阶段56-C：读瓦片失败同样必须响亮失败（原先 catch 里静默 continue）
+  checks.push({
+    断言: "抽样范围内的瓦片都能被读取（读取异常不允许静默跳过）",
+    实测: `${tileReadFailed} 张读取失败${tileReadErrMsg ? `；首个错误：${tileReadErrMsg}` : ""}`,
+    通过: tileReadFailed === 0,
+  });
+
   // ③ 阶段43：属性值里不能有空值。
   //    这条专为捕获「vt-pbf 写出空值消息、MapLibre 整片放弃解析」这一类问题 ——
   //    它与解码失败不同：宽松解码器（如本脚本用的那个）不会报错，
@@ -385,18 +420,37 @@ async function main() {
      *    （`size === 0 ⇒ continue`），而面层整层缺失的表现恰好就是 size===0 ⇒
      *    会被当成"没抽样到"静默放过。所以这里反过来把 size===0 判成失败。
      */
+    // ‼️ 只看 z>=8 自己的桶：跨 zoom 累加的集合会被低级别要素凑出来，
+    //    那正是「面层没进归档也照样通过」的成因（见 zoomKeys 的注释）。
+    const deepAreaFeats = results
+      .filter((r) => r.z >= LOWZOOM_CAP_FROM)
+      .reduce((n, r) => n + (r.zoomCounts?.plant_area ?? 0), 0);
+    /**
+     * 下面两条「z>=8 保留了专属属性」的断言也必须用它自己级别的桶 ——
+     * 用跨 zoom 的 keysByType 时，低级别要素一旦带上同名键就会把缺失掩盖掉。
+     */
+    const deepKeys = Object.fromEntries(
+      Object.keys(keysByType).map((t) => {
+        const s = new Set();
+        for (const r of results) {
+          if (r.z < LOWZOOM_CAP_FROM) continue;
+          for (const k of r.zoomKeys?.[t] ?? []) s.add(k);
+        }
+        return [t, s];
+      }),
+    );
     checks.push({
       断言: "z>=8 的瓦片里存在 plant_area 图层且要素数 > 0（阶段56-C 的面数据确实进了归档）",
       实测:
-        keysByType.plant_area.size > 0
-          ? `面层属性键 ${[...keysByType.plant_area].join(",")}`
-          : "抽样瓦片里一个面要素都没有",
-      通过: keysByType.plant_area.size > 0,
+        deepAreaFeats > 0
+          ? `z>=${LOWZOOM_CAP_FROM} 面要素 ${deepAreaFeats} 个，属性键 ${[...deepKeys.plant_area].join(",")}`
+          : `z>=${LOWZOOM_CAP_FROM} 的抽样瓦片里一个面要素都没有（低级别统计不作数）`,
+      通过: deepAreaFeats > 0,
     });
 
     const missing = [];
     for (const [ftype, keys] of Object.entries(expectProp)) {
-      const seen = keysByType[ftype];
+      const seen = deepKeys[ftype];
       if (seen.size === 0) continue; // 该 ftype 没抽样到，不做判断，避免误报
       for (const key of keys) if (!seen.has(key)) missing.push(`${ftype}.${key}`);
     }
@@ -404,9 +458,9 @@ async function main() {
       断言: "z>=8 的瓦片保留了各 ftype 的专属属性（line_kind / substation_kind / plant_source）",
       实测: Object.entries(expectProp)
         .map(([t, ks]) =>
-          keysByType[t].size === 0
+          deepKeys[t].size === 0
             ? `${t}:未抽样到`
-            : `${t}:${ks.map((k) => (keysByType[t].has(k) ? `有${k}` : `缺${k}`)).join("/")}`,
+            : `${t}:${ks.map((k) => (deepKeys[t].has(k) ? `有${k}` : `缺${k}`)).join("/")}`,
         )
         .join("  "),
       通过: missing.length === 0,
@@ -414,7 +468,7 @@ async function main() {
 
     const expandMiss = [];
     for (const [ftype, keys] of Object.entries(expandProp)) {
-      const seen = keysByType[ftype];
+      const seen = deepKeys[ftype];
       if (seen.size === 0) continue;
       const hit = keys.filter((k) => seen.has(k));
       if (hit.length === 0) expandMiss.push(`${ftype}.(${keys.join("|")})`);
@@ -423,7 +477,7 @@ async function main() {
       断言: "z>=8 的瓦片至少命中一个扩容属性（阶段56-A1 的属性扩容确实进了归档）",
       实测: Object.entries(expandProp)
         .map(([t, keys]) => {
-          const seen = keysByType[t];
+          const seen = deepKeys[t];
           if (seen.size === 0) return `${t}:未抽样到`;
           const hit = keys.filter((k) => seen.has(k));
           return `${t}:${hit.length ? `命中 ${hit.join(",")}` : "一个都没命中"}`;

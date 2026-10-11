@@ -848,7 +848,19 @@ async function main() {
     `回读 header : z${v.header.minZoom}-${v.header.maxZoom}，tileType=${v.header.tileType}，` +
       `tileCompression=${v.header.tileCompression}，addressed=${v.header.numAddressedTiles.toLocaleString()}`,
   );
-  if (v.missing) console.log(`  ⚠️ 有 ${v.missing} 张抽样瓦片回读不到`);
+  /**
+   * 🔴 阶段56-C 修：回读缺陷必须**累计成一个失败判据**。
+   *
+   *    原先取不到抽样瓦片只 `console.log` 一句警告，紧跟其后仍打印
+   *    「✅ 完成：… 回读校验通过。」且退出码 0 ⇒ 归档出现结构性损坏时，
+   *    门禁给出的是一个绿灯。回读不通过就该非 0 退出、且不得出现「通过」字样。
+   */
+  let readbackDefects = v.missing ?? 0;
+  if (v.missing) console.error(`  ⚠️ 有 ${v.missing} 张抽样瓦片回读不到`);
+  if (sampleIds.length === 0) {
+    readbackDefects++;
+    console.error("  ⚠️ 一张抽样瓦片都没取到 —— 回读校验实际什么都没检查");
+  }
 
   // 再用 @mapbox/vector-tile 真正解码，确认真是合法 MVT（vt-pbf 自带的依赖，不额外安装）
   const { VectorTile } = await import("@mapbox/vector-tile");
@@ -870,7 +882,12 @@ async function main() {
   for (const id of sampleIds) {
     const [z, x, y] = tileIdToZxy(id);
     const r = await pm.getZxy(z, x, y);
-    if (!r) continue;
+    if (!r) {
+      // ‼️ 不许静默 continue：这正是「包坏了但校验说通过」的来源
+      readbackDefects++;
+      console.error(`  ❌ 抽样瓦片 z${z}/${x}/${y} 回读不到（verifyArchive 也报过？missing=${v.missing}）`);
+      continue;
+    }
     const vt = new VectorTile(new Pbf(new Uint8Array(r.data)));
     const layer = vt.layers[cfg.layer];
     if (!layer) throw new Error(`抽样瓦片 z${z}/${x}/${y} 里没有图层 ${cfg.layer}，归档内容不对`);
@@ -879,6 +896,14 @@ async function main() {
       `  z${z}/${x}/${y}  图层=${cfg.layer} 要素=${layer.length}  首要素类型=${first.type} ` +
         `属性=${JSON.stringify(first.properties)}`,
     );
+  }
+  if (readbackDefects > 0) {
+    console.error(
+      `\n❌ 完成（但有缺陷）：${tiles.size.toLocaleString()} 张瓦片，回读校验**未通过**（${readbackDefects} 处缺陷）。\n` +
+        "   归档已写出，但不要发布、也不要拿去装包；请查上面的回读记录后重新生成。\n",
+    );
+    process.exitCode = 1;
+    return;
   }
   console.log(`\n✅ 完成：${tiles.size.toLocaleString()} 张瓦片，回读校验通过。\n`);
 }

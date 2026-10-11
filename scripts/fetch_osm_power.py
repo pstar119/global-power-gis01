@@ -381,14 +381,11 @@ def overpass_query(query: str, verbose: bool = True) -> dict[str, Any]:
                         f"    ⚠️ {endpoint.split('/')[2]} 第 {attempt}/{MAX_RETRY} 次失败：{exc}",
                         file=sys.stderr,
                     )
-                if attempt < MAX_RETRY:
-                    wait = RETRY_WAIT * attempt
-                    # 429 是限流，短退避根本没有意义，要等够；504 是服务端过载，普通退避即可
-                    if "429" in str(exc):
-                        wait = max(wait, 30.0)
-                    time.sleep(wait)
+                # ‼️ 先判「必败错误」再退避，顺序不能反：TLS/DNS 类错误重试不会变好，
+                #    退避等待纯粹是白等（实测 maps.mail.ru 一个批次白等约 30 分钟）。
+                #    此前这里先 sleep 再判 hopeless，与日志/文件头声称的
+                #    「跳过退避直接换端点」正好相反。
                 if is_hopeless_error(exc):
-                    # 重试不会好的错误（TLS/DNS）⇒ 立刻放弃这个端点，别白等退避
                     if verbose:
                         print(
                             f"    ↪ {endpoint.split('/')[2]} 的错误重试也不会好（{type(exc).__name__}），"
@@ -396,6 +393,12 @@ def overpass_query(query: str, verbose: bool = True) -> dict[str, Any]:
                             file=sys.stderr,
                         )
                     break
+                if attempt < MAX_RETRY:
+                    wait = RETRY_WAIT * attempt
+                    # 429 是限流，短退避根本没有意义，要等够；504 是服务端过载，普通退避即可
+                    if "429" in str(exc):
+                        wait = max(wait, 30.0)
+                    time.sleep(wait)
         if verbose:
             print(f"    ↪ 换下一个端点（{endpoint.split('/')[2]} 放弃）", file=sys.stderr)
 
@@ -1320,11 +1323,17 @@ def main() -> int:
             failed_chunks.append(list(chunk))
             chunk_failed = True
         # 只有整块成功才记断点：失败的块下次会自动重抓
-        if not chunk_failed:
+        # ‼️ 试算模式（--estimate-only）**一个字节都不许落盘**：它的用途是
+        #    「先看数量与电压分布，再决定要不要正式抓」。此前无条件 checkpoint()
+        #    会把全部 buckets 的 GeoJSON（外加 converters 的 dc_tags）写出去 ⇒
+        #    试算污染断点与产物目录，下次正式跑还会把它们当成已有结果，
+        #    而日志却写着「未写任何文件」——文案与行为相反，比不写还坏。
+        if not chunk_failed and not args.estimate_only:
             done_chunks.add(key)
             os.makedirs(args.out_dir, exist_ok=True)
             save_done_chunks(ppath, done_chunks)
-        checkpoint()
+        if not args.estimate_only:
+            checkpoint()
         time.sleep(CHUNK_WAIT)
 
     elapsed = time.time() - t0
@@ -1354,6 +1363,11 @@ def main() -> int:
 
     if args.estimate_only:
         print("\n[试算模式] 未写任何文件。")
+        # ‼️ 有失败块就不能报成功：试算的全部意义就是回答「这批抓得下来吗」，
+        #    把带空洞的结果当成成功返回，后续决策会直接踩坑。
+        if failed_chunks:
+            print(f"（其中 {len(failed_chunks)}/{len(chunks)} 个分块失败，退出码非 0）")
+            return 1
         return 0
 
     os.makedirs(args.out_dir, exist_ok=True)

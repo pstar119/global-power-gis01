@@ -1,4 +1,6 @@
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::io::Read;
+use std::path::{Path, PathBuf};
 
 use tauri::path::BaseDirectory;
 use tauri::{AppHandle, Manager};
@@ -20,6 +22,14 @@ const DB_FILE: &str = "global_power_gis.db";
 /// 目的：让拿到安装包的普通用户第一次启动就有全量电厂数据，
 /// 而不需要一个跑着 Python 导入脚本的开发环境。
 const SEED_RESOURCE: &str = "seed/global_power_gis.db";
+
+/// SQLite 文件头的 16 字节魔数。
+///
+/// ‼️ 「播种是否已完成」不能只看目标文件是否存在：一次被中断的拷贝
+///    （磁盘满 / 断电 / 杀软拦截）会留下一个**截断的文件**，而它一旦存在，
+///    旧逻辑就永远认为播种已完成 —— 全应用再也打不开数据库，
+///    用户只能自己去 %APPDATA% 删掉它。所以必须真的看一眼文件内容。
+const SQLITE_MAGIC: &[u8; 16] = b"SQLite format 3\0";
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
@@ -225,21 +235,18 @@ pub fn run() {
 
 /// 首次运行时，把内置的种子数据库拷到应用数据目录。
 ///
-/// 判定依据是“**目标文件是否存在**”，而不是“表里是否有数据”：
+/// 判定依据是「**目标文件是否是完整的 SQLite 库**」，而不是
+/// 「表里是否有数据」，也不是「文件是否存在」：
 /// - 判断表是否为空必须先打开数据库，而打开就会创建文件，逻辑上自相矛盾；
-/// - 那还会导致用户主动清空表后想重新开始时，数据被强行回填。
-///
-/// 因此：文件已存在就一律不动，已导入过数据的用户不会被覆盖。
+/// - 那还会导致用户主动清空表后想重新开始时，数据被强行回填；
+/// - 而只看 exists() 会把**被中断的拷贝**留下的截断文件当成播种完成，
+///   全应用从此打不开数据库，且只能靠手删 %APPDATA% 恢复。
 fn seed_database_if_needed(app: &AppHandle) -> Result<(), String> {
     let target = app
         .path()
         .app_config_dir()
         .map_err(|e| format!("无法解析应用数据目录: {e}"))?
         .join(DB_FILE);
-
-    if target.exists() {
-        return Ok(());
-    }
 
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("无法创建数据目录 {parent:?}: {e}"))?;
@@ -249,9 +256,166 @@ fn seed_database_if_needed(app: &AppHandle) -> Result<(), String> {
         .path()
         .resolve(SEED_RESOURCE, BaseDirectory::Resource)
         .map_err(|e| format!("无法定位内置种子数据: {e}"))?;
+    let source_len = fs::metadata(&source)
+        .map_err(|e| format!("无法读取内置种子数据 {source:?}: {e}"))?
+        .len();
 
-    fs::copy(&source, &target).map_err(|e| format!("拷贝 {source:?} -> {target:?} 失败: {e}"))?;
+    if db_is_complete(&target, source_len) {
+        return Ok(());
+    }
+    if target.exists() {
+        eprintln!("[seed] {target:?} 存在但不是完整的 SQLite 库，重新播种");
+    }
 
+    seed_copy_atomic(&source, &target)?;
     println!("[seed] 已从内置数据初始化数据库: {target:?}");
     Ok(())
 }
+
+/// 同目录的临时文件路径（在目标名后追加 .tmp）。
+///
+/// ‼️ 必须**同目录**：`rename` 只在同一个卷内才是原子的，
+///    放到 %TEMP% 再改名就退化成「复制 + 删除」，中途失败照样留下截断文件。
+fn tmp_sibling(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".tmp");
+    PathBuf::from(name)
+}
+
+/// 目标库看起来是否**完整**。
+///
+/// ‼️ 长度用 `>=` 而不是 `==`：用户导入数据后库会变大，那是完全正常的；
+///    若按「大小必须等于种子」判定，就会把用户自己那份好库当成损坏而覆盖 ——
+///    修一个 bug 反而制造数据丢失。这里只拦「明显偏小 / 根本不是 SQLite」两种情况。
+fn db_is_complete(target: &Path, source_len: u64) -> bool {
+    let Ok(meta) = fs::metadata(target) else {
+        return false;
+    };
+    if meta.len() < source_len {
+        return false;
+    }
+    let Ok(mut f) = File::open(target) else {
+        return false;
+    };
+    let mut head = [0u8; 16];
+    f.read_exact(&mut head).is_ok() && &head == SQLITE_MAGIC
+}
+
+/// 先写同目录的 .tmp、fsync、再原子改名到目标。
+///
+/// 🔴 为什么不直接 `fs::copy(source, target)`：拷贝中途失败（磁盘满 / 断电 / 杀软）
+///    会在**目标位置**留下一个半截文件，而目标名一旦存在，下次启动就不会再播种 ——
+///    失败被永久固化。临时文件 + 改名把不变量变成
+///    「目标要么是完整的旧文件、要么是完整的新文件」。
+fn seed_copy_atomic(source: &Path, target: &Path) -> Result<(), String> {
+    let tmp = tmp_sibling(target);
+    // 上一次失败可能留下 .tmp，先清掉，避免 fs::copy 撞上一个只读残留
+    let _ = fs::remove_file(&tmp);
+
+    let copied = fs::copy(source, &tmp).map_err(|e| format!("拷贝 {source:?} -> {tmp:?} 失败: {e}"))?;
+
+    // ‼️ 比对**实际写入的字节数**：fs::copy 报成功但字数不对，说明源文件本身
+    //    就有问题（例如被打包工具截断过），这种「成功」绝不能当成播种完成。
+    let want = fs::metadata(source)
+        .map_err(|e| format!("无法读取 {source:?} 大小: {e}"))?
+        .len();
+    if copied != want {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("拷贝不完整：{tmp:?} 只写入 {copied}/{want} 字节"));
+    }
+
+    // ‼️ 先 fsync 再改名：否则断电后可能出现「名字已就位、内容还在页缓存里」的空壳。
+    if let Err(e) = OpenOptions::new().read(true).write(true).open(&tmp).and_then(|f| f.sync_all()) {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("同步 {tmp:?} 失败: {e}"));
+    }
+
+    fs::rename(&tmp, target).map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        format!("无法把 {tmp:?} 改名为 {target:?}: {e}")
+    })?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 造一个「合法 SQLite 头部 + 指定长度」的假库。
+    /// 没必要用真的 sqlite3 文件 —— 这里验证的是判定逻辑，不是 SQLite 本身。
+    fn fake_db(len: usize) -> Vec<u8> {
+        let mut v = vec![0u8; len.max(16)];
+        v[..16].copy_from_slice(SQLITE_MAGIC);
+        v
+    }
+
+    fn tmp_dir(tag: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        // ‼️ 不用 std::env::temp_dir()：受限沙箱里子进程对 %TEMP% 只有拒绝访问（os error 5），
+        //    测试会整片假失败；crate 的 target/ 必定可写（cargo 自己就在写），也随构建一起被清掉。
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-tmp")
+            .join(format!("gpg-seed-{tag}-{nanos}"));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// R2：完整性判定必须同时挡住「截断」与「根本不是 SQLite」。
+    #[test]
+    fn db_is_complete_rejects_truncated_and_foreign_files() {
+        let dir = tmp_dir("full");
+        let target = dir.join("t.db");
+
+        assert!(!db_is_complete(&target, 100), "文件不存在时不算完整");
+
+        fs::write(&target, fake_db(100)).unwrap();
+        assert!(db_is_complete(&target, 100), "魔数对且长度相等，应当算完整");
+        assert!(
+            db_is_complete(&target, 50),
+            "比种子大（用户导入过数据）必须算完整，否则会覆盖用户自己的数据"
+        );
+        assert!(!db_is_complete(&target, 101), "比种子小说明是截断的拷贝，必须重播种");
+
+        fs::write(&target, vec![0u8; 200]).unwrap();
+        assert!(!db_is_complete(&target, 100), "没有 SQLite 魔数的文件不算完整");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// R2：成功路径 —— 目标内容与源一致，且不残留 .tmp。
+    #[test]
+    fn seed_copy_atomic_writes_target_and_leaves_no_tmp() {
+        let dir = tmp_dir("ok");
+        let source = dir.join("seed.db");
+        let target = dir.join("live.db");
+        fs::write(&source, fake_db(4096)).unwrap();
+
+        seed_copy_atomic(&source, &target).unwrap();
+
+        assert_eq!(fs::read(&target).unwrap(), fs::read(&source).unwrap());
+        assert!(!tmp_sibling(&target).exists(), "不该残留 .tmp");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// R2：失败路径 —— 源不存在时必须报错、原文件原样保留、不留 .tmp。
+    #[test]
+    fn seed_copy_atomic_keeps_existing_file_when_copy_fails() {
+        let dir = tmp_dir("fail");
+        let target = dir.join("live.db");
+        fs::write(&target, fake_db(16)).unwrap();
+        let before = fs::read(&target).unwrap();
+
+        let err = seed_copy_atomic(&dir.join("missing.db"), &target)
+            .expect_err("源不存在时必须失败");
+
+        assert!(err.contains("拷贝"), "错误信息应当说明是拷贝失败，实际：{err}");
+        assert_eq!(fs::read(&target).unwrap(), before, "失败时原文件必须原样保留");
+        assert!(!tmp_sibling(&target).exists(), "失败路径必须清掉 .tmp");
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
+

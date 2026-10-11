@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import random
 import sys
 import time
@@ -58,6 +59,24 @@ TYPES: list[tuple[str, str]] = [
 
 # 状态取主状态时的确定性优先级（并列时用它决出，避免渲染结果随数据顺序变）
 STATUS_PRIORITY = ["operating", "planned", "retired", "cancelled"]
+
+
+def valid_coord(lat, lon) -> bool:
+    """机组坐标是否可用于求质心。
+
+    🔴 阶段50-B 修：此前是 `float(r.get("latitude") or 0.0)` —— 缺失坐标按 **0** 参与求均值，
+    一个缺坐标的机组就能把整个电站的质心拽向 (0,0)（几内亚湾），
+    而且地图上"看不清的偏移"根本不会被当成错误（它还是画在海上）。
+    (0,0) 本身是上游常见的缺失哨兵，同样不算有效坐标。
+    """
+    if lat is None or lon is None:
+        return False
+    if math.isnan(lat) or math.isnan(lon) or math.isinf(lat) or math.isinf(lon):
+        return False
+    if not (-90.0 <= lat <= 90.0) or not (-180.0 <= lon <= 180.0):
+        return False
+    return not (lat == 0.0 and lon == 0.0)
+
 
 # 输出的**属性契约**（阶段50-B.2 定稿）。
 # ‼️ 这里不只是“注释里的白名单”：主流程末尾会拿它做**可执行的自检**。
@@ -215,6 +234,9 @@ def main() -> int:
                     "name": r.get("project_name") or r.get("asset_name") or "未命名电站",
                     "lat_sum": 0.0,
                     "lon_sum": 0.0,
+                    # 参与过求质心的**有效**机组数（缺坐标的机组不进均值，
+                    # 否则质心会被拽向 (0,0)，见 valid_coord）
+                    "coord_count": 0,
                     "units": 0,
                     "capacity": 0.0,
                     "by_status": Counter(),
@@ -227,8 +249,16 @@ def main() -> int:
             if not st["state"] and r.get("state_province"):
                 st["state"] = r["state_province"]
             # 质心：实测同一电站内机组坐标绝大多数相同，少数不一致时取均值最中立
-            st["lat_sum"] += float(r.get("latitude") or 0.0)
-            st["lon_sum"] += float(r.get("longitude") or 0.0)
+            # ‼️ 只用**有效**坐标：缺失/NaN/(0,0) 一律不参与，否则质心被拽向几内亚湾
+            try:
+                lat_v = float(r.get("latitude"))
+                lon_v = float(r.get("longitude"))
+            except (TypeError, ValueError):
+                lat_v = lon_v = None
+            if valid_coord(lat_v, lon_v):
+                st["lat_sum"] += lat_v
+                st["lon_sum"] += lon_v
+                st["coord_count"] += 1
             st["units"] += 1
             st["capacity"] += float(r.get("capacity_value") or 0.0)
             st["by_status"][r.get("operating_status") or "unknown"] += 1
@@ -248,8 +278,16 @@ def main() -> int:
     by_type = Counter()
     by_status = Counter()
     no_owner = 0
+    # 一个有效坐标都没有的电站：不写坐标，也不写 geometry: null。
+    # ‼️ 为什么直接剔除而不是写 null：build_pmtiles.mjs 的 --kind gem 契约要求
+    #    **全部是 Point**（它按 geometry.type 统计，见到 null 就整包中止），
+    #    而没有坐标的电站本来也画不出来。
+    no_coord = 0
     for _key, st in stations.items():
         n = st["units"]
+        if st["coord_count"] == 0:
+            no_coord += 1
+            continue
         props = {
             # ‼️ 键的顺序与 KEEP 保持一致，方便肉眼对照契约
             "location_id": st["location_id"],
@@ -275,7 +313,12 @@ def main() -> int:
                 "properties": props,
                 "geometry": {
                     "type": "Point",
-                    "coordinates": [round(st["lon_sum"] / n, 6), round(st["lat_sum"] / n, 6)],
+                    # ‼️ 除以**有坐标的机组数**，不是全部机组数：把缺坐标的机组
+                    #    也算进均值就等于按 (0,0) 拉平（S6 的成因）
+                    "coordinates": [
+                        round(st["lon_sum"] / st["coord_count"], 6),
+                        round(st["lat_sum"] / st["coord_count"], 6),
+                    ],
                 },
             }
         )
@@ -288,6 +331,8 @@ def main() -> int:
     for s, c in by_status.most_common():
         print(f"    {s:<12} {c:>7}")
     print(f"  无 owner 的电站 : {no_owner}")
+    if no_coord:
+        print(f"  ⚠️ 无有效坐标被剔除的电站 : {no_coord}（缺坐标/NaN/(0,0) 不会被当成真坐标）")
 
     # ---- 输出契约自检（阶段50-B.1）----
     # ‼️ 为什么必须有：字段缺失是**静默**的。GeoJSON 照样能切、能渲染，

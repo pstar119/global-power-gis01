@@ -48,7 +48,8 @@
 //! `spawn_blocking` 把它挪到阻塞线程池，两个问题一起回避 ——
 //! 这与 `packs.rs::pack_download` 的做法一致。
 
-use std::path::PathBuf;
+use std::fs::{self, OpenOptions};
+use std::path::{Path, PathBuf};
 
 use tauri::AppHandle;
 use tauri_plugin_dialog::DialogExt;
@@ -62,7 +63,7 @@ use tauri_plugin_dialog::DialogExt;
 ///    · 洗空之后回落到一个确定的默认名，绝不让对话框拿到空字符串
 fn safe_suggested_name(name: &str) -> String {
     let base = name
-        .rsplit(|c| c == '/' || c == '\\')
+        .rsplit(['/', '\\'])
         .next()
         .unwrap_or("")
         .trim();
@@ -89,6 +90,35 @@ fn safe_suggested_name(name: &str) -> String {
 ///
 /// ⚠️ 这里**不做** `.csv` 后缀强制：加了 `add_filter("CSV", ["csv"])` 之后，
 ///    系统对话框自己会补后缀；再强制一次反而会覆盖用户在对话框里显式输入的扩展名。
+/// 先写同目录的 .tmp、fsync、再原子改名。
+///
+/// 🔴 为什么不直接 `std::fs::write(&path, ...)`：用户选的多半是一个**已存在的文件**
+///    （导出就是覆盖），而 `write` 会先把目标截断 —— 磁盘满 / 进程被杀 / 杀软拦截时
+///    留下的是「半截新内容 + 原内容已丢」，两头都没有，且不可恢复。
+///    临时文件 + 改名保证目标要么是完整的旧文件、要么是完整的新文件。
+/// ⚠️ 临时文件必须与目标**同目录**：`rename` 只在同一个卷内才是原子的。
+fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let mut tmp_name = path.as_os_str().to_os_string();
+    tmp_name.push(".tmp");
+    let tmp = PathBuf::from(tmp_name);
+    // 上一次失败可能留下 .tmp，先清掉，避免撞上一个只读残留
+    let _ = fs::remove_file(&tmp);
+
+    fs::write(&tmp, bytes).map_err(|e| format!("IO_ERROR: 写入 {} 失败: {e}", tmp.display()))?;
+
+    // ‼️ 先 fsync 再改名：否则断电后可能出现「名字已就位、内容还在页缓存里」的空文件。
+    if let Err(e) = OpenOptions::new().read(true).write(true).open(&tmp).and_then(|f| f.sync_all()) {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("IO_ERROR: 同步 {} 失败: {e}", tmp.display()));
+    }
+
+    fs::rename(&tmp, path).map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        format!("IO_ERROR: 无法把 {} 改名为 {}: {e}", tmp.display(), path.display())
+    })?;
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn export_csv_file(
     app: AppHandle,
@@ -115,8 +145,7 @@ pub async fn export_csv_file(
             .into_path()
             .map_err(|e| format!("BAD_PATH: 无法解析所选路径: {e}"))?;
 
-        std::fs::write(&path, contents.as_bytes())
-            .map_err(|e| format!("IO_ERROR: 写入 {} 失败: {e}", path.display()))?;
+        write_atomically(&path, contents.as_bytes())?;
 
         Ok(Some(path.to_string_lossy().into_owned()))
     })
@@ -130,7 +159,25 @@ pub async fn export_csv_file(
 ///    `non_snake_case` 警告 —— 一旦有人加 `-D warnings` 就会失败。
 #[cfg(test)]
 mod tests {
-    use super::safe_suggested_name;
+    use super::{safe_suggested_name, write_atomically};
+    use std::fs;
+    use std::path::PathBuf;
+
+    /// 造一个独立的临时目录：覆盖写盘这件事必须真的落盘才算验证过。
+    fn tmp_dir(tag: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        // ‼️ 不用 std::env::temp_dir()：受限沙箱里子进程对 %TEMP% 只有拒绝访问（os error 5），
+        //    测试会整片假失败；crate 的 target/ 必定可写（cargo 自己就在写），也随构建一起被清掉。
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-tmp")
+            .join(format!("gpg-export-{tag}-{nanos}"));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
 
     /// 路径分隔符在前后都出现时，只留最后一段。
     #[test]
@@ -163,5 +210,35 @@ mod tests {
             safe_suggested_name("当前视野电厂_z8_2026-09-18.csv"),
             "当前视野电厂_z8_2026-09-18.csv"
         );
+    }
+
+    /// R8：覆盖导出必须是原子的 —— 目标换成新内容，且不残留 .tmp。
+    #[test]
+    fn write_atomically_overwrites_existing_file_and_leaves_no_tmp() {
+        let dir = tmp_dir("ok");
+        let path = dir.join("out.csv");
+        fs::write(&path, b"old,content\n").unwrap();
+
+        write_atomically(&path, b"new,content\n").unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"new,content\n", "必须原子地换成新内容");
+        assert!(!dir.join("out.csv.tmp").exists(), "不该残留 .tmp");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// R8：失败路径不能把原文件带走 —— 目录不存在时应当报错且什么都不留下。
+    #[test]
+    fn write_atomically_fails_cleanly_on_missing_directory() {
+        let dir = tmp_dir("fail");
+        let path = dir.join("nope").join("out.csv");
+
+        let err = write_atomically(&path, b"x\n").expect_err("目录不存在时必须失败");
+
+        assert!(
+            err.starts_with("IO_ERROR"),
+            "错误码必须仍是 IO_ERROR（前端按它翻译），实际：{err}"
+        );
+        assert!(!path.exists(), "失败时不该产生目标文件");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -86,6 +86,38 @@ function mergeProps(a, b) {
   return out;
 }
 
+/**
+ * 整条链的属性一致性。
+ *
+ * 🔴 并查集判定的是**相邻两段**是否兼容，而兼容**不传递**：
+ *    `500kV —（电压未知）— 220kV` 两两都兼容 ⇒ 被并成一条链；走链时
+ *    `mergeProps(500, 220)` 返回 null，再被 `?? props` 吞掉 ⇒
+ *    输出一个**标着 500kV、却含着 220kV 段**的要素（`line_kind`/`ref`/`name`/`operator` 同理）。
+ *    线还是线、长度也守恒，渲染上看不出任何异常。
+ *
+ * ⇒ 判据：**任一字段出现两个不同的非空值，整组就不合并**（逐段原样输出、长度守恒），
+ *    而不是从组里挑一个值往下传。宁可少合并，也绝不给出错的属性。
+ */
+const CONFLICT_FIELDS = ["line_kind", "voltage_kv", "ref", "name", "operator"];
+
+function groupConflicts(segs) {
+  for (const k of CONFLICT_FIELDS) {
+    let seen = null;
+    let has = false;
+    for (const s of segs) {
+      const v = s.f.properties[k] ?? null;
+      if (v === null) continue;
+      if (!has) {
+        has = true;
+        seen = v;
+      } else if (v !== seen) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 /** 简单的并查集 */
 function makeUf(n) {
   const p = Array.from({ length: n }, (_, i) => i);
@@ -188,7 +220,17 @@ export function mergeLines(features, opts = {}) {
   }
 
   let brokenChains = 0;
+  /** 因**整链属性冲突**而放弃合并、改为逐段原样输出的组数（见 groupConflicts 的说明） */
+  let conflictedGroups = 0;
+  /** 走链时 `mergeProps` 仍返回 null 的次数 —— 出现即说明整组校验漏了字段，必须为 0 */
+  let propConflicts = 0;
   for (const group of groups.values()) {
+    // ‼️ 并查集只保证**相邻**兼容，这里补上整链校验（见 groupConflicts）。
+    if (group.length > 1 && groupConflicts(group)) {
+      conflictedGroups++;
+      for (const s of group) out.push(decorate(s.f, [s.f.properties.osm_id], 1, s.coords, maxOsmIds));
+      continue;
+    }
     // 从链端（只有 1 个邻居）起步；纯环则任取一段
     let cur = group.find((s) => (link.get(s.i)?.length ?? 0) <= 1) ?? group[0];
     let curCoords = cur.coords;
@@ -231,7 +273,14 @@ export function mergeLines(features, opts = {}) {
       }
       seen.add(cur.i);
       count++;
-      props = props === null ? { ...cur.f.properties } : (mergeProps(props, cur.f.properties) ?? props);
+      const merged = props === null ? { ...cur.f.properties } : mergeProps(props, cur.f.properties);
+      if (merged === null) {
+        // 理论到不了这里（整组一致性已由上面的 groupConflicts 校验过）。
+        // 真到了就必须记账：**绝不能静默沿用上一段的属性** —— 那正是电压张冠李戴的成因。
+        propConflicts++;
+      } else {
+        props = merged;
+      }
       osmIds.push(cur.f.properties.osm_id);
       coords = coords.length ? coords.concat(c.slice(1)) : c.slice();
 
@@ -266,6 +315,10 @@ export function mergeLines(features, opts = {}) {
       maxChain,
       /** 走链时接不上而主动断开的次数（**必须为 0**；不为 0 说明方向对齐有问题） */
       brokenChains,
+      /** 因整链属性冲突而未合并的组数（>0 属正常，但必须能被看见，见 groupConflicts） */
+      conflictedGroups,
+      /** 走链时 mergeProps 仍返回 null 的次数（**必须为 0**，>0 = 整组校验漏字段） */
+      propConflicts,
       lengthBeforeKm: lenBefore,
       lengthAfterKm: lenAfter,
     },

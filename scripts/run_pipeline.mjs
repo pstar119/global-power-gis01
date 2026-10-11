@@ -39,6 +39,23 @@ const ALL_STAGES = ["scan", "fetch", "prepare", "build"];
  */
 const DEFAULT_STAGES = ["fetch", "prepare", "build"];
 
+/**
+ * 「这一批没成」的状态集合 —— 主流程的退出码只看它。
+ *
+ * ‼️ 为什么必须有：`main()` 原先恒 `return 0`，于是抓取有失败块时
+ *    （status=fetch-incomplete，prepare/build 被跳过、一个包都没出）
+ *    CI 依然判**全批成功** —— 「宁可不出包，也不出带空洞的包」这条红线在自动化里等于没有。
+ * ⚠️ `partial(fetch+prepare)` / `no-op` 是用户显式只跑部分阶段的正常结果，不算失败；
+ *    但 `scan-failed` 算 —— 它意味着连「这批有没有数据」都没测出来。
+ */
+const FAILED_STATUSES = new Set([
+  "scan-failed",
+  "fetch-incomplete",
+  "prepare-failed",
+  "build-failed",
+  "error",
+]);
+
 // ---------------------------------------------------------------- 参数
 /**
  * 阶段43：抓取类别。
@@ -77,6 +94,21 @@ const CATEGORY_INFO = {
 };
 /** `coarse` 策略的目标块边长（度）。9° -> 约 80 deg²/块，实测外推单块 < 90 秒 */
 const COARSE_CHUNK_DEG = 9;
+
+/**
+ * 单条子命令的默认超时（分钟）。
+ *
+ * 🔴 此前 runStep **没有任何超时**：抓取脚本卡在某个不回的端点上时，
+ *    门禁会一直挂着（CI 里表现为任务永远不结束，而不是报失败）；
+ *    夜间批量跑更是无人值守，挂了就只能等第二天早上人工发现。
+ *    360 分钟 = 全国最大批次「131 块 × 实测 44~50 秒/块 ≈ 1.8 小时」留足 3 倍余量，
+ *    既能兜住挂死，又不会把正常的慢批次误杀。可用 `--step-timeout` 或
+ *    `$env:GPG_STEP_TIMEOUT_MIN` 覆盖。
+ */
+const DEFAULT_STEP_TIMEOUT_MIN = 360;
+
+/** 由 main() 从 cfg 赋值（parseArgs 之前 runStep 不会被调用） */
+let stepTimeoutMs = DEFAULT_STEP_TIMEOUT_MIN * 60_000;
 
 /**
  * 某一类别在某批次上的分块方案。
@@ -121,6 +153,8 @@ function parseArgs(argv) {
     endpoint: null,
     dryRun: false,
     force: false,
+    /** 单步超时（分钟）：env 便于 CI 不改命令行即可收紧，命令行参数优先覆盖 */
+    stepTimeoutMin: Number(process.env.GPG_STEP_TIMEOUT_MIN) || DEFAULT_STEP_TIMEOUT_MIN,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -142,6 +176,13 @@ function parseArgs(argv) {
     else if (a === "--pack-dir") cfg.packDir = next();    else if (a === "--max-features-per-tile") cfg.maxFeaturesPerTile = Number(next());
     else if (a === "--cap-below-zoom") cfg.capBelowZoom = Number(next());    else if (a === "--report") cfg.reportPath = next();
     else if (a === "--endpoint") cfg.endpoint = next();
+    else if (a === "--step-timeout") {
+      const min = Number(next());
+      // ‼️ 必须挡住 0/负数/NaN：`setTimeout(NaN)` 等价于「立即触发」，
+      //    会把每一条正常的子命令都当场杀掉 —— 比没有超时更糟。
+      if (!Number.isFinite(min) || min <= 0) throw new Error("--step-timeout 应为正数（分钟）");
+      cfg.stepTimeoutMin = min;
+    }
     else if (a === "--dry-run") cfg.dryRun = true;
     else if (a === "--force") cfg.force = true;
     else if (a === "-h" || a === "--help") {
@@ -166,6 +207,8 @@ function parseArgs(argv) {
           "  --endpoint <url> 转发给抓取脚本的 Overpass 端点（可逗号分隔多个）",
           "                   ⚠️ 默认表里第一个端点（maps.mail.ru）在本机不可用，批量抓取请显式指定",
           "                   例如 --endpoint https://overpass-api.de/api/interpreter",
+          "  --step-timeout <分钟>  单条子命令超时（默认 360，也可用 $env:GPG_STEP_TIMEOUT_MIN）",
+          "                   超时即强杀子进程并判该步失败（退出码 124），不再无限挂起",
           "  --dry-run       只打印命令，不执行",
           "  --force         即使抓取有失败块也继续切片（默认拒绝，避免出带空洞的包）",
           "",
@@ -245,6 +288,28 @@ console.log(`[pipeline] Python = ${PY}${process.env.PYTHON ? "（来自 $env:PYT
  */
 const PY_ARGS_PREFIX = ["-u"];
 
+/**
+ * 子进程输出在内存里的上限。
+ *
+ * 🔴 此前 `out += s` 无限累积：一轮全国抓取几十万行，几百 MB 的字符串
+ *    先撑内存，最后还要**整段** appendFileSync 进日志文件
+ *    （最坏情况把磁盘写满，而正常分析只需要头尾）。
+ *    折叠中段、保留头尾：头含命令与早期报错，尾含收尾统计与失败块清单。
+ */
+const MAX_OUT_CHARS = 4 * 1024 * 1024;
+const HEAD_OUT_CHARS = 1 * 1024 * 1024;
+
+function capOut(s) {
+  if (s.length <= MAX_OUT_CHARS) return s;
+  const tailChars = MAX_OUT_CHARS - HEAD_OUT_CHARS;
+  const omitted = s.length - HEAD_OUT_CHARS - tailChars;
+  return (
+    s.slice(0, HEAD_OUT_CHARS) +
+    `\n[... 已省略 ${(omitted / 1024 / 1024).toFixed(1)} MB 中间输出 ...]\n` +
+    s.slice(s.length - tailChars)
+  );
+}
+
 /** 跑一条命令：实时转发输出到控制台，同时以 UTF-8 追加到日志文件 */
 function runStep(label, cmd, args, logFile) {
   const printable = [cmd, ...args].map((s) => (/\s/.test(s) ? `"${s}"` : s)).join(" ");
@@ -276,8 +341,29 @@ function runStep(label, cmd, args, logFile) {
     const onData = (stream, chunk) => {
       const s = chunk.toString();
       out += s;
+      if (out.length > MAX_OUT_CHARS) out = capOut(out);
+      // ⚠️ 控制台仍按原始流写：折叠只针对**内存/日志**，
+      //    前台跑的时候输出该完整就完整（否则进度看起来像卡住了）。
       stream.write(s);
     };
+
+    /**
+     * 超时兜底。
+     *
+     * ‼️ 只杀子进程不够 —— Python 抓取脚本自己 spawn 的 curl 类子进程不会跟着死，
+     *    所以这里用 SIGKILL 且把退出码定成 124（GNU timeout 的约定），
+     *    让「超时」和「脚本自己报错」在日志/报表里能区分开。
+     */
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      console.error(
+        `\n⏱️ ${label} 超过 ${Math.round(stepTimeoutMs / 60_000)} 分钟仍未结束，判定失败并强制终止。`,
+      );
+      child.kill("SIGKILL");
+    }, stepTimeoutMs);
+    // 别让这个定时器自己吊住事件循环
+    if (typeof timer.unref === "function") timer.unref();
     child.stdout.on("data", (d) => onData(process.stdout, d));
     child.stderr.on("data", (d) => onData(process.stderr, d));
     child.on("error", (err) => {
@@ -285,6 +371,8 @@ function runStep(label, cmd, args, logFile) {
       console.error(`  ⚠️ 无法启动：${err.message}`);
     });
     child.on("close", (code) => {
+      clearTimeout(timer);
+      if (timedOut) out += `\n[step timeout] 超过 ${Math.round(stepTimeoutMs / 60_000)} 分钟，已强制终止\n`;
       if (logFile) {
         mkdirSync(dirname(logFile), { recursive: true });
         appendFileSync(
@@ -293,7 +381,8 @@ function runStep(label, cmd, args, logFile) {
           "utf8",
         );
       }
-      resolvePromise({ code: code ?? -1, out });
+      // 超时统一报 124，便于调用方（processRegion）与日志读者区分「被杀」与「自己失败」
+      resolvePromise({ code: timedOut ? 124 : (code ?? -1), out });
     });
   });
 }
@@ -564,6 +653,13 @@ async function main() {
       })
     : REGIONS;
 
+  // ‼️ 先做一次校验再落进模块级变量：`setTimeout(Infinity)` 会退化成 1ms，
+  //    「关掉超时」必须靠显式给一个大值，而不是靠 NaN/Infinity 这种意外的输入。
+  if (!Number.isFinite(cfg.stepTimeoutMin) || cfg.stepTimeoutMin <= 0) {
+    throw new Error(`stepTimeoutMin 非法：${cfg.stepTimeoutMin}`);
+  }
+  stepTimeoutMs = cfg.stepTimeoutMin * 60_000;
+
   const totalChunks = picked.reduce((a, r) => a + gridFor(r, cfg.target).cols * gridFor(r, cfg.target).rows, 0);
 
   console.log("=== 阶段38 全国分批流水线 ===");
@@ -574,6 +670,7 @@ async function main() {
   );
   console.log(`可选包   : ${cfg.packDir}/osm-<region>.pmtiles（不进安装包；该目录已被 .gitignore 忽略）`);
   console.log(`合计块数 : ${totalChunks}`);
+  console.log(`单步超时 : ${cfg.stepTimeoutMin} 分钟（超时即判失败）`);
   console.log(
     `串行预计 : ${((totalChunks * cfg.target.secPerChunk) / 3600).toFixed(1)} 小时 ` +
       `（按 ${cfg.target.secPerChunk} 秒/块估算，**不是上界**）`,
@@ -614,6 +711,8 @@ async function main() {
   report.startedAt = new Date().toISOString();
   report.targetCell = cfg.target;
 
+  /** 本次运行里未成功的批次（只统计**本次跑的**，见下面 push 处的说明） */
+  const failedRegions = [];
   for (const region of picked) {
     try {
       const rec = await processRegion(region, cfg, report);
@@ -621,9 +720,13 @@ async function main() {
       report.updatedAt = new Date().toISOString();
       writeJsonAtomic(reportPath, report);
       if (rec.status !== "ok") console.warn(`⚠️ 批次 ${region.label} 状态：${rec.status}`);
+      // ⚠️ 只看**本次运行的批次**，不去扫 report.regions：报表是跨次累积的，
+      //    上一次留下的失败批次会污染这一次的退出码（而这次可能只跑了一个区域）。
+      if (FAILED_STATUSES.has(rec.status)) failedRegions.push(`${region.key}=${rec.status}`);
     } catch (err) {
       console.error(`\n⛔ 批次 ${region.label} 异常终止：${err.message}`);
       report.regions[region.key] = { key: region.key, status: "error", error: String(err.message) };
+      failedRegions.push(`${region.key}=error`);
       // ‼️ 异常也要落盘 —— 否则这一批的失败信息只存在于内存，
       //    下一批成功写盘时它就不在里面了，事后完全看不出哪批失败过。
       report.updatedAt = new Date().toISOString();
@@ -665,6 +768,16 @@ async function main() {
   }));
   console.table(rows);
   console.log(`报表：${cfg.reportPath}`);
+
+  // ‼️ 退出码必须反映「这一轮到底成没成」。此前恒返回 0，
+  //    「抓取有失败块 ⇒ 跳过 prepare/build ⇒ 一个包都没出」在 CI 里也是绿灯。
+  if (failedRegions.length) {
+    console.error(
+      `\n❌ ${failedRegions.length}/${picked.length} 个批次未成功：${failedRegions.join("、")}\n` +
+        "   请按上面的失败块清单补齐后重跑；残缺数据不得当成可发布产物。",
+    );
+    return 1;
+  }
   return 0;
 }
 

@@ -38,7 +38,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -71,6 +71,9 @@ fn build_agent() -> ureq::Agent {
         .build();
     ureq::Agent::config_builder()
         .tls_config(tls)
+        .timeout_connect(Some(Duration::from_secs(CONNECT_TIMEOUT_SECS)))
+        .timeout_recv_response(Some(Duration::from_secs(RESPONSE_HEADER_TIMEOUT_SECS)))
+        .timeout_recv_body(Some(Duration::from_secs(BODY_TOTAL_TIMEOUT_SECS)))
         .build()
         .into()
 }
@@ -87,6 +90,24 @@ const PROGRESS_MIN_DELTA: u64 = 4 * 1024 * 1024;
 const PACKS_SUBDIR: &str = "packs";
 /// 未完成下载的后缀
 const PART_SUFFIX: &str = ".part";
+
+/// 建立连接的上限（开 socket + 代理协商 + TLS 握手，不含 DNS 解析）。
+/// 实测正常握手在几百毫秒量级，15 s 只是把「网络黑洞」变成一条用户能看到的错误，
+/// 而不是让 spawn_blocking 线程永远挂着。
+const CONNECT_TIMEOUT_SECS: u64 = 15;
+/// 等响应头的上限（不含 body）。CDN 正常 1 s 内就有响应，30 s 是给重定向链留的余量。
+const RESPONSE_HEADER_TIMEOUT_SECS: u64 = 30;
+/// 读响应体的上限。
+///
+/// 🔴 取值理由必须写在这里，否则很容易被「顺手改成 30 秒」而重新制造 bug：
+///    ureq 的 timeout_recv_body 是**整个 body 的总预算**
+///    （文档原文：The budget is not restarted for each read），**不是空闲超时**。
+///    所以不能按「读 30 s」的直觉取值 —— 那会直接掐死大包的慢速下载。
+///    这里按最小可接受带宽反推：单个包最大约 38 MB，38 MB / 1800 s ≈ 21 KB/s，
+///    比这更慢的链路本来也下不完；超时后 .part 会保留，重试即可从断点续传。
+/// ⚠️ 刻意**不设** timeout_global：它是端到端预算（DNS → 读完 body），
+///    会覆盖上面所有超时，等于给大文件下载下一道死刑。
+const BODY_TOTAL_TIMEOUT_SECS: u64 = 1800;
 
 /// 正在下载中的文件名。用 `Vec` 而不是 `HashSet`：`Vec::new()` 是 const fn，
 /// 可以直接用于 `static`，不必引入 `OnceLock` 或 `LazyLock`。
@@ -193,15 +214,62 @@ fn safe_file_name(file: &str) -> Result<String, String> {
     Ok(file.to_string())
 }
 
+/// 按**字符**（而不是字节）截断，用于错误信息里的缩略显示。
+///
+/// 🔴 这个函数存在的唯一理由是「错误提示绝不该有杀伤力」：
+///    以前这里写的是 `&s[..s.len().min(12)]`，而 `s` 是前端递进来的 `sha256` ——
+///    只要它非 ASCII 且第 12 个字节落在一个多字节 UTF-8 字符中间，切片就会 panic；
+///    而 release profile 是 `panic = "abort"`，表现是**整个应用无提示闪退**。
+fn shorten(s: &str, max: usize) -> String {
+    s.chars().take(max).collect()
+}
+
+/// 校验请求里的「承诺值」。
+///
+/// 🔴 这两个字段以前是**静默降级**的入口，必须在这里堵死：
+///    · `sha256` 为空串（前端清单里该字段是 `null` 时会退化成 `""`）
+///      ⇒ 摘要校验被整段跳过，任意内容都会被当成正确文件；
+///    · `bytes == 0` ⇒ 长度校验恒真（期望值退化成实际值），长度也失去意义。
+///    两者叠加的结果是「随便什么内容都能 rename 成正式 .pmtiles 并报成功」。
+fn validate_request(file: &str, req: &PackDownloadRequest) -> Result<(), String> {
+    if req.bytes == 0 {
+        return Err(format!(
+            "BAD_BYTES: {file} 期望字节数为 0，无法校验完整性（清单缺少 bytes？）"
+        ));
+    }
+    let is_hex = req.sha256.len() == 64 && req.sha256.bytes().all(|b| b.is_ascii_hexdigit());
+    if !is_hex {
+        return Err(format!(
+            "BAD_SHA256: {file} 期望的 SHA256 不是 64 位十六进制（实际 {:?}）",
+            shorten(&req.sha256, 16)
+        ));
+    }
+    Ok(())
+}
+
 fn is_in_flight(file: &str) -> bool {
     IN_FLIGHT.lock().map(|v| v.iter().any(|f| f == file)).unwrap_or(false)
 }
 
-fn mark_in_flight(file: &str) {
-    if let Ok(mut v) = IN_FLIGHT.lock() {
-        if !v.iter().any(|f| f == file) {
-            v.push(file.to_string());
+/// 「检查并占位」必须是一个**原子动作**，这也是它取代 `mark_in_flight` 的原因。
+///
+/// 🔴 原来的写法是先 `is_in_flight()` 再 `mark_in_flight()`，两次独立加锁，
+///    中间那条缝足够让两个同名请求双双通过 —— 于是两个 `download_inner`
+///    以 append 写同一个 `.part`，内容交叉污染、SHA 必然失败，`.part` 还会被删掉。
+///    现在锁内**先查后插**，返回值直接表达「谁抢到了这一个名额」。
+fn try_mark_in_flight(file: &str) -> bool {
+    match IN_FLIGHT.lock() {
+        Ok(mut v) => {
+            if v.iter().any(|f| f == file) {
+                false
+            } else {
+                v.push(file.to_string());
+                true
+            }
         }
+        // ‼️ 锁中毒（某个持有者 panic 过）时**保守拒绝**新下载：
+        //    放行会让两个下载器同时写同一个 `.part`，比拒绝这次下载糟糕得多。
+        Err(_) => false,
     }
 }
 
@@ -347,16 +415,24 @@ where
     P: Fn(&str, u64, u64, bool),
 {
     let file = safe_file_name(&req.file)?;
+    validate_request(&file, req)?;
     let final_path = dir.join(&file);
     let part_path = dir.join(format!("{file}{PART_SUFFIX}"));
 
-    if is_in_flight(&file) {
+    // ‼️ 顺序：**先抢占位，再谈取消**。
+    //    以前是「BUSY 检查 → take_cancel → mark_in_flight」，而 take_cancel 是读即消费 ——
+    //    用户在下载真正开始**之前**点的那次取消就被这里无声吃掉，取消从此静默失效。
+    //    现在占位失败就直接返回（标记留给真正在跑的那一轮消费），
+    //    占位成功才算「本轮已经开始」。
+    if !try_mark_in_flight(&file) {
         return Err(format!("BUSY: {file} 已在下载中"));
     }
-    let _ = take_cancel(&file);
-    mark_in_flight(&file);
     let result = download_inner(&file, &final_path, &part_path, req, progress);
     clear_in_flight(&file);
+    // ‼️ 占位释放之后再清一次取消标记：标记只对「按下它时正在跑的那一轮」有效。
+    //    不在这里清，一次「下载恰好已结束才点到的取消」会留到下一轮，
+    //    让同一文件的下一次下载刚起步就被判 CANCELLED。
+    let _ = take_cancel(&file);
     result
 }
 
@@ -400,24 +476,32 @@ where
         println!("[packs] {file}: 从断点 {offset} 字节续传");
     }
 
-    let total = if req.bytes > 0 { req.bytes } else { offset };
+    // validate_request 已保证 req.bytes > 0，进度条的分母永远是真实的清单长度
+    let total = req.bytes;
     progress(file, offset, total, true);
 
-    if offset < req.bytes || req.bytes == 0 {
+    if offset < req.bytes {
         let agent = build_agent();
         let range = format!("bytes={offset}-");
-        let resp = agent
-            .get(&req.url)
-            .header("Range", &range)
-            .call()
-            .map_err(|e| describe_ureq_error(&file, offset, e))?;
+        // ‼️ 416 必须在这里就地自愈，不能原样抛给用户：它的成因是「本地 .part 攒到的断点
+        //    已经超过服务端文件长度」，而抛出的文案却写着「请重试」—— 用户重试只会撞
+        //    同一面墙，唯一出路是手删 %APPDATA% 下的 .part。现在把它降级成
+        //    「作废 .part 后从头重下」，与「服务器忽略 Range」走完全相同的分支。
+        let resp = match agent.get(&req.url).header("Range", &range).call() {
+            Ok(r) => Some(r),
+            Err(ureq::Error::StatusCode(416)) => {
+                eprintln!("[packs] {file}: 服务器返回 416（断点 {offset} 越界），作废 .part 后从头重下");
+                None
+            }
+            Err(e) => return Err(describe_ureq_error(file, offset, e)),
+        };
 
-        let status = resp.status().as_u16();
         // 只接受 206。200 意味着服务器**忽略了 Range**，那会从头返回整个文件 ——
         // 此时若直接 append 就会把文件拼坏，必须 truncate 重来。
-        let append = match status {
-            206 => {
-                let start_ok = resp
+        // 416 已被上面降级成 None，与 200 落进同一个「作废重下」分支。
+        let append = match resp.as_ref() {
+            Some(r) if r.status().as_u16() == 206 => {
+                let start_ok = r
                     .headers()
                     .get("content-range")
                     .and_then(|v| v.to_str().ok())
@@ -434,13 +518,15 @@ where
                     }
                 }
             }
-            200 => {
+            Some(r) if r.status().as_u16() == 200 => {
                 eprintln!("[packs] {file}: 服务器忽略 Range（返回 200），作废重下");
                 false
             }
-            other => {
-                return Err(format!("HTTP_ERROR: {file} 返回 HTTP {other}"));
+            Some(r) => {
+                return Err(format!("HTTP_ERROR: {file} 返回 HTTP {}", r.status().as_u16()));
             }
+            // None = 416 已被降级，当作「Range 不可用」处理
+            None => false,
         };
 
         if !append {
@@ -466,7 +552,9 @@ where
                 &mut hasher,
                 true,
             )?;
-        } else {
+        } else if let Some(resp) = resp {
+            // `append` 为真只能来自上面的 206 分支，所以这里一定有响应；
+            // 用 if let 而不是 expect：生产代码里不留任何 panic 点。
             stream_to_part(
                 file,
                 resp.into_body().into_reader(),
@@ -482,20 +570,25 @@ where
 
     // ---- 校验 ----
     let actual_len = fs::metadata(part_path).map(|m| m.len()).unwrap_or(0);
-    let want_len = if req.bytes > 0 { req.bytes } else { actual_len };
-    if actual_len != want_len {
+    // ‼️ 期望长度直接取 req.bytes：validate_request 已保证它 > 0。
+    //    以前写成「req.bytes > 0 ? req.bytes : actual_len」，bytes 为 0 时
+    //    这个比较恒为假 —— 长度校验等于不存在，任意长度的内容都能落位。
+    if actual_len != req.bytes {
         return Err(format!(
-            "SIZE_MISMATCH: {file} 期望 {want_len} 字节，实际 {actual_len} 字节（已保留 .part 以便续传）"
+            "SIZE_MISMATCH: {file} 期望 {} 字节，实际 {actual_len} 字节（已保留 .part 以便续传）",
+            req.bytes
         ));
     }
     let digest = format!("{:x}", hasher.finalize());
-    if !req.sha256.is_empty() && !digest.eq_ignore_ascii_case(&req.sha256) {
+    // ‼️ 无条件比对：validate_request 已保证 sha256 是 64 位十六进制，
+    //    不再有「空串就跳过校验」的短路（那正是静默降级的入口）。
+    if !digest.eq_ignore_ascii_case(&req.sha256) {
         // 🔴 损坏的文件绝不能进入运行目录：删掉 .part，正式文件保持原样。
         let _ = fs::remove_file(part_path);
         return Err(format!(
             "CHECKSUM_MISMATCH: {file} SHA256 不符（期望 {}…，实际 {}…）",
-            &req.sha256[..req.sha256.len().min(12)],
-            &digest[..12]
+            shorten(&req.sha256, 12),
+            shorten(&digest, 12)
         ));
     }
 
@@ -505,7 +598,7 @@ where
         .map_err(|e| format!("IO_ERROR: 无法把 {part_path:?} 改名为 {final_path:?}: {e}"))?;
 
     progress(file, actual_len, actual_len, true);
-    println!("[packs] {file}: 下载完成并校验通过（{actual_len} 字节，sha256={})", &digest[..12]);
+    println!("[packs] {file}: 下载完成并校验通过（{actual_len} 字节，sha256={}）", shorten(&digest, 12));
     Ok(())
 }
 /// 把响应体逐块写入 `.part`，同时喂给哈希并上报进度。
@@ -536,7 +629,7 @@ where
 
     let mut buf = vec![0u8; CHUNK];
     let mut received = start_offset;
-    let total = if req.bytes > 0 { req.bytes } else { 0 };
+    let total = req.bytes;
     let mut last_emit = Instant::now();
     let mut last_bytes = received;
 
@@ -683,6 +776,14 @@ mod tests {
                         );
                         let _ = s.write_all(head.as_bytes());
                         let _ = s.write_all(tail);
+                    } else if honour_range && range_start.is_some() {
+                        // ‼️ 起点 >= 文件长度时按 RFC 7233 必须回 416。
+                        //    这条分支以前是缺失的，于是「断点越界」这条最容易出事的路径
+                        //    在单元测试里根本走不到，R6 那个永久死路也就测不出来。
+                        let head = format!(
+                            "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */{total}\r\nContent-Length: 0\r\n\r\n"
+                        );
+                        let _ = s.write_all(head.as_bytes());
                     } else {
                         // 忽略 Range：始终从头返回 200
                         let head = format!(
@@ -716,7 +817,12 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("gpg-packs-{tag}-{nanos}"));
+        // ‼️ 不用 std::env::temp_dir()：受限沙箱里子进程对 %TEMP% 只有拒绝访问（os error 5），
+        //    测试会整片假失败；crate 的 target/ 必定可写（cargo 自己就在写），也随构建一起被清掉。
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-tmp")
+            .join(format!("gpg-packs-{tag}-{nanos}"));
         fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -913,6 +1019,153 @@ mod tests {
             "Content-Range 起点应为 0，实际 {cr}"
         );
         println!("[packs] 公网 HTTPS + Range 冒烟通过：Content-Range={cr}");
+    }
+
+
+    // ---- 修复轮（R1/R3/R4/R5/R6/R7）补的回归测试 -------------------------------
+
+    /// R1：错误信息里的截断必须按**字符**走。
+    ///
+    /// 🔴 修复前写的是 &s[..s.len().min(12)]，而 s 是前端递进来的 sha256：
+    ///    非 ASCII 且第 12 个字节落在多字节字符中间就 panic；release 是 panic = "abort"
+    ///    ⇒ 应用**无提示闪退**。所以断言重点是「它不 panic」，而不是截了几个字。
+    #[test]
+    fn shorten_truncates_by_chars_and_never_panics() {
+        let hanzi = "汉字汉字汉字汉字"; // 每个汉字 3 字节，正好让第 12 字节落在字中间
+        assert_eq!(shorten(hanzi, 3), "汉字汉");
+        assert_eq!(shorten("abc", 10), "abc");
+        assert_eq!(shorten("", 12), "");
+        assert_eq!(shorten("abcdef", 0), "");
+        // 4 字节的 emoji 同样不能踩到字符中间
+        assert_eq!(shorten("🎉🎉🎉🎉🎉", 12).chars().count(), 5);
+    }
+
+    /// R5：清单里 sha256 退化成空串、bytes 退化成 0 时，必须**直接拒绝**。
+    #[test]
+    fn validate_request_rejects_degraded_manifests() {
+        let mut req = PackDownloadRequest {
+            file: "x.pmtiles".to_string(),
+            url: "http://127.0.0.1:1/x.pmtiles".to_string(),
+            sha256: "a".repeat(64),
+            bytes: 10,
+        };
+        assert!(validate_request("x.pmtiles", &req).is_ok(), "合法请求不该被拒");
+
+        req.sha256 = String::new(); // 前端拿到 null 时的形态
+        let err = validate_request("x.pmtiles", &req).unwrap_err();
+        assert!(err.starts_with("BAD_SHA256"), "空串必须被拒，实际：{err}");
+
+        req.sha256 = "abc".to_string(); // 长度不对
+        assert!(validate_request("x.pmtiles", &req).unwrap_err().starts_with("BAD_SHA256"));
+
+        req.sha256 = "z".repeat(64); // 长度对但不是十六进制
+        assert!(validate_request("x.pmtiles", &req).unwrap_err().starts_with("BAD_SHA256"));
+
+        // 多字节字符也不能让**错误路径自己** panic（错误文案里会缩略它）
+        req.sha256 = "汉字".repeat(32);
+        assert!(validate_request("x.pmtiles", &req).unwrap_err().starts_with("BAD_SHA256"));
+
+        req.sha256 = "a".repeat(64);
+        req.bytes = 0; // 修复前这会让长度校验恒真
+        let err = validate_request("x.pmtiles", &req).unwrap_err();
+        assert!(err.starts_with("BAD_BYTES"), "bytes=0 必须被拒，实际：{err}");
+    }
+
+    /// R5：非法请求必须在**发网络请求之前**被拒，且不占住 in-flight 名额。
+    #[test]
+    fn invalid_request_is_rejected_before_touching_the_network() {
+        let dir = tmp_dir("badreq");
+        // 端口 1 上没有任何服务：若实现先发请求，这里会变成 NETWORK_ERROR
+        let mut req = request("g.pmtiles", "http://127.0.0.1:1/g.pmtiles".to_string(), &[]);
+        req.bytes = 0;
+
+        let err = download_pack_to_dir(&dir, &req, &noop).expect_err("bytes=0 必须被拒");
+        assert!(err.starts_with("BAD_BYTES"), "实际：{err}");
+        assert!(!is_in_flight("g.pmtiles"), "被拒的请求不该占住 in-flight 名额");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// R4：占位必须是「检查并设置」的**原子动作** —— 同一个名字只能被抢到一次。
+    #[test]
+    fn in_flight_claim_is_check_and_set() {
+        assert!(try_mark_in_flight("claim.pmtiles"), "第一次必须抢到");
+        assert!(
+            !try_mark_in_flight("claim.pmtiles"),
+            "第二次必须抢不到，否则两个下载器会同时 append 同一个 .part"
+        );
+        clear_in_flight("claim.pmtiles");
+        assert!(try_mark_in_flight("claim.pmtiles"), "释放之后应当可以再抢");
+        clear_in_flight("claim.pmtiles");
+        assert!(!is_in_flight("claim.pmtiles"));
+    }
+
+    /// R3：提前点下的取消标记不能被「刚启动就发现重复」的那次调用吃掉。
+    ///
+    /// 语义是：占位失败（BUSY）时标记**留在原地**，交给真正在跑的那一轮消费，
+    /// 否则取消会静默失效。
+    #[test]
+    fn cancel_marker_survives_a_rejected_duplicate_start() {
+        let dir = tmp_dir("cancelmark");
+        let body = payload(1024);
+        let srv = start_server(body.clone(), true);
+        let req = request("h.pmtiles", srv.url("h.pmtiles"), &body);
+
+        // 手工占住名额，模拟「已有一轮在跑」
+        assert!(try_mark_in_flight("h.pmtiles"));
+        pack_cancel("h.pmtiles".to_string()).unwrap();
+
+        let err = download_pack_to_dir(&dir, &req, &noop).expect_err("重复启动必须被 BUSY 拒掉");
+        assert!(err.starts_with("BUSY"), "实际：{err}");
+        assert!(take_cancel("h.pmtiles"), "BUSY 路径绝不能消费掉取消标记");
+
+        clear_in_flight("h.pmtiles");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// R6：.part 的断点超过服务端文件长度时（服务端回 416），必须自愈成「作废重下」。
+    ///
+    /// 构造的是 416 唯一真实可达的场景：断点没超过**清单**长度（所以不会被提前作废），
+    /// 但超过了**服务端**实际文件长度。修复前这里直接返回 RANGE_NOT_SATISFIABLE，
+    /// 既不删 .part 也不清零断点，而文案却写着「请重试」—— 用户只能手删文件。
+    /// 本测试最终以 SIZE_MISMATCH 收场（清单与服务端本来就对不上），断言重点是
+    /// 「不再是那条死路」+「旧 .part 已被丢弃」。
+    #[test]
+    fn stale_part_beyond_server_file_is_discarded_and_redownloaded() {
+        let body = payload(100 * 1024);
+        let srv = start_server(body.clone(), true);
+        let dir = tmp_dir("range416");
+        fs::write(dir.join("e.pmtiles.part"), payload(150 * 1024)).unwrap();
+
+        let mut req = request("e.pmtiles", srv.url("e.pmtiles"), &body);
+        req.bytes = 200 * 1024; // 清单说 200 KB，服务端只有 100 KB
+
+        let err = download_pack_to_dir(&dir, &req, &noop).expect_err("长度对不上，必然失败");
+        assert!(
+            !err.starts_with("RANGE_NOT_SATISFIABLE"),
+            "416 应当被自愈成「作废 .part 后重下」，不能原样返回死路：{err}"
+        );
+        assert!(err.starts_with("SIZE_MISMATCH"), "实际错误：{err}");
+        assert_eq!(
+            fs::metadata(dir.join("e.pmtiles.part")).unwrap().len(),
+            100 * 1024,
+            "旧的 150 KB 尾巴必须已被丢弃，换成服务端返回的完整内容"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// R7：超时必须真的配到 agent 上 —— 否则「可取消」只是空头承诺：
+    /// 卡在读里时，流内的取消检查永远轮不到，spawn_blocking 线程泄漏、UI 永远 pending。
+    #[test]
+    fn agent_has_timeouts_configured() {
+        let t = build_agent().config().timeouts();
+        assert_eq!(t.connect.map(|d| d.as_secs()), Some(CONNECT_TIMEOUT_SECS));
+        assert_eq!(
+            t.recv_response.map(|d| d.as_secs()),
+            Some(RESPONSE_HEADER_TIMEOUT_SECS)
+        );
+        assert_eq!(t.recv_body.map(|d| d.as_secs()), Some(BODY_TOTAL_TIMEOUT_SECS));
+        // ‼️ global 必须保持 None：它覆盖其它所有超时，会把大包下载一刀切死
+        assert!(t.global.is_none(), "timeout_global 会覆盖所有其它超时，绝不能设");
     }
 }
 

@@ -28,6 +28,7 @@
 import argparse
 import csv
 import datetime
+import math
 import os
 import sqlite3
 import sys
@@ -147,6 +148,11 @@ def load_rows():
     """读取并清洗 CSV，返回 (行元组列表, 统计信息)。"""
     rows = []
     skipped_no_coord = 0
+    # 🔴 坐标存在但**不可用**的记录数：NaN / inf / 越界 / (0,0) 哨兵。
+    #    此前这些值直接进 SQL：`repr(nan)` 写成裸 token `nan`，
+    #    sqlite3 报 `no such column: nan`（整份导入中断）；
+    #    (0,0) 则会在几内亚湾凭空多出一座电站 —— 两者都不能静默放过。
+    skipped_bad_coord = 0
     skipped_no_id = 0
     seen_ids = set()
     duplicate_ids = []
@@ -187,6 +193,22 @@ def load_rows():
                 skipped_no_coord += 1
                 continue
 
+            # ‼️ 能转成 float 不等于可用：NaN 会把 SQL 写成裸 token（sqlite3 直接报错），
+            #    (0,0) 是上游常见的「缺失哨兵」，落到地图上就是几内亚湾的一座假电站。
+            #    口径与"没有坐标"一致 —— 按缺失处理，但要单独计数，
+            #    否则「上游开始用 NaN 填缺」这种事会完全无声。
+            if (
+                math.isnan(lat)
+                or math.isnan(lon)
+                or math.isinf(lat)
+                or math.isinf(lon)
+                or not (-90.0 <= lat <= 90.0)
+                or not (-180.0 <= lon <= 180.0)
+                or (lat == 0.0 and lon == 0.0)
+            ):
+                skipped_bad_coord += 1
+                continue
+
             try:
                 capacity = float(rec["capacity_mw"])
             except (TypeError, ValueError):
@@ -225,6 +247,7 @@ def load_rows():
         "total": total,
         "kept": len(rows),
         "skipped_no_coord": skipped_no_coord,
+        "skipped_bad_coord": skipped_bad_coord,
         "skipped_no_id": skipped_no_id,
         "duplicate_ids": duplicate_ids,
         "fuels": fuels,
@@ -240,6 +263,11 @@ def sql_literal(value):
     if value is None:
         return "NULL"
     if isinstance(value, float):
+        # ‼️ 非有限的 float 不能交给 repr()：那会写出 `nan`/`inf` 这样的裸 token，
+        #    sqlite3 把它当成列名，报 `no such column: nan`，整份导入中断。
+        #    语义上也确实是"没有值" ⇒ NULL。
+        if not math.isfinite(value):
+            return "NULL"
         return repr(value)
     # 阶段46：整数（commissioning_year）必须写成裸数字而不是 '1985'。
     # SQLite 虽然靠列亲和性也能把字符串转成整数，但那是**隐式**转换：
@@ -326,6 +354,8 @@ def main() -> None:
     log(f"CSV 总记录数 : {stats['total']}")
     log(f"可导入记录数 : {stats['kept']}")
     log(f"跳过（无坐标）: {stats['skipped_no_coord']}")
+    # 只在非 0 时高亮：正常上游不该有这一类，一旦出现就要看见
+    log(f"跳过（坐标无效）: {stats['skipped_bad_coord']}" + ("  ⚠️ 上游出现 NaN/inf/越界/(0,0) 坐标" if stats["skipped_bad_coord"] else ""))
     log(f"跳过（无 ID） : {stats['skipped_no_id']}")
     log(f"重复 ID 数    : {len(stats['duplicate_ids'])}")
     log(f"燃料类型数    : {len(stats['fuels'])}")

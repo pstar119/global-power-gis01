@@ -304,6 +304,17 @@ function main() {
    *      SHA256 对不上，用户下载必然 CHECKSUM_MISMATCH 且不明所以
    *    ⇒ 只认一个路径，从源头上消除“两份产物不一致”的可能。
    */
+  /**
+   * 缺包时打印的**生成入口**（下面的模板会再接上 `--out data/packs/gem-plants.pmtiles`）。
+   *
+   * 🔴 这里曾经引用一个**全仓从未定义过**的 `GEM_GEOJSON_HINT`：缺 GEM 包时
+   *    `ReferenceError` 崩在写清单之前，而「本机没有 gem-plants.pmtiles」恰恰是
+   *    全新克隆的常态（`data/` 被 .gitignore 忽略）—— 也就是说，门禁脚本**最该给人提示**
+   *    的那条分支上必崩，报错还指向一个与根因（缺包）无关的标识符。
+   *    ⇒ 补成真实可跑的一步（GeoJSON 由 python scripts/import_gem_plants.py 产出）。
+   */
+  const GEM_GEOJSON_HINT =
+    "node scripts/build_pmtiles.mjs --kind gem --in data/packs/gem-plants.geojson";
   const gemFile = join(ROOT, "data", "packs", "gem-plants.pmtiles");
   if (existsSync(gemFile)) {
     const buf = readFileSync(gemFile);

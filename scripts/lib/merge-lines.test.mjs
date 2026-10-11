@@ -104,6 +104,9 @@ test("合并前后总长度守恒（<0.1%，设计文档的验收口径）", () 
   const { features, stats } = mergeLines(segs);
   assert.equal(features.length, 1);
   assert.equal(features[0].properties.merged_count, 20);
+  // ‼️ 长度守恒**不足以**守住「起步定向」：定向失败时走的是「接不上就断开」分支，
+  //    长度照样守恒（只是被拆成两条链）。所以必须把 brokenChains 也钉死。
+  assert.equal(stats.brokenChains, 0, "起步定向若退化成「接不上就断」，链会被静默拆开");
   const diff = Math.abs(stats.lengthAfterKm - stats.lengthBeforeKm) / stats.lengthBeforeKm;
   assert.ok(diff < 0.001, `长度差 ${diff} 应 < 0.1%`);
 });
@@ -165,3 +168,71 @@ test("都拿不到频率时**删键**而不是写 null（否则白占体积、�
   assert.equal("frequency" in features[0].properties, false);
   assert.equal(features[0].properties.is_dc, false, "is_dc 仍然每条都有（前端分档靠它）");
 });
+
+/**
+ * ---- 起步定向（V 形拐点）的回归保护 ----
+ *
+ * 🔴 两段**在同一点起始**（V 形拐点，OSM 里很常见）时，不做定向就接不上邻居，
+ *    走链会落到「接不上就断开」分支（brokenChains++），这一组被拆成两条链。
+ *    实测这个缺陷让华东线路总长少了 **9.5%**，而渲染上完全看不出来 ——
+ *    只有 brokenChains 与长度守恒断言能守住它。
+ */
+test("V 形拐点：两段同点起步，定向后必须接成一条（brokenChains=0）", () => {
+  const { features, stats } = mergeLines([
+    line("way/1", [[0.01, 0], [0, 0]]),       // 起点在拐点 P，向西南
+    line("way/2", [[0.01, 0], [0.01, 0.01]]), // 起点也在 P，向北
+  ]);
+  assert.equal(stats.brokenChains, 0, "定向失败会走「接不上就断开」分支");
+  assert.equal(features.length, 1, "V 形两段应合并为一条");
+  const p = features[0].properties;
+  assert.equal(p.merged_count, 2);
+  assert.equal(features[0].geometry.coordinates.length, 3, "共享的拐点只出现一次");
+  assert.deepEqual(features[0].geometry.coordinates[0], [0, 0]);
+  const diff = Math.abs(stats.lengthAfterKm - stats.lengthBeforeKm) / stats.lengthBeforeKm;
+  assert.ok(diff < 0.001, `长度差 ${diff} 应 < 0.1%`);
+});
+
+/**
+ * ---- 整链属性一致性（S3）----
+ *
+ * 🔴 并查集判定的是**相邻两段**是否兼容，而兼容**不传递**：
+ *    `500kV —（电压未知）— 220kV` 两两都兼容 ⇒ 会被并成一条链；
+ *    走链时 `mergeProps(500, 220)` 返回 null，再被 `?? props` 吞掉 ⇒
+ *    输出一个**标着 500kV、里面却含着 220kV 段**的要素。
+ *    线还是线、长度也守恒，渲染上看不出任何异常 —— 只有断言能抓到。
+ */
+test("相邻兼容但整链电压冲突（500–无–220）不得合并，绝不取第一个值", () => {
+  const { features, stats } = mergeLines([
+    line("way/1", [[0, 0], [0.01, 0]], { voltage_kv: 500 }),
+    line("way/2", [[0.01, 0], [0.02, 0]], { voltage_kv: null }),
+    line("way/3", [[0.02, 0], [0.03, 0]], { voltage_kv: 220 }),
+  ]);
+  assert.equal(stats.conflictedGroups, 1, "整链冲突必须被识别出来");
+  assert.equal(stats.propConflicts, 0, "冲突组根本不该走到合并逻辑里");
+  assert.equal(features.length, 3, "冲突 ⇒ 逐段原样输出，一条都不合");
+  for (const f of features) assert.equal(f.properties.merged_count, 1);
+  const at500 = features.find((f) => f.properties.voltage_kv === 500);
+  assert.ok(at500, "500kV 的那一段仍保留自己的电压");
+  assert.equal(at500.geometry.coordinates.length, 2, "500kV 要素不得包含 220kV 的段");
+  assert.equal(
+    features.filter((f) => f.properties.voltage_kv === 220).length,
+    1,
+    "220kV 段不能被标成 500kV",
+  );
+  const diff = Math.abs(stats.lengthAfterKm - stats.lengthBeforeKm) / stats.lengthBeforeKm;
+  assert.ok(diff < 0.001, `长度差 ${diff} 应 < 0.1%（不合并也要守恒）`);
+});
+
+test("整链同电压仍然合并（一致性校验不能把正常合并也拒掉）", () => {
+  const { features, stats } = mergeLines([
+    line("way/1", [[0, 0], [0.01, 0]], { voltage_kv: 500 }),
+    line("way/2", [[0.01, 0], [0.02, 0]], { voltage_kv: 500 }),
+    line("way/3", [[0.02, 0], [0.03, 0]], { voltage_kv: 500 }),
+  ]);
+  assert.equal(stats.conflictedGroups, 0);
+  assert.equal(stats.brokenChains, 0);
+  assert.equal(features.length, 1);
+  assert.equal(features[0].properties.merged_count, 3);
+  assert.equal(features[0].properties.voltage_kv, 500);
+});
+

@@ -159,6 +159,12 @@ async function checkRemote(packs, manifest) {
   let json;
   try {
     const res = await fetch(api, {
+      /**
+       * ‼️ 没有超时的 fetch 会让整个门禁**无限挂起**：GitHub API 挂住 TCP 连接时
+       *    Node 默认不超时，CI 里表现为任务永远不结束（而不是报失败）。
+       *    120 秒与项目里其它网络调用（build_pmtiles 的下载、src/lib 的云端请求）同量级。
+       */
+      signal: AbortSignal.timeout(120_000),
       headers: {
         // GitHub API 不带 User-Agent 会直接 403，这不是可选项
         "user-agent": "global-power-gis-verify-packs",
