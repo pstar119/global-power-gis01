@@ -133,6 +133,17 @@ error: unrecognized subcommand 'F:\DSH Desktop\DSH Desktop.exe'
 
 ⇒ 节奏固定为「改代码 → `verify.mjs` → 攒够一批 → `package.mjs` 一次出包」，不要改一行打一次包。
 
+**试过但没采用的加速：换链接器为 rust-lld**。把 rust-lld 写进用户级 `C:\Users\Administrator\.cargo\config.toml`
+（刻意不进仓库，绝对路径是机器相关的）后实测「`touch src/lib.rs` + `cargo build --release`」：
+MSVC `link.exe` **130.7 s** vs rust-lld **130.1 s**（第二次已收敛、排除全量重编译干扰）——落在噪声里，收益为零，
+已回退。**不要重复这次实验**。
+
+⚠️ **改 cargo 配置（`linker` / `rustflags` / `[target]` 等）会改变 fingerprint，触发一次全量重编译**——
+实测多花约 2 分钟（`libtauri*.rlib`、各插件全被重建）。赶时间时不要顺手改 `.cargo/config.toml`。
+另外：仓库里 `src-tauri/.cargo/config.toml` 的 `--remap-path-prefix` 有一条第 3 项写的是旧路径
+`D:\Projects\global-power-gis=/app`（本项目现在在 J:），所以它**静默不生效**，release 产物里仍会嵌
+`J:\Projects\global-power-gis\...` 路径字符串。要修就得改那行（会触发全量重编译），改前先决定。
+
 ### 加依赖前先读要求（血泪）
 
 `cargo add tauri-plugin-single-instance` 看似无害，但它最新版清单写着 `tauri = "2.12"`，
