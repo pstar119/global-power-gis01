@@ -192,6 +192,20 @@ fn migrations() -> Vec<Migration> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // ‼️ 单实例插件必须**第一个**注册：它在插件初始化阶段就要抢占命名互斥体，
+        //    排在其它插件之后就晚了 —— 第二个实例可能已经把数据库连接或下载任务
+        //    建起来，「只允许一个实例」形同虚设。
+        //
+        //    第二个实例的行为：插件把它的 argv / cwd 转发给我们之后自行退出（exit 0），
+        //    这里只负责把已经开着的窗口拉回前台，让用户觉得「双击图标 = 回到那个窗口」。
+        //    窗口 label 是 tauri.conf.json 里的默认值 "main"。
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.unminimize();
+                let _ = win.show();
+                let _ = win.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(
             tauri_plugin_sql::Builder::default()

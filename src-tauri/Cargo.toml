@@ -40,6 +40,12 @@ sha2 = "0.10"
 #       的传递依赖（见 Cargo.lock），删直接依赖后它照样被编译链接。
 #       本次收益是**权限收敛**，不是体积。
 tauri-plugin-dialog = "2.7.3"
+# 阶段55：单实例 —— 第二次启动不再开新窗口，而是把已有窗口拉到前台（见 lib.rs 的 run()）。
+# 🔴 **锁死 `=2.4.0`**：2.5.x 的清单要求 `tauri = "2.12"`，一旦解析到它，cargo 会把整个
+#    tauri 栈从 2.11.5 顶到 2.12.3（Cargo.lock 87 行 version 变动，连 wry 一起换）。
+#    本轮只是修正性改动，不该夹带运行时大版本上浮；2.4.0 与 tauri 2.11.5 配套可用。
+#    等将来专门做「tauri 升级」那一轮时，再把它一起抬高。
+tauri-plugin-single-instance = "=2.4.0"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
