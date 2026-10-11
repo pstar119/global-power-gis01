@@ -49,3 +49,29 @@ Get-CimInstance Win32_Process -Filter "Name='node.exe'" |
 
 **看到它基本可以断定"进程是被杀的，不是自己崩的"**，而且不会有崩溃转储、也不会有 WER 事件记录。
 排查方向是：谁执行了 `Stop-Process` / `taskkill`，而不是去翻插件和配置。
+
+## 构建产物必须复制出项目树再运行（Low 完整性标签）
+
+`J:\Projects\global-power-gis` 整棵树被 DSH 沙箱**常驻**打了 Windows **Low 完整性强制标签**
+（mandatory label + 能力 SID 的允许 ACE）。Windows 按 **exe 文件自带的标签**决定进程的完整性级别，
+所以在这棵树里构建出来的 `src-tauri\target\release\bundle\nsis\*.exe` 与
+`src-tauri\target\release\global-power-gis.exe` 都以 **Low IL** 启动，写不进 `K:\`、`%APPDATA%`、
+`HKCU`、桌面（Medium 及以上）——实测症状：
+
+- NSIS 安装报 `无法打开要写入的文件: "K:\Global Power GIS\global-power-gis.exe"`（`File` 那一步）；
+- 直接从树里跑 release exe，应用写不了 `%APPDATA%\com.pstar119.globalpowergis\` 的数据库与 packs 目录。
+
+**规矩：构建完先导出，再从树外运行/安装。**
+
+```powershell
+& 'D:\Node,js\node.exe' scripts/export-release.mjs            # 最新 NSIS 包 → 桌面
+& 'D:\Node,js\node.exe' scripts/export-release.mjs K:\Installers
+& 'D:\Node,js\node.exe' scripts/export-release.mjs --exe       # 连 release exe 一起导出
+```
+
+复制不会带走源文件的强制标签，新文件继承目标目录的标签，所以树外那份一定是干净的
+（脚本会自己用 `icacls` 复核并打印 sha256）。
+
+标签是 DSH 沙箱按设计常驻的——它的文档写明「工作区 ACE、拒绝项与标签按设计常驻（复用缓存，
+绝不撤销）」，且**手工 `icacls` 清理会以 `ERROR_NONE_MAPPED`（1332）失败**，所以不要试图去掉它；
+要么用 DSH 自己的回收路径，要么就按上面的导出流程走。

@@ -8,6 +8,7 @@
     "build": "tsc --noEmit && tsc -p tsconfig.node.json --noEmit && vite build",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.node.json --noEmit",
     "test": "node scripts/lib/merge-lines.test.mjs",
+    "release:export": "node scripts/export-release.mjs",
     "preview": "vite preview",
     "tauri": "tauri"
   },
